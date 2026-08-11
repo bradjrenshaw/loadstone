@@ -1,0 +1,57 @@
+{
+  "manifestVersion": 1,
+  "id": "blindfold",
+  "name": "Blindfold",
+  "description": "Screen-reader accessibility for Balatro: speaks hands, jokers, the shop, and blinds, with full keyboard play for blind players.",
+  "authors": ["Bradley Renshaw"],
+  "game": "balatro",
+  "distributions": {
+    "steam": "supported"
+  },
+  "dependencies": [
+    { "id": "lovely-injector" }
+  ],
+  "channels": {
+    "stable": { "source": "release" },
+    "dev": { "source": "branch", "branch": "main" }
+  },
+  "install": [
+    {
+      "step": "extract-archive",
+      "routes": [
+        { "from": "Blindfold/**", "to": "${game.mods}/Blindfold" }
+      ]
+    },
+    {
+      "step": "expect",
+      "checks": [
+        {
+          "fileExists": "${game.mods}/Blindfold/lovely.toml",
+          "message": "The archive didn't contain the mod payload (no Blindfold/lovely.toml)."
+        }
+      ]
+    }
+  ],
+  "sourceInstall": [
+    {
+      "step": "extract-archive",
+      "routes": [
+        { "from": "src/**", "to": "${game.mods}/Blindfold" }
+      ]
+    },
+    {
+      "step": "expect",
+      "checks": [
+        {
+          "fileExists": "${game.mods}/Blindfold/lovely.toml",
+          "message": "The download didn't contain the mod payload (no src/lovely.toml)."
+        }
+      ]
+    }
+  ],
+  "userData": [
+    "${userData}/blindfold_settings.lua",
+    "${userData}/blindfold_keybinds.lua",
+    "${userData}/blindfold.log"
+  ]
+}

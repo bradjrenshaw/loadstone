@@ -1,0 +1,17 @@
+{
+  "manifestVersion": 1,
+  "kind": "game",
+  "id": "balatro",
+  "name": "Balatro",
+  "detect": {
+    "steam": { "dirName": "Balatro" },
+    "markers": ["Balatro.exe"]
+  },
+  "userData": {
+    "windows": "${appData}/Balatro",
+    "macos": "${home}/Library/Application Support/Balatro"
+  },
+  "paths": {
+    "mods": "${userData}/Mods"
+  }
+}

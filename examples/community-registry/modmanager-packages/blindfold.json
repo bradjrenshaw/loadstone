@@ -1,0 +1,5 @@
+{
+  "kind": "link",
+  "source": "github:bradjrenshaw/Blindfold",
+  "packages": ["blindfold"]
+}

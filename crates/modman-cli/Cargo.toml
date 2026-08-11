@@ -1,0 +1,16 @@
+[package]
+name = "modman-cli"
+description = "Developer CLI for the accessible mod manager package format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "modman"
+path = "src/main.rs"
+
+[dependencies]
+modman-core = { path = "../modman-core" }
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true

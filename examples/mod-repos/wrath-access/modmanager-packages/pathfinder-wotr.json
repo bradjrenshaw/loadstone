@@ -1,0 +1,18 @@
+{
+  "manifestVersion": 1,
+  "kind": "game",
+  "id": "pathfinder-wotr",
+  "name": "Pathfinder: Wrath of the Righteous",
+  "detect": {
+    "steam": { "dirName": "Pathfinder Second Adventure" },
+    "gog": {},
+    "markers": ["Wrath.exe"]
+  },
+  "userData": {
+    "windows": "${localLow}/Owlcat Games/Pathfinder Wrath Of The Righteous"
+  },
+  "paths": {
+    "dataRoot": "${userData}",
+    "modifications": "${userData}/Modifications"
+  }
+}

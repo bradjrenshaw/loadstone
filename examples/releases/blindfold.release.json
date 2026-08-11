@@ -1,0 +1,41 @@
+{
+  "manifestVersion": 1,
+  "id": "blindfold",
+  "version": "0.4.2",
+  "game": "balatro",
+  "releaseNotes": "See the GitHub release page.",
+  "artifacts": [
+    {
+      "file": "Blindfold.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "dependencies": [
+    { "id": "lovely-injector" }
+  ],
+  "distributions": {
+    "steam": "supported"
+  },
+  "install": [
+    {
+      "step": "extract-archive",
+      "routes": [
+        { "from": "Blindfold/**", "to": "${game.mods}/Blindfold" }
+      ]
+    },
+    {
+      "step": "expect",
+      "checks": [
+        {
+          "fileExists": "${game.mods}/Blindfold/lovely.toml",
+          "message": "The archive didn't contain the mod payload (no Blindfold/lovely.toml)."
+        }
+      ]
+    }
+  ],
+  "userData": [
+    "${userData}/blindfold_settings.lua",
+    "${userData}/blindfold_keybinds.lua",
+    "${userData}/blindfold.log"
+  ]
+}

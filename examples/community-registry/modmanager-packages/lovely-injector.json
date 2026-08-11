@@ -1,0 +1,40 @@
+{
+  "manifestVersion": 1,
+  "kind": "tool",
+  "id": "lovely-injector",
+  "name": "Lovely Injector",
+  "description": "A runtime Lua injector for LOVE2D games. Loads mods from the game's Mods folder.",
+  "authors": ["ethangreen-dev"],
+  "license": "MIT",
+  "source": "github:ethangreen-dev/lovely-injector",
+  "conflictPolicy": "keep-newer",
+  "pinnedRelease": {
+    "version": "0.9.0",
+    "artifacts": [
+      {
+        "file": "lovely-x86_64-pc-windows-msvc.zip",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "when": { "platform": "windows" }
+      },
+      {
+        "file": "lovely-aarch64-apple-darwin.tar.gz",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "when": { "platform": "macos", "arch": "arm64" }
+      },
+      {
+        "file": "lovely-x86_64-apple-darwin.tar.gz",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "when": { "platform": "macos", "arch": "x64" }
+      }
+    ]
+  },
+  "install": [
+    {
+      "step": "extract-archive",
+      "routes": [
+        { "from": "version.dll", "to": "${gameDir}/version.dll", "when": { "platform": "windows" } },
+        { "from": "liblovely.dylib", "to": "${gameDir}/liblovely.dylib", "when": { "platform": "macos" } }
+      ]
+    }
+  ]
+}

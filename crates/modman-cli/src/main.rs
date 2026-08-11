@@ -1,0 +1,302 @@
+//! `modman` — developer CLI for the accessible mod manager package format.
+//!
+//! Output is deliberately plain text, one finding per line, no colors or
+//! progress animations: it reads identically in a terminal and a screen reader.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
+
+use modman_core::release::{build_release_manifest, resolve_artifacts, ReleaseOptions};
+use modman_core::types::{GameManifest, ProjectManifest};
+use modman_core::validate::{validate_value, Severity, ValidationContext};
+
+#[derive(Parser)]
+#[command(
+    name = "modman",
+    version,
+    about = "Developer tools for the accessible mod manager package format"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Validate package files: project manifests, game packages, release.json, links.
+    Validate {
+        /// Files to validate, or directories of package files.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Outer-scope directories of package files (innermost first), for
+        /// checking ${game.*} tokens. The file's own directory is always the
+        /// innermost scope.
+        #[arg(long = "scope")]
+        scopes: Vec<PathBuf>,
+    },
+    /// Build release.json from a project manifest and built artifacts.
+    Package {
+        /// Path to the project manifest. Defaults to the single mod/tool/library
+        /// package file in ./modmanager-packages.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// The release version (leading "v" is fine).
+        #[arg(long)]
+        version: String,
+        /// Built artifact file(s). Overrides the manifest's "packaging" block.
+        #[arg(long = "artifact")]
+        artifacts: Vec<PathBuf>,
+        /// Where to write the release manifest.
+        #[arg(long, default_value = "release.json")]
+        out: PathBuf,
+        /// Release notes text.
+        #[arg(long, conflicts_with = "notes_file")]
+        notes: Option<String>,
+        /// Read release notes from a file.
+        #[arg(long)]
+        notes_file: Option<PathBuf>,
+        /// Outer-scope directories of package files, for checking ${game.*} tokens.
+        #[arg(long = "scope")]
+        scopes: Vec<PathBuf>,
+    },
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Command::Validate { paths, scopes } => cmd_validate(&paths, &scopes),
+        Command::Package { manifest, version, artifacts, out, notes, notes_file, scopes } => {
+            cmd_package(manifest.as_deref(), &version, &artifacts, &out, notes, notes_file, &scopes)
+        }
+    };
+    match result {
+        Ok(ok) => {
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn load_json(path: &Path) -> Result<serde_json::Value> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    // Tolerate a UTF-8 BOM, as the spec requires of clients.
+    serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .with_context(|| format!("{} is not valid JSON", path.display()))
+}
+
+/// Collect the game packages (`"kind": "game"`) from a directory of package
+/// files; non-game files are skipped silently.
+fn games_in_dir(dir: &Path) -> Result<Vec<GameManifest>> {
+    let mut games = Vec::new();
+    let entries = std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read scope directory {}", dir.display()))?;
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let doc = load_json(&path)?;
+        if doc.get("kind").and_then(serde_json::Value::as_str) != Some("game") {
+            continue;
+        }
+        let game: GameManifest = serde_json::from_value(doc)
+            .with_context(|| format!("{} is not a valid game package", path.display()))?;
+        games.push(game);
+    }
+    Ok(games)
+}
+
+/// Build the scope chain for a file: its own directory (innermost), then the
+/// given outer scopes in order. Innermost wins on id collisions.
+fn build_context(innermost: Option<&Path>, scopes: &[PathBuf]) -> Result<ValidationContext> {
+    let mut games: BTreeMap<String, GameManifest> = BTreeMap::new();
+    let mut dirs: Vec<&Path> = Vec::new();
+    if let Some(dir) = innermost {
+        dirs.push(dir);
+    }
+    dirs.extend(scopes.iter().map(PathBuf::as_path));
+    // Insert outermost first so inner scopes overwrite.
+    for dir in dirs.iter().rev() {
+        if dir.is_dir() {
+            for game in games_in_dir(dir)? {
+                games.insert(game.id.clone(), game);
+            }
+        }
+    }
+    Ok(ValidationContext { games })
+}
+
+/// Validate one document, printing findings. Returns (errors, warnings).
+fn report(label: &str, doc: &serde_json::Value, ctx: &ValidationContext) -> (usize, usize) {
+    let result = validate_value(doc, ctx);
+    let mut errors = 0;
+    let mut warnings = 0;
+    for d in &result.diagnostics {
+        let severity = match d.severity {
+            Severity::Error => {
+                errors += 1;
+                "error"
+            }
+            Severity::Warning => {
+                warnings += 1;
+                "warning"
+            }
+        };
+        if d.location.is_empty() {
+            println!("{label}: {severity}: {}", d.message);
+        } else {
+            println!("{label}: {severity} at {}: {}", d.location, d.message);
+        }
+    }
+    (errors, warnings)
+}
+
+fn cmd_validate(paths: &[PathBuf], scopes: &[PathBuf]) -> Result<bool> {
+    // Directories expand to the package files inside them.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            let mut in_dir: Vec<PathBuf> = std::fs::read_dir(path)
+                .with_context(|| format!("failed to read {}", path.display()))?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+                .collect();
+            in_dir.sort();
+            files.extend(in_dir);
+        } else {
+            files.push(path.clone());
+        }
+    }
+
+    let mut total_errors = 0;
+    let mut total_warnings = 0;
+    for path in &files {
+        let label = path.display().to_string();
+        let doc = load_json(path)?;
+        let form = modman_core::validate::detect_form(&doc);
+        let ctx = build_context(path.parent(), scopes)?;
+        let (errors, warnings) = report(&label, &doc, &ctx);
+        total_errors += errors;
+        total_warnings += warnings;
+        if errors == 0 {
+            println!("{label}: OK ({form:?}, {warnings} warning(s))");
+        }
+    }
+    println!(
+        "Checked {} file(s): {} error(s), {} warning(s).",
+        files.len(),
+        total_errors,
+        total_warnings
+    );
+    Ok(total_errors == 0)
+}
+
+/// Find the project manifest when --manifest is not given: the single
+/// mod/tool/library package file in ./modmanager-packages.
+fn discover_manifest() -> Result<PathBuf> {
+    let dir = Path::new("modmanager-packages");
+    if !dir.is_dir() {
+        bail!("no modmanager-packages directory here; pass --manifest");
+    }
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let doc = load_json(&path)?;
+        let kind = doc.get("kind").and_then(serde_json::Value::as_str).unwrap_or("mod");
+        if matches!(kind, "mod" | "tool" | "library") {
+            candidates.push(path);
+        }
+    }
+    match candidates.len() {
+        0 => bail!("no project manifest found in modmanager-packages; pass --manifest"),
+        1 => Ok(candidates.remove(0)),
+        _ => bail!(
+            "multiple project manifests in modmanager-packages ({}); pass --manifest",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_package(
+    manifest_arg: Option<&Path>,
+    version: &str,
+    artifact_paths: &[PathBuf],
+    out: &Path,
+    notes: Option<String>,
+    notes_file: Option<PathBuf>,
+    scopes: &[PathBuf],
+) -> Result<bool> {
+    let manifest_path = match manifest_arg {
+        Some(p) => p.to_path_buf(),
+        None => discover_manifest()?,
+    };
+    let manifest_path = manifest_path.as_path();
+    let doc = load_json(manifest_path)?;
+
+    // Refuse to package a manifest that doesn't validate.
+    let ctx = build_context(manifest_path.parent(), scopes)?;
+    let label = manifest_path.display().to_string();
+    let (errors, _) = report(&label, &doc, &ctx);
+    if errors > 0 {
+        bail!("{} has {} validation error(s); fix them before packaging", label, errors);
+    }
+
+    let project: ProjectManifest = serde_json::from_value(doc)
+        .with_context(|| format!("{} is not a project manifest", label))?;
+
+    let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
+    let artifacts = resolve_artifacts(&project, manifest_dir, artifact_paths);
+    for artifact in &artifacts {
+        if !artifact.path.is_file() {
+            bail!("artifact not found: {}", artifact.path.display());
+        }
+    }
+
+    let release_notes = match (notes, notes_file) {
+        (Some(text), _) => Some(text),
+        (None, Some(file)) => Some(
+            std::fs::read_to_string(&file)
+                .with_context(|| format!("failed to read {}", file.display()))?
+                .trim_end()
+                .to_string(),
+        ),
+        (None, None) => None,
+    };
+
+    let release = build_release_manifest(
+        &project,
+        &ReleaseOptions { version: version.to_string(), artifacts, release_notes },
+    )?;
+
+    let json = serde_json::to_string_pretty(&release)?;
+    std::fs::write(out, json.as_bytes() )
+        .with_context(|| format!("failed to write {}", out.display()))?;
+
+    println!("Wrote {} for {} version {}.", out.display(), release.id, release.version);
+    for artifact in &release.artifacts {
+        println!("  {}  sha256 {}", artifact.file, artifact.sha256);
+    }
+    println!("Attach {} and the artifact(s) above to the GitHub release.", out.display());
+    Ok(true)
+}

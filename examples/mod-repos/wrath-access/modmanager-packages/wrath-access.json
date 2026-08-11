@@ -1,0 +1,104 @@
+{
+  "manifestVersion": 1,
+  "id": "wrath-access",
+  "name": "Wrath Access",
+  "description": "Screen-reader accessibility for Pathfinder: Wrath of the Righteous, for blind and visually-impaired players: speaks menus, character creation, dialogue, exploration, and turn-based combat, with custom keyboard navigation.",
+  "authors": ["Bradley Renshaw"],
+  "game": "pathfinder-wotr",
+  "distributions": {
+    "steam": "supported",
+    "gog": "untested"
+  },
+  "channels": {
+    "stable": { "source": "release" },
+    "dev": { "source": "branch", "branch": "main" }
+  },
+  "install": [
+    {
+      "step": "extract-archive",
+      "routes": [
+        { "from": "WrathAccess/**", "to": "${game.modifications}/WrathAccess" },
+        { "from": "game/**", "to": "${gameDir}" }
+      ]
+    },
+    {
+      "step": "ensure-dirs",
+      "paths": [
+        "${game.modifications}/WrathAccess/Assemblies",
+        "${game.modifications}/WrathAccess/Bundles",
+        "${game.modifications}/WrathAccess/Blueprints"
+      ]
+    },
+    {
+      "step": "edit-json",
+      "file": "${game.dataRoot}/OwlcatModificationManagerSettings.json",
+      "createIfMissing": true,
+      "ops": [
+        { "op": "ensure", "path": "SourceDirectories", "value": [] },
+        { "op": "append-unique", "path": "EnabledModifications", "value": "WrathAccess" }
+      ]
+    },
+    {
+      "step": "expect",
+      "checks": [
+        {
+          "fileExists": "${game.modifications}/WrathAccess/OwlcatModificationManifest.json",
+          "message": "The archive didn't contain the mod (no WrathAccess/OwlcatModificationManifest.json)."
+        }
+      ]
+    }
+  ],
+  "sourceInstall": [
+    {
+      "step": "extract-archive",
+      "routes": [
+        { "from": "OwlcatModificationManifest.json", "to": "${game.modifications}/WrathAccess/OwlcatModificationManifest.json" },
+        { "from": "OwlcatModificationSettings.json", "to": "${game.modifications}/WrathAccess/OwlcatModificationSettings.json" },
+        { "from": "deploy/Assemblies/**", "to": "${game.modifications}/WrathAccess/Assemblies" },
+        { "from": "deploy/docs/**", "to": "${game.modifications}/WrathAccess/docs" },
+        { "from": "assets/**", "to": "${game.modifications}/WrathAccess/assets" },
+        { "from": "vendor/prism.dll", "to": "${gameDir}/prism.dll" }
+      ]
+    },
+    {
+      "step": "ensure-dirs",
+      "paths": [
+        "${game.modifications}/WrathAccess/Assemblies",
+        "${game.modifications}/WrathAccess/Bundles",
+        "${game.modifications}/WrathAccess/Blueprints"
+      ]
+    },
+    {
+      "step": "edit-json",
+      "file": "${game.dataRoot}/OwlcatModificationManagerSettings.json",
+      "createIfMissing": true,
+      "ops": [
+        { "op": "ensure", "path": "SourceDirectories", "value": [] },
+        { "op": "append-unique", "path": "EnabledModifications", "value": "WrathAccess" }
+      ]
+    },
+    {
+      "step": "expect",
+      "checks": [
+        {
+          "fileExists": "${game.modifications}/WrathAccess/Assemblies/WrathAccess.dll",
+          "message": "The download didn't contain WrathAccess.dll (deploy/Assemblies) — the repo may be mid-build."
+        }
+      ]
+    }
+  ],
+  "uninstall": [
+    {
+      "step": "edit-json",
+      "file": "${game.dataRoot}/OwlcatModificationManagerSettings.json",
+      "ops": [
+        { "op": "remove-value", "path": "EnabledModifications", "value": "WrathAccess" }
+      ]
+    }
+  ],
+  "cleanupLegacy": [
+    "${gameDir}/Tolk.dll",
+    "${gameDir}/nvdaControllerClient64.dll",
+    "${gameDir}/SAAPI64.dll"
+  ]
+}

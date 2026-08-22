@@ -9,13 +9,13 @@ installer behavior, it's noted below.
 ## Layout
 
 The directories mirror real repos (SPEC §2): every registry — including each
-mod's own repo — is a source with a `modmanager-packages/` directory.
+mod's own repo — is a source with a `loadstone-packages/` directory.
 
-- `mod-repos/<name>/modmanager-packages/` — what each mod repo carries: the
+- `mod-repos/<name>/loadstone-packages/` — what each mod repo carries: the
   mod's project manifest and the game package it targets, side by side. The
   mod's `"game"` reference resolves to the sibling game file (innermost
   scope).
-- `community-registry/modmanager-packages/` — a community registry: one
+- `community-registry/loadstone-packages/` — a community registry: one
   reviewed link file per listed mod repo (the one-time PR), plus
   `lovely-injector.json`, a tool package hosted by the registry itself with a
   `source` field naming the repo its artifacts come from.

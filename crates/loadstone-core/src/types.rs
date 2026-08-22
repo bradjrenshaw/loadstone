@@ -150,7 +150,7 @@ pub struct PinnedRelease {
     pub artifacts: Vec<ReleaseArtifact>,
 }
 
-/// A link file in a registry's `modmanager-packages/` directory: makes the
+/// A link file in a registry's `loadstone-packages/` directory: makes the
 /// linked source's packages reachable through this registry (SPEC 2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkEntry {

@@ -3,10 +3,10 @@
 **Draft 1** — `manifestVersion: 1`
 
 This document specifies the package format for Loadstone Mod Manager, a unified,
-cross-platform mod manager for game accessibility mods. The format itself is
-vendor-neutral — the `modmanager-packages/` directory name is deliberately
-generic — and is written so that any conforming client (GUI app, CLI, or a
-different frontend entirely) can consume the same packages.
+cross-platform mod manager for game accessibility mods. The `loadstone-packages/`
+directory name identifies the format on disk, but the format is open: it is
+written so that any conforming client (GUI app, CLI, or a different frontend
+entirely) can consume the same packages.
 
 Design goals, in priority order:
 
@@ -46,31 +46,31 @@ packages reachable through another.
 ## 2. Registries
 
 There is exactly one hosting concept. A **registry** is any git source
-(typically a GitHub repo) containing a `modmanager-packages/` directory. Every
+(typically a GitHub repo) containing a `loadstone-packages/` directory. Every
 file in that directory is a package file — either a **full package** (`game`,
 `mod`, `tool`, `library`) committed in place, or a **link**:
 
 ```json
-// modmanager-packages/blindfold.json in a community registry
+// loadstone-packages/blindfold.json in a community registry
 { "kind": "link", "source": "github:bradjrenshaw/Blindfold" }
 ```
 
 A link says: that source is itself a registry, and its packages are reachable
-through this one. Because a mod repo carries its own `modmanager-packages/`
+through this one. Because a mod repo carries its own `loadstone-packages/`
 directory, *the mod repo is a registry too* — one that happens to also contain
 source code. The mod's project manifest and the game package it targets live
 side by side:
 
 ```
 community-registry/
-  modmanager-packages/
+  loadstone-packages/
     blindfold.json          <- link to github:bradjrenshaw/Blindfold
     say-the-spire-2.json    <- link to github:bradjrenshaw/say-the-spire2
     lovely-injector.json    <- full tool package hosted by the registry itself
   index.json                <- generated (below)
 
 bradjrenshaw/Blindfold/     <- the mod repo, itself a registry
-  modmanager-packages/
+  loadstone-packages/
     blindfold.json          <- the mod's project manifest (§5)
     balatro.json            <- the game package it targets (§4)
   src/...
@@ -81,12 +81,12 @@ file**. Releases, game-data fixes, and new metadata never touch the central
 registry again — the author commits to their own repo and every consumer sees
 it. Registry maintainers may also host full package files directly: shared
 game packages they want to curate, or tool/library packages (like a loader)
-whose upstream project doesn't carry a `modmanager-packages/` directory of its
+whose upstream project doesn't carry a `loadstone-packages/` directory of its
 own. A full package file hosted outside the repo its artifacts come from names
 that repo in a `source` field; when `source` is absent it defaults to the
 registry repo containing the file.
 
-Within one `modmanager-packages/` directory, each package id MUST be defined
+Within one `loadstone-packages/` directory, each package id MUST be defined
 exactly once (the file's `id` field is authoritative; filenames are
 conventionally `<id>.json` but informative only). Two *links* in the same
 registry whose targets define the same id are a conflict with no resolution
@@ -100,7 +100,7 @@ adds.
 Package references — `"game": "<id>"`, dependency ids — resolve through the
 **scope chain**, innermost first:
 
-1. The `modmanager-packages/` directory of the repo the referencing file
+1. The `loadstone-packages/` directory of the repo the referencing file
    lives in.
 2. The registry through which that repo was reached (the one whose link the
    client followed), then *its* parent, and so on outward to the registry the
@@ -152,7 +152,7 @@ is trusted to the author's GitHub account, the same trust users place in the
 author today.
 
 **Indexing.** A registry SHOULD run a scheduled job that walks its
-`modmanager-packages/` directory, follows links one level, and aggregates
+`loadstone-packages/` directory, follows links one level, and aggregates
 package metadata and latest release info into an `index.json` at the repo
 root, so clients can browse and search with one fetch (and CI catches id
 collisions, §2). Install-time resolution still follows the live chain.
@@ -206,7 +206,7 @@ rejected. These are engine guarantees, not per-mod responsibilities.
 ## 4. Game packages
 
 Pure data, no releases. A game package usually lives in the mod repo's own
-`modmanager-packages/` directory next to the mod that targets it; a registry
+`loadstone-packages/` directory next to the mod that targets it; a registry
 that wants to curate shared game data hosts the file directly instead, and
 mods that omit their own copy resolve to it through the scope chain (§2.1).
 
@@ -246,7 +246,7 @@ Fixing detection for a game fixes it for every mod of that game. This also enabl
 ## 5. Project manifest
 
 The hand-written package file for a `mod`, `tool`, or `library`, living at
-`modmanager-packages/<id>.json` in its repo. It holds everything true across
+`loadstone-packages/<id>.json` in its repo. It holds everything true across
 versions and is also used verbatim when installing from a source tree (dev
 channel, linked checkout).
 
@@ -336,7 +336,7 @@ The user picks one channel per installed mod. Per-channel semantics:
 - **`branch`** — installs the branch zipball; version identity is `"<branch>@<sha>"`
   and "update available" means the stored sha is no longer the branch tip. The
   manager strips the zipball's single top-level folder, reads the project
-  manifest from the tree's `modmanager-packages/` directory, and runs its
+  manifest from the tree's `loadstone-packages/` directory, and runs its
   **`sourceInstall`** steps. Only meaningful for mods whose
   source tree contains the payload (interpreted mods, or repos that commit build
   outputs). Branch installs cannot be hash-pinned; the manager labels the channel

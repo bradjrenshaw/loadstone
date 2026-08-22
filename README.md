@@ -4,9 +4,9 @@ A unified, accessible mod manager for game accessibility mods: one signed
 manager application instead of one signed installer per mod, driven by
 declarative package manifests hosted on each mod's own GitHub releases.
 
-- **`SPEC.md`** — the package format specification (start here). The format is
-  deliberately vendor-neutral (hence the `modmanager-packages/` directory
-  name): any conforming client can consume it.
+- **`SPEC.md`** — the package format specification (start here). Packages live
+  in a `loadstone-packages/` directory; the format is open and any conforming
+  client can consume it.
 - **`examples/`** — worked manifests for Say the Spire 2, Blindfold, and
   Wrath Access, used as test fixtures.
 - **`crates/loadstone-core`** — manifest types, validation, and release
@@ -46,8 +46,8 @@ link files — the form is auto-detected; a directory validates every package
 file in it):
 
 ```
-loadstone validate modmanager-packages
-loadstone validate modmanager-packages/my-mod.json --scope path/to/registry/modmanager-packages
+loadstone validate loadstone-packages
+loadstone validate loadstone-packages/my-mod.json --scope path/to/registry/loadstone-packages
 ```
 
 A file's own directory is always the innermost scope, so a game package next
@@ -57,7 +57,7 @@ package isn't in scope, those checks are skipped with a warning.
 
 Build a `release.json` for a version from your project manifest plus built
 artifacts (with no `--manifest`, the single mod/tool/library file in
-`./modmanager-packages` is used):
+`./loadstone-packages` is used):
 
 ```
 loadstone package --version v0.5.0 --artifact dist/MyMod.zip

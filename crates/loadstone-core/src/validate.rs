@@ -44,7 +44,7 @@ pub enum PackageForm {
 }
 
 /// Extra context for cross-file checks: game packages visible from the
-/// validated file's scope chain (its own `modmanager-packages/` directory
+/// validated file's scope chain (its own `loadstone-packages/` directory
 /// innermost, then outer registries), already flattened innermost-first.
 #[derive(Default)]
 pub struct ValidationContext {
@@ -273,7 +273,7 @@ fn validate_project(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
                     diags.push(Diagnostic::warning(
                         "game",
                         format!(
-                            "game package \"{}\" not available in scope; ${{game.*}} tokens are not checked (put it in the same modmanager-packages directory or pass --scope)",
+                            "game package \"{}\" not available in scope; ${{game.*}} tokens are not checked (put it in the same loadstone-packages directory or pass --scope)",
                             manifest.game.as_deref().unwrap_or("?")
                         ),
                     ));

@@ -2,7 +2,7 @@
 //! the reference fixtures for the spec.
 //!
 //! Layout mirrors real repos: each examples/mod-repos/<name>/ is a mod repo
-//! whose modmanager-packages/ directory is the innermost scope for its own
+//! whose loadstone-packages/ directory is the innermost scope for its own
 //! files; examples/community-registry/ is a registry of links plus
 //! registry-hosted packages.
 
@@ -72,7 +72,7 @@ fn all_example_files_validate_without_errors() {
     // Each mod repo's packages validate in their own scope.
     let mod_repos = examples_dir().join("mod-repos");
     for repo in std::fs::read_dir(&mod_repos).unwrap() {
-        let packages = repo.unwrap().path().join("modmanager-packages");
+        let packages = repo.unwrap().path().join("loadstone-packages");
         let ctx = scope_of(&packages);
         for path in json_files(&packages) {
             assert_no_errors(&path, &ctx);
@@ -81,7 +81,7 @@ fn all_example_files_validate_without_errors() {
     }
 
     // The community registry validates in its own scope (links + hosted files).
-    let registry = examples_dir().join("community-registry/modmanager-packages");
+    let registry = examples_dir().join("community-registry/loadstone-packages");
     let ctx = scope_of(&registry);
     for path in json_files(&registry) {
         assert_no_errors(&path, &ctx);
@@ -90,7 +90,7 @@ fn all_example_files_validate_without_errors() {
 
     // The release manifest validates in its mod repo's scope.
     let blindfold_scope =
-        scope_of(&examples_dir().join("mod-repos/blindfold/modmanager-packages"));
+        scope_of(&examples_dir().join("mod-repos/blindfold/loadstone-packages"));
     let release = examples_dir().join("releases/blindfold.release.json");
     assert_no_errors(&release, &blindfold_scope);
     checked += 1;
@@ -102,7 +102,7 @@ fn all_example_files_validate_without_errors() {
 fn mod_without_game_in_scope_warns_but_passes() {
     // With an empty scope chain, ${game.*} checks are skipped with a warning.
     let ctx = ValidationContext::default();
-    let path = examples_dir().join("mod-repos/blindfold/modmanager-packages/blindfold.json");
+    let path = examples_dir().join("mod-repos/blindfold/loadstone-packages/blindfold.json");
     let result = validate_value(&load(&path), &ctx);
     assert!(!result.has_errors());
     assert!(result

@@ -41,7 +41,7 @@ enum Command {
     /// Build release.json from a project manifest and built artifacts.
     Package {
         /// Path to the project manifest. Defaults to the single mod/tool/library
-        /// package file in ./modmanager-packages.
+        /// package file in ./loadstone-packages.
         #[arg(long)]
         manifest: Option<PathBuf>,
         /// The release version (leading "v" is fine).
@@ -205,11 +205,11 @@ fn cmd_validate(paths: &[PathBuf], scopes: &[PathBuf]) -> Result<bool> {
 }
 
 /// Find the project manifest when --manifest is not given: the single
-/// mod/tool/library package file in ./modmanager-packages.
+/// mod/tool/library package file in ./loadstone-packages.
 fn discover_manifest() -> Result<PathBuf> {
-    let dir = Path::new("modmanager-packages");
+    let dir = Path::new("loadstone-packages");
     if !dir.is_dir() {
-        bail!("no modmanager-packages directory here; pass --manifest");
+        bail!("no loadstone-packages directory here; pass --manifest");
     }
     let mut candidates = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -224,10 +224,10 @@ fn discover_manifest() -> Result<PathBuf> {
         }
     }
     match candidates.len() {
-        0 => bail!("no project manifest found in modmanager-packages; pass --manifest"),
+        0 => bail!("no project manifest found in loadstone-packages; pass --manifest"),
         1 => Ok(candidates.remove(0)),
         _ => bail!(
-            "multiple project manifests in modmanager-packages ({}); pass --manifest",
+            "multiple project manifests in loadstone-packages ({}); pass --manifest",
             candidates
                 .iter()
                 .map(|p| p.display().to_string())

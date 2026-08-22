@@ -84,6 +84,24 @@ pub fn extract_routed(
         bail!("no extraction route applies on this platform/distribution");
     }
 
+    // A destination inside a linked development checkout must never be
+    // written through (SPEC §8: linked installs are managed externally).
+    let roots: Vec<PathBuf> = {
+        let mut r = vec![ctx.game_dir.clone(), ctx.user_data.clone()];
+        r.extend(ctx.game_paths.values().cloned());
+        r.extend(ctx.vars.values().cloned());
+        r
+    };
+    for (_, to) in &resolved {
+        if let Some(link) = crate::context::find_link_ancestor(to, &roots) {
+            bail!(
+                "{} is a link into a development checkout. Update that checkout with \
+                 git instead, or remove the link before installing.",
+                link.display()
+            );
+        }
+    }
+
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).context("failed to open archive as zip")?;
 

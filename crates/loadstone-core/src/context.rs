@@ -257,6 +257,26 @@ fn self_resolve(ctx: &InstallContext, raw: &str) -> Result<PathBuf> {
     ctx.resolve_path(raw)
 }
 
+/// Walk from `path` up toward (but not including) any of `stop_roots`,
+/// returning the first ancestor that is a symlink or junction. Writing or
+/// deleting through such a link would silently operate on a developer's
+/// checkout (deploy-script links), so callers refuse instead.
+pub fn find_link_ancestor(path: &Path, stop_roots: &[PathBuf]) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(p) = current {
+        if stop_roots.iter().any(|r| r == p) {
+            return None;
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(p) {
+            if meta.file_type().is_symlink() {
+                return Some(p.to_path_buf());
+            }
+        }
+        current = p.parent();
+    }
+    None
+}
+
 /// Resolve every token path inside a step list, returning a copy safe to
 /// store in the install state (uninstall then needs no context).
 pub fn resolve_steps(ctx: &InstallContext, steps: &[crate::types::Step]) -> Result<Vec<crate::types::Step>> {

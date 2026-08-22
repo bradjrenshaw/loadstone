@@ -188,6 +188,72 @@ fn install_update_uninstall_roundtrip() {
     assert!(store.load("balatro", "blindfold").unwrap().is_none());
 }
 
+/// The deploy-script scenario: Mods/Blindfold is a junction into a git
+/// checkout. Installing over it would write into the checkout; the engine
+/// must refuse instead. Windows-only (junction creation).
+#[cfg(windows)]
+#[test]
+fn refuses_to_install_over_linked_dev_checkout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let game_dir = tmp.path().join("game");
+    let user_data = tmp.path().join("appdata").join("Balatro");
+    let checkout = tmp.path().join("repo").join("src");
+    let mods = user_data.join("Mods");
+    std::fs::create_dir_all(&game_dir).unwrap();
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::create_dir_all(&mods).unwrap();
+    std::fs::write(checkout.join("lovely.toml"), b"[manifest]").unwrap();
+
+    // mklink /J creates a junction without elevation.
+    let link = mods.join("Blindfold");
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(&checkout)
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "junction creation failed");
+
+    let store = StateStore::open(Some(tmp.path().join("state"))).unwrap();
+    let manifest = mod_manifest();
+    let zip = make_zip(&[
+        ("Blindfold/lovely.toml", b"[manifest]"),
+        ("Blindfold/core.lua", b"-- release"),
+    ]);
+    let sha = sha256_bytes(&zip);
+    let mut ctx =
+        InstallContext::build(&game(), game_dir, Some(user_data), "steam".into()).unwrap();
+    let mut ui = SilentUi;
+    let (install_steps, uninstall_steps) = steps_of(&manifest);
+    let err = engine::install(
+        &store,
+        &mut ctx,
+        &InstallPlan {
+            manifest: &manifest,
+            game_id: "balatro".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            install_steps,
+            uninstall_steps,
+            user_data_decl: &[],
+            artifact: &zip,
+            expected_sha256: Some(&sha),
+            keep_existing: false,
+            dependent_of: None,
+        },
+        &mut ui,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("development checkout"),
+        "unexpected error: {err}"
+    );
+    // The checkout is untouched and the link still stands.
+    assert!(checkout.join("lovely.toml").exists());
+    assert!(!checkout.join("core.lua").exists());
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+}
+
 #[test]
 fn tool_refuses_uninstall_while_needed() {
     let tmp = tempfile::tempdir().unwrap();

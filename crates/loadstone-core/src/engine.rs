@@ -78,6 +78,7 @@ pub fn install(
     let prior = store.load(&plan.game_id, &plan.manifest.id)?;
     let prior_dependents = prior.as_ref().map(|p| p.dependents.clone()).unwrap_or_default();
     if let Some(prior) = &prior {
+        refuse_links_over(&prior.files, &prior.roots)?;
         ui.log(&format!(
             "Removing previously installed version {} ({} file(s)).",
             prior.version,
@@ -144,6 +145,26 @@ pub fn install(
     };
     store.save(&state)?;
     Ok(state)
+}
+
+/// Refuse to delete tracked files that now sit behind a symlink or junction:
+/// a deploy-script link means those "files" are really a developer's working
+/// copy.
+fn refuse_links_over(files: &[PathBuf], roots: &[PathBuf]) -> Result<()> {
+    let mut parents: Vec<&std::path::Path> = files.iter().filter_map(|f| f.parent()).collect();
+    parents.sort();
+    parents.dedup();
+    for parent in parents {
+        if let Some(link) = crate::context::find_link_ancestor(parent, roots) {
+            bail!(
+                "{} is a link into a development checkout; refusing to modify or \
+                 remove files through it. Remove the link first if you really \
+                 want a managed install here.",
+                link.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn roots_of(ctx: &InstallContext) -> Vec<PathBuf> {
@@ -303,6 +324,7 @@ pub fn uninstall(
         );
     }
 
+    refuse_links_over(&state.files, &state.roots)?;
     ui.log(&format!("Removing {} file(s).", state.files.len()));
     let errors = remove_tracked_files(&state.files, &state.roots);
     for e in &errors {

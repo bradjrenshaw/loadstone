@@ -6,7 +6,14 @@
 //! validation, and release-manifest building — no UI. All untrusted-input
 //! handling (parsing, extraction, verification) belongs here, not in the GUI.
 
+pub mod archive;
+pub mod context;
+pub mod detect;
+pub mod engine;
+pub mod fetch;
+pub mod jsonedit;
 pub mod release;
 pub mod tokens;
+pub mod track;
 pub mod types;
 pub mod validate;

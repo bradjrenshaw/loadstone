@@ -14,6 +14,8 @@ use loadstone_core::release::{build_release_manifest, resolve_artifacts, Release
 use loadstone_core::types::{GameManifest, ProjectManifest};
 use loadstone_core::validate::{validate_value, Severity, ValidationContext};
 
+mod manage;
+
 #[derive(Parser)]
 #[command(
     name = "loadstone",
@@ -63,6 +65,61 @@ enum Command {
         #[arg(long = "scope")]
         scopes: Vec<PathBuf>,
     },
+    /// Install a mod (and its tool dependencies) into a game.
+    Install {
+        /// Package id of the mod.
+        id: String,
+        /// Directories of package files to resolve ids from (innermost first).
+        #[arg(long = "scope", required = true)]
+        scopes: Vec<PathBuf>,
+        /// Game folder; skips auto-detection.
+        #[arg(long)]
+        game_dir: Option<PathBuf>,
+        /// Override the game's user-data folder (mainly for testing).
+        #[arg(long)]
+        user_data: Option<PathBuf>,
+        /// Override the installed-state directory (mainly for testing).
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Install from a local release.json instead of fetching from GitHub.
+        #[arg(long)]
+        local_release: Option<PathBuf>,
+        /// Artifact file for --local-release (default: named file next to it).
+        #[arg(long, requires = "local_release")]
+        local_artifact: Option<PathBuf>,
+        /// Skip dependency installation.
+        #[arg(long)]
+        no_deps: bool,
+        /// Answer prompts automatically (confirms yes, skips retryable steps).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Uninstall a previously installed package.
+    Uninstall {
+        /// Package id.
+        id: String,
+        /// Game id the package was installed for.
+        #[arg(long)]
+        game: String,
+        /// Override the installed-state directory (mainly for testing).
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Also remove saved settings/preferences without asking.
+        #[arg(long, conflicts_with = "keep_settings")]
+        purge: bool,
+        /// Keep saved settings/preferences without asking.
+        #[arg(long)]
+        keep_settings: bool,
+        /// Answer prompts automatically.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List installed packages per game.
+    List {
+        /// Override the installed-state directory (mainly for testing).
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -72,6 +129,31 @@ fn main() -> ExitCode {
         Command::Package { manifest, version, artifacts, out, notes, notes_file, scopes } => {
             cmd_package(manifest.as_deref(), &version, &artifacts, &out, notes, notes_file, &scopes)
         }
+        Command::Install {
+            id, scopes, game_dir, user_data, state_dir, local_release, local_artifact, no_deps, yes,
+        } => manage::cmd_install(&manage::InstallArgs {
+            id,
+            scopes,
+            game_dir,
+            user_data,
+            state_dir,
+            local_release,
+            local_artifact,
+            no_deps,
+            assume_yes: yes,
+        })
+        .map(|()| true),
+        Command::Uninstall { id, game, state_dir, purge, keep_settings, yes } => {
+            let purge_choice = if purge {
+                Some(true)
+            } else if keep_settings {
+                Some(false)
+            } else {
+                None
+            };
+            manage::cmd_uninstall(&id, &game, state_dir, purge_choice, yes).map(|()| true)
+        }
+        Command::List { state_dir } => manage::cmd_list(state_dir).map(|()| true),
     };
     match result {
         Ok(ok) => {
@@ -88,7 +170,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn load_json(path: &Path) -> Result<serde_json::Value> {
+pub(crate) fn load_json(path: &Path) -> Result<serde_json::Value> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     // Tolerate a UTF-8 BOM, as the spec requires of clients.

@@ -85,11 +85,35 @@ fetches it via `.../releases/latest/download/release.json`.
 CLI output is plain text, one finding per line, with no colors or progress
 animations — it reads identically in a terminal and a screen reader.
 
+## Installing mods (the engine, CLI frontend)
+
+The install engine lives in `loadstone-core` (context/detection, the step
+interpreter, hash verification, file tracking, dependency installs with
+`pinnedRelease`) and is driven from the CLI:
+
+```
+loadstone install blindfold --scope path/to/repo/loadstone-packages --scope path/to/registry/loadstone-packages
+loadstone list
+loadstone uninstall blindfold --game balatro
+```
+
+- Package ids resolve from the `--scope` directories, innermost first; the
+  game is auto-detected (Steam today) or passed with `--game-dir`.
+- Releases come from the package's `source` repo (`release.json` +
+  hash-verified artifact), or locally via `--local-release path/to/release.json`
+  for offline and pre-publish testing.
+- Tool dependencies install first (hash-pinned via `pinnedRelease`), are
+  reference-counted per game, and refuse removal while a mod still needs them.
+- Updates remove the previous version's tracked files before extracting, so
+  stale files never linger; uninstall works purely from recorded state and
+  offers to purge declared user data.
+- `--user-data`, `--state-dir`, and `--yes` support sandboxed/automated runs.
+
 ## Not yet built
 
-- The install engine in `loadstone-core` (step interpreter, detection, file
-  tracking), exposed through the CLI first.
-- The C++ wxWidgets GUI described above.
+- The C++ wxWidgets GUI described above (the engine API is its backend).
+- Branch (dev) channel installs and linked development checkouts.
+- Settings, actions, and repair surfaced through the CLI.
+- tar.gz artifact extraction (macOS/Linux tool artifacts).
 - `loadstone release` — creating/uploading the GitHub release itself (use
   `gh release create` for now).
-- `loadstone link` — linked development checkouts.

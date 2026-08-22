@@ -13,17 +13,17 @@
     "artifacts": [
       {
         "file": "lovely-x86_64-pc-windows-msvc.zip",
-        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "sha256": "40b994a055ee75e5f2aba81e7ae06f2c17460e18cc346483089921899fadd1f7",
         "when": { "platform": "windows" }
       },
       {
         "file": "lovely-aarch64-apple-darwin.tar.gz",
-        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "sha256": "1eea194047eef0a27908f50be1c646571b97917bd597afd1ea0a30feaef68948",
         "when": { "platform": "macos", "arch": "arm64" }
       },
       {
         "file": "lovely-x86_64-apple-darwin.tar.gz",
-        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "sha256": "9704a34f0606ec54e1c3566cedf0d48c8741602a91cd4bf1b37d9e544ab1b6d3",
         "when": { "platform": "macos", "arch": "x64" }
       }
     ]

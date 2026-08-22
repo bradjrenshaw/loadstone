@@ -19,7 +19,9 @@ fn examples_dir() -> PathBuf {
 fn load(path: &Path) -> serde_json::Value {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+    // Clients must tolerate a UTF-8 BOM (SPEC), so the test loader does too.
+    serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
 fn json_files(dir: &Path) -> Vec<PathBuf> {

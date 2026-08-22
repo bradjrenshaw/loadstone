@@ -1,0 +1,347 @@
+//! The install engine (SPEC §9–§10): runs step lists against an install
+//! context, tracks every write, verifies hashes, and owns uninstall.
+//!
+//! No printing and no prompting happens here — everything user-facing goes
+//! through [`EngineUi`], which the CLI implements over stdin/stdout and the
+//! GUI will implement over wx dialogs (marshalled across the cxx bridge).
+
+use std::path::PathBuf;
+
+use anyhow::{bail, Context as _, Result};
+
+use crate::archive;
+use crate::context::{resolve_steps, InstallContext};
+use crate::jsonedit;
+use crate::release::sha256_bytes;
+use crate::track::{remove_tracked_files, InstalledState, StateStore};
+use crate::types::{Kind, ProjectManifest, Step};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryChoice {
+    Retry,
+    Skip,
+    Cancel,
+}
+
+/// The engine's only channel to a human. Implementations decide how to
+/// render each call (terminal lines, wx dialogs, ...).
+pub trait EngineUi {
+    fn log(&mut self, message: &str);
+    fn progress(&mut self, percent: u32);
+    fn confirm(&mut self, message: &str) -> bool;
+    fn retry_skip_cancel(&mut self, message: &str) -> RetryChoice;
+    fn pick_directory(&mut self, prompt: &str, suggest: Option<&str>) -> Option<PathBuf>;
+}
+
+/// Everything install() needs, resolved by the caller (CLI or GUI):
+/// which steps to run, the artifact bytes, and the expected hash.
+pub struct InstallPlan<'a> {
+    pub manifest: &'a ProjectManifest,
+    pub game_id: String,
+    pub version: String,
+    pub channel: String,
+    pub install_steps: &'a [Step],
+    pub uninstall_steps: &'a [Step],
+    pub user_data_decl: &'a [String],
+    pub artifact: &'a [u8],
+    /// SHA-256 the artifact must match; None only for local/dev sources.
+    pub expected_sha256: Option<&'a str>,
+    /// Tool semantics: keep existing untracked destination files (keep-newer).
+    pub keep_existing: bool,
+    /// When this is a dependency install, the id of the package needing it.
+    pub dependent_of: Option<String>,
+}
+
+pub fn install(
+    store: &StateStore,
+    ctx: &mut InstallContext,
+    plan: &InstallPlan,
+    ui: &mut dyn EngineUi,
+) -> Result<InstalledState> {
+    // 1. Verify the artifact before anything touches disk.
+    if let Some(expected) = plan.expected_sha256 {
+        let actual = sha256_bytes(plan.artifact);
+        if !actual.eq_ignore_ascii_case(expected) {
+            bail!(
+                "artifact hash mismatch for {}: expected {expected}, got {actual}. \
+                 Refusing to install.",
+                plan.manifest.id
+            );
+        }
+        ui.log("Artifact hash verified.");
+    } else {
+        ui.log("No hash to verify for this source (local or development install).");
+    }
+
+    // 2. An older version's tracked files go first, so updates never leave
+    //    stale files behind.
+    let prior = store.load(&plan.game_id, &plan.manifest.id)?;
+    let prior_dependents = prior.as_ref().map(|p| p.dependents.clone()).unwrap_or_default();
+    if let Some(prior) = &prior {
+        ui.log(&format!(
+            "Removing previously installed version {} ({} file(s)).",
+            prior.version,
+            prior.files.len()
+        ));
+        let errors = remove_tracked_files(&prior.files, &roots_of(ctx));
+        for e in &errors {
+            ui.log(&format!("Warning: {e}"));
+        }
+        store.remove(&plan.game_id, &plan.manifest.id)?;
+    }
+
+    // 3. Run the steps, tracking every write; roll back on failure.
+    let mut written: Vec<PathBuf> = Vec::new();
+    let run = run_steps(
+        ctx,
+        plan.install_steps,
+        Some(plan.artifact),
+        plan.keep_existing,
+        &mut written,
+        ui,
+    );
+    if let Err(e) = run {
+        ui.log("Install failed; removing files written so far.");
+        let _ = remove_tracked_files(&written, &roots_of(ctx));
+        return Err(e);
+    }
+
+    // 4. Record state, with uninstall data pre-resolved so removal never
+    //    needs manifests or token resolution again.
+    let state = InstalledState {
+        id: plan.manifest.id.clone(),
+        kind: match plan.manifest.kind {
+            Kind::Tool => "tool",
+            Kind::Library => "library",
+            _ => "mod",
+        }
+        .to_string(),
+        version: plan.version.clone(),
+        channel: plan.channel.clone(),
+        game: plan.game_id.clone(),
+        files: written,
+        uninstall_steps: resolve_steps(ctx, plan.uninstall_steps)?,
+        user_data_paths: plan
+            .user_data_decl
+            .iter()
+            .map(|raw| ctx.resolve_path(raw))
+            .collect::<Result<Vec<_>>>()?,
+        dependencies: plan.manifest.dependencies.iter().map(|d| d.id.clone()).collect(),
+        dependents: match &plan.dependent_of {
+            Some(d) => {
+                let mut deps = prior_dependents;
+                if !deps.contains(d) {
+                    deps.push(d.clone());
+                }
+                deps
+            }
+            None => prior_dependents,
+        },
+        roots: roots_of(ctx),
+        game_dir: ctx.game_dir.clone(),
+        user_data: ctx.user_data.clone(),
+        distribution: ctx.distribution.clone(),
+    };
+    store.save(&state)?;
+    Ok(state)
+}
+
+fn roots_of(ctx: &InstallContext) -> Vec<PathBuf> {
+    let mut roots = vec![ctx.game_dir.clone(), ctx.user_data.clone()];
+    roots.extend(ctx.game_paths.values().cloned());
+    roots
+}
+
+/// Execute one step list. `artifact` feeds extract-archive; `written`
+/// accumulates every file created.
+pub fn run_steps(
+    ctx: &mut InstallContext,
+    steps: &[Step],
+    artifact: Option<&[u8]>,
+    keep_existing: bool,
+    written: &mut Vec<PathBuf>,
+    ui: &mut dyn EngineUi,
+) -> Result<()> {
+    'steps: for step in steps {
+        // Conditional skip.
+        if let Some(cond) = &step.common().when {
+            if !ctx.condition_matches(cond)? {
+                continue;
+            }
+        }
+        // Retryable precondition.
+        if let Some(req) = &step.common().requires {
+            loop {
+                if ctx.glob_exists(&req.file_exists)?.is_some() {
+                    break;
+                }
+                let message = req
+                    .on_missing
+                    .clone()
+                    .unwrap_or_else(|| format!("Required file not found: {}", req.file_exists));
+                if !req.retryable {
+                    bail!("{message}");
+                }
+                match ui.retry_skip_cancel(&message) {
+                    RetryChoice::Retry => continue,
+                    RetryChoice::Skip => {
+                        ui.log(&format!("Skipped step {}.", step.name()));
+                        continue 'steps;
+                    }
+                    RetryChoice::Cancel => bail!("cancelled at step {}", step.name()),
+                }
+            }
+        }
+
+        match step {
+            Step::ExtractArchive { routes, .. } => {
+                let data = artifact.context("extract-archive step but no artifact available")?;
+                ui.log("Extracting files...");
+                let outcome = archive::extract_routed(ctx, data, routes, keep_existing)?;
+                ui.log(&format!("Placed {} file(s).", outcome.written.len()));
+                for kept in &outcome.kept_existing {
+                    ui.log(&format!(
+                        "Kept existing {} (not overwritten; it may be newer).",
+                        kept.display()
+                    ));
+                }
+                written.extend(outcome.written);
+            }
+            Step::CopyFiles { from, to, .. } => {
+                let sources = ctx.glob_matches(from)?;
+                if sources.is_empty() {
+                    bail!("copy-files: nothing matches {from}");
+                }
+                let wildcard = from.contains('*') || from.contains('?');
+                for src in sources {
+                    let dest = if wildcard {
+                        let dir = ctx.resolve_path(to)?;
+                        dir.join(src.file_name().context("source has no file name")?)
+                    } else {
+                        ctx.resolve_path(to)?
+                    };
+                    ctx.check_write_allowed(&dest)?;
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::copy(&src, &dest).with_context(|| {
+                        format!("failed to copy {} to {}", src.display(), dest.display())
+                    })?;
+                    written.push(dest);
+                }
+            }
+            Step::EnsureDirs { paths, .. } => {
+                for raw in paths {
+                    let dir = ctx.resolve_path(raw)?;
+                    ctx.check_write_allowed(&dir)?;
+                    std::fs::create_dir_all(&dir)
+                        .with_context(|| format!("failed to create {}", dir.display()))?;
+                }
+            }
+            Step::EditJson { file, create_if_missing, ops, .. } => {
+                let matches = ctx.glob_matches(file)?;
+                if matches.is_empty() {
+                    let has_wildcard = file.contains('*') || file.contains('?');
+                    if *create_if_missing && !has_wildcard {
+                        let path = ctx.resolve_path(file)?;
+                        ctx.check_write_allowed(&path)?;
+                        jsonedit::apply_ops(&path, true, ops)?;
+                        ui.log(&format!("Created and updated {}.", path.display()));
+                    } else {
+                        bail!("edit-json: no file matches {file}");
+                    }
+                } else {
+                    for path in matches {
+                        ctx.check_write_allowed(&path)?;
+                        jsonedit::apply_ops(&path, *create_if_missing, ops)?;
+                        ui.log(&format!("Updated {}.", path.display()));
+                    }
+                }
+            }
+            Step::DeleteFiles { paths, .. } => {
+                for raw in paths {
+                    for path in ctx.glob_matches(raw)? {
+                        if path.is_file() {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+            Step::PickDirectory { id, prompt, suggest, .. } => {
+                match ui.pick_directory(prompt, suggest.as_deref()) {
+                    Some(dir) => {
+                        ctx.vars.insert(id.clone(), dir);
+                    }
+                    None => bail!("cancelled: no directory chosen for \"{prompt}\""),
+                }
+            }
+            Step::Expect { checks, .. } => {
+                for check in checks {
+                    if ctx.glob_exists(&check.file_exists)?.is_none() {
+                        bail!("{}", check.message);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Uninstall from recorded state alone: tracked files, then the pre-resolved
+/// uninstall steps, then (optionally) the user-data purge.
+pub fn uninstall(
+    store: &StateStore,
+    state: &InstalledState,
+    purge_user_data: Option<bool>,
+    ui: &mut dyn EngineUi,
+) -> Result<()> {
+    if state.kind == "tool" && !state.dependents.is_empty() {
+        bail!(
+            "{} is still needed by: {}. Uninstall those first.",
+            state.id,
+            state.dependents.join(", ")
+        );
+    }
+
+    ui.log(&format!("Removing {} file(s).", state.files.len()));
+    let errors = remove_tracked_files(&state.files, &state.roots);
+    for e in &errors {
+        ui.log(&format!("Warning: {e}"));
+    }
+
+    if !state.uninstall_steps.is_empty() {
+        // Steps were pre-resolved at install time; rebuild a minimal context.
+        let mut ctx = InstallContext {
+            platform: crate::context::current_platform().to_string(),
+            arch: crate::context::current_arch().to_string(),
+            distribution: state.distribution.clone(),
+            game_dir: state.game_dir.clone(),
+            user_data: state.user_data.clone(),
+            game_paths: Default::default(),
+            vars: Default::default(),
+        };
+        let mut scratch = Vec::new();
+        run_steps(&mut ctx, &state.uninstall_steps, None, false, &mut scratch, ui)?;
+    }
+
+    if !state.user_data_paths.is_empty() {
+        let purge = match purge_user_data {
+            Some(v) => v,
+            None => ui.confirm("Also remove saved settings and preferences?"),
+        };
+        if purge {
+            for path in &state.user_data_paths {
+                if path.is_file() {
+                    let _ = std::fs::remove_file(path);
+                } else if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+            ui.log("Removed saved settings.");
+        }
+    }
+
+    store.remove(&state.game, &state.id)?;
+    ui.log(&format!("{} uninstalled.", state.id));
+    Ok(())
+}

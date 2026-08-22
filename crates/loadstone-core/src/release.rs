@@ -102,14 +102,18 @@ pub fn normalize_version(version: &str) -> Result<String> {
 
 pub fn sha256_file(path: &Path) -> Result<String> {
     let data = fs::read(path)?;
+    Ok(sha256_bytes(&data))
+}
+
+pub fn sha256_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&data);
+    hasher.update(data);
     let digest = hasher.finalize();
     let mut out = String::with_capacity(64);
     for byte in digest {
         out.push_str(&format!("{byte:02x}"));
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]

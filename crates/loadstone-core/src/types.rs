@@ -66,7 +66,7 @@ pub struct ProjectManifest {
     /// Tools only: how an existing copy installed outside the manager is treated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_policy: Option<String>,
-    /// Dev-only block consumed by `modman package`; never emitted into release.json.
+    /// Dev-only block consumed by `loadstone package`; never emitted into release.json.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packaging: Option<Packaging>,
 }
@@ -432,7 +432,7 @@ pub struct Action {
     pub steps: Vec<Step>,
 }
 
-/// Dev-only packaging configuration read by `modman package`.
+/// Dev-only packaging configuration read by `loadstone package`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Packaging {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use modman_core::types::GameManifest;
-use modman_core::validate::{validate_value, Severity, ValidationContext};
+use loadstone_core::types::GameManifest;
+use loadstone_core::validate::{validate_value, Severity, ValidationContext};
 
 fn examples_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples")

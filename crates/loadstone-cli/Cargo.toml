@@ -1,16 +1,16 @@
 [package]
-name = "modman-cli"
-description = "Developer CLI for the accessible mod manager package format"
+name = "loadstone-cli"
+description = "Loadstone Mod Manager developer CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "modman"
+name = "loadstone"
 path = "src/main.rs"
 
 [dependencies]
-modman-core = { path = "../modman-core" }
+loadstone-core = { path = "../loadstone-core" }
 serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true

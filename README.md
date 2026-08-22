@@ -1,15 +1,36 @@
-# modmanager
+# Loadstone Mod Manager
 
 A unified, accessible mod manager for game accessibility mods: one signed
 manager application instead of one signed installer per mod, driven by
 declarative package manifests hosted on each mod's own GitHub releases.
 
-- **`SPEC.md`** — the package format specification (start here).
+- **`SPEC.md`** — the package format specification (start here). The format is
+  deliberately vendor-neutral (hence the `modmanager-packages/` directory
+  name): any conforming client can consume it.
 - **`examples/`** — worked manifests for Say the Spire 2, Blindfold, and
   Wrath Access, used as test fixtures.
-- **`crates/modman-core`** — manifest types, validation, and release building.
-  Shared by the CLI and, later, the manager application. No UI, no network.
-- **`crates/modman-cli`** — the `modman` developer CLI.
+- **`crates/loadstone-core`** — manifest types, validation, and release
+  building. Shared by the CLI and the manager application. No UI.
+- **`crates/loadstone-cli`** — the `loadstone` developer CLI.
+
+## Architecture
+
+The end-user application is a thin C++ wxWidgets GUI over the Rust core:
+
+- **`loadstone-core` (Rust)** owns everything that touches untrusted input —
+  manifest parsing and validation, registry fetching, downloads, SHA-256
+  verification, archive extraction with traversal rejection, the install step
+  engine, and file tracking. It compiles as a static library.
+- **The GUI (C++ + wxWidgets, planned)** links that static library over a
+  [`cxx`](https://cxx.rs) bridge and owns only widget construction, dialogs,
+  and screen-reader polish. The boundary is coarse and message-shaped: the
+  GUI asks for page models as JSON and receives progress events via a
+  callback marshalled onto the GUI thread. Everything ships as one statically
+  linked, signed executable per platform.
+
+wxWidgets' native Windows controls are the most battle-tested screen-reader
+surface available (NVDA's own GUI is wx-based); keeping the memory-unsafe
+language confined to widget glue is the point of the split.
 
 ## Developer CLI
 
@@ -25,8 +46,8 @@ link files — the form is auto-detected; a directory validates every package
 file in it):
 
 ```
-modman validate modmanager-packages
-modman validate modmanager-packages/my-mod.json --scope path/to/registry/modmanager-packages
+loadstone validate modmanager-packages
+loadstone validate modmanager-packages/my-mod.json --scope path/to/registry/modmanager-packages
 ```
 
 A file's own directory is always the innermost scope, so a game package next
@@ -39,13 +60,13 @@ artifacts (with no `--manifest`, the single mod/tool/library file in
 `./modmanager-packages` is used):
 
 ```
-modman package --version v0.5.0 --artifact dist/MyMod.zip
-modman package --version v0.5.0 --notes-file changes-latest.md
+loadstone package --version v0.5.0 --artifact dist/MyMod.zip
+loadstone package --version v0.5.0 --notes-file changes-latest.md
 ```
 
 Artifacts can come from the command line (`--artifact`, repeatable) or from a
 dev-only `packaging` block in the project manifest, which also lets artifacts
-carry platform/store constraints:
+carry platform/distribution constraints:
 
 ```json
 "packaging": {
@@ -56,7 +77,7 @@ carry platform/store constraints:
 }
 ```
 
-`modman package` validates the manifest first and refuses to package on
+`loadstone package` validates the manifest first and refuses to package on
 errors, hashes each artifact with SHA-256, and writes a self-contained
 `release.json`. Attach it and the artifacts to the GitHub release; the manager
 fetches it via `.../releases/latest/download/release.json`.
@@ -66,8 +87,9 @@ animations — it reads identically in a terminal and a screen reader.
 
 ## Not yet built
 
-- `modman release` — creating/uploading the GitHub release itself (use
+- The install engine in `loadstone-core` (step interpreter, detection, file
+  tracking), exposed through the CLI first.
+- The C++ wxWidgets GUI described above.
+- `loadstone release` — creating/uploading the GitHub release itself (use
   `gh release create` for now).
-- `modman link` — linked development checkouts.
-- The manager application (install engine + accessible GUI) consuming
-  `modman-core`.
+- `loadstone link` — linked development checkouts.

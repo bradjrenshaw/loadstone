@@ -1,10 +1,12 @@
-# Accessible Mod Manager — Package & Manifest Specification
+# Loadstone Mod Manager — Package & Manifest Specification
 
 **Draft 1** — `manifestVersion: 1`
 
-This document specifies the package format for a unified, cross-platform mod manager
-for game accessibility mods. It is written so that any conforming client (GUI app,
-CLI, or a different frontend entirely) can consume the same packages.
+This document specifies the package format for Loadstone Mod Manager, a unified,
+cross-platform mod manager for game accessibility mods. The format itself is
+vendor-neutral — the `modmanager-packages/` directory name is deliberately
+generic — and is written so that any conforming client (GUI app, CLI, or a
+different frontend entirely) can consume the same packages.
 
 Design goals, in priority order:
 

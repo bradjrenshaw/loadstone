@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/modman-core", "crates/modman-cli"]
+members = ["crates/loadstone-core", "crates/loadstone-cli"]
 
 [workspace.package]
 version = "0.1.0"

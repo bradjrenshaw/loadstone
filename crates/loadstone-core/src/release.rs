@@ -65,7 +65,7 @@ pub fn build_release_manifest(
     })
 }
 
-/// Resolve the artifact list for `modman package`: explicit CLI paths win;
+/// Resolve the artifact list for `loadstone package`: explicit CLI paths win;
 /// otherwise the manifest's `packaging.artifacts`, relative to the manifest dir.
 pub fn resolve_artifacts(
     project: &ProjectManifest,

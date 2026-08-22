@@ -1,6 +1,6 @@
 [package]
-name = "modman-core"
-description = "Manifest types, validation, and release building for the accessible mod manager package format"
+name = "loadstone-core"
+description = "Loadstone Mod Manager core: manifest types, validation, and release building"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

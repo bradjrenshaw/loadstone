@@ -1,4 +1,4 @@
-//! `modman` — developer CLI for the accessible mod manager package format.
+//! `loadstone` — developer CLI for the Loadstone Mod Manager package format.
 //!
 //! Output is deliberately plain text, one finding per line, no colors or
 //! progress animations: it reads identically in a terminal and a screen reader.
@@ -10,15 +10,15 @@ use std::process::ExitCode;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use modman_core::release::{build_release_manifest, resolve_artifacts, ReleaseOptions};
-use modman_core::types::{GameManifest, ProjectManifest};
-use modman_core::validate::{validate_value, Severity, ValidationContext};
+use loadstone_core::release::{build_release_manifest, resolve_artifacts, ReleaseOptions};
+use loadstone_core::types::{GameManifest, ProjectManifest};
+use loadstone_core::validate::{validate_value, Severity, ValidationContext};
 
 #[derive(Parser)]
 #[command(
-    name = "modman",
+    name = "loadstone",
     version,
-    about = "Developer tools for the accessible mod manager package format"
+    about = "Loadstone Mod Manager developer tools"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -186,7 +186,7 @@ fn cmd_validate(paths: &[PathBuf], scopes: &[PathBuf]) -> Result<bool> {
     for path in &files {
         let label = path.display().to_string();
         let doc = load_json(path)?;
-        let form = modman_core::validate::detect_form(&doc);
+        let form = loadstone_core::validate::detect_form(&doc);
         let ctx = build_context(path.parent(), scopes)?;
         let (errors, warnings) = report(&label, &doc, &ctx);
         total_errors += errors;

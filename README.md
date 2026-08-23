@@ -158,9 +158,34 @@ at startup (first match wins):
   ship the full manager, a registry-pinned manager, or a single-mod
   installer, all from this one open-source codebase.
 
+## Building the GUI shell
+
+`crates/loadstone-bridge` exposes the core to C++ over [cxx](https://cxx.rs)
+as a staticlib; `app/` is the wxWidgets shell. One-time setup: build static
+wxWidgets (3.2.x) with the same MSVC toolchain, e.g. into `C:/dev/wx-static`.
+Then, from a Visual Studio developer environment:
+
+```
+cmake -S app -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:/dev/wx-static
+cmake --build build
+```
+
+`build/loadstone-manager.exe` is a single statically linked binary (the VC
+runtime is currently dynamic; release builds will pin it). It resolves its
+distribution profile exactly like the CLI — embedded, then a `loadstone.json`
+sidecar, then the manager default — and a headless smoke mode
+(`LOADSTONE_SMOKE_OUT=<file>`) prints what the bridge returned for CI.
+
+Known toolchain note: very new MSVC releases (VS 18 preview era) can throw
+nondeterministic internal compiler errors building wxWidgets at high
+parallelism; building wx with `-- -j 4` and retrying gets past it.
+
 ## Not yet built
 
-- The C++ wxWidgets GUI described above (the engine API is its backend).
+- The real manager/mod-page UI in the wx shell (currently a walking skeleton:
+  window title from the profile, installed list from state, core version).
+- Bridge operations for install/uninstall/update with progress events
+  marshalled to the GUI thread.
 - `loadstone link` for development checkouts (the engine already refuses to
   write through them), and `repair`.
 - tar.gz artifact extraction (macOS/Linux tool artifacts).

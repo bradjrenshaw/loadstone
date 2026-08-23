@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/loadstone-core", "crates/loadstone-cli"]
+members = ["crates/loadstone-core", "crates/loadstone-cli", "crates/loadstone-bridge"]
 
 [workspace.package]
 version = "0.1.0"

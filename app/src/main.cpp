@@ -34,6 +34,12 @@
 #include "rust/cxx.h"
 #include "loadstone-bridge/src/lib.rs.h"
 
+// ENCODING RULE: narrow ("...") string literals must stay pure ASCII.
+// wxString converts char* through the ANSI code page, not UTF-8, so a
+// UTF-8 em dash in a literal renders as mojibake. Text from Rust always
+// goes through FromRust (explicit UTF-8); anything else non-ASCII needs
+// a wide L"..." literal or wxString::FromUTF8.
+
 // The compile-time distribution profile. "null" = resolve at runtime
 // (loadstone.json sidecar, else the default manager profile). Branded
 // installer builds will inject real JSON here.
@@ -124,7 +130,7 @@ void LoadstoneFrame::BuildCatalogPanel() {
 
     auto* heading = new wxStaticText(
         catalogPanel_, wxID_ANY,
-        wxString::Format("%s — core %s", FromRust(profile_.title), coreVersion_));
+        wxString::Format("%s (core %s)", FromRust(profile_.title), coreVersion_));
     sizer->Add(heading, 0, wxALL, 8);
 
     auto* listLabel = new wxStaticText(catalogPanel_, wxID_ANY, "&Mods:");
@@ -194,9 +200,9 @@ void LoadstoneFrame::OnCatalog(const loadstone::Catalog& catalog) {
     for (const auto& e : catalog.entries) {
         entryIds_.push_back(FromRust(e.id));
         wxString line =
-            wxString::Format("%s — %s", FromRust(e.name), FromRust(e.status));
+            wxString::Format("%s, %s", FromRust(e.name), FromRust(e.status));
         wxString summary = FromRust(e.summary);
-        if (!summary.empty()) line += " — " + summary;
+        if (!summary.empty()) line += ", " + summary;
         modList_->Append(line);
     }
     bool any = !entryIds_.empty();
@@ -451,7 +457,7 @@ void LoadstoneFrame::ShowNotYet(const wxString& what) {
     wxMessageBox(
         wxString::Format(
             "%s from this app arrives in the next build.\n\n"
-            "Until then, the loadstone command-line tool can do it — for "
+            "Until then, the loadstone command-line tool can do it, for "
             "example: loadstone install %s",
             what, pageModId_),
         "Coming soon", wxOK | wxICON_INFORMATION, this);
@@ -502,7 +508,7 @@ bool LoadstoneApp::OnInit() {
                 auto catalog = loadstone::fetch_catalog(kEmbeddedProfile, "");
                 out << "catalog: " << catalog.entries.size() << "\n";
                 for (const auto& e : catalog.entries)
-                    out << "catalog-entry: " << std::string(e.id) << " — "
+                    out << "catalog-entry: " << std::string(e.id) << " | "
                         << std::string(e.status) << "\n";
                 for (const auto& n : catalog.notes)
                     out << "catalog-note: " << std::string(n) << "\n";

@@ -112,8 +112,10 @@ fn fetch_packages_zipball(source: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let mut last_err = None;
     for git_ref in ["HEAD", "refs/heads/main", "refs/heads/master"] {
         let url = format!("https://github.com/{owner}/{repo}/archive/{git_ref}.zip");
-        match fetch::download(&url, |_| {}) {
-            Ok(bytes) => return extract_packages(&bytes),
+        // GitHub sometimes answers a bad ref with an HTML page and HTTP 200
+        // instead of a 404, so a non-zip payload also advances the fallback.
+        match fetch::download(&url, |_| {}).and_then(|bytes| extract_packages(&bytes)) {
+            Ok(files) => return Ok(files),
             Err(e) => last_err = Some(e),
         }
     }

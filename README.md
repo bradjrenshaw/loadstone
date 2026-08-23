@@ -175,9 +175,13 @@ runtime is currently dynamic; release builds will pin it). It resolves its
 distribution profile exactly like the CLI — embedded, then a `loadstone.json`
 sidecar, then the manager default. Manager mode shows the catalog (everything
 visible through the profile's registries, merged with installed state) and a
-per-mod page: status, working Install/Update/Uninstall, a live settings form
-(changes validate in Rust and write to the mod's own storage file), and
-declared action buttons. A single-mod profile opens straight to that mod's
+per-mod page laid out like the per-mod installers it replaces: a status line
+("Ready to install version X.", "Update available: X to Y."), a game-directory
+row with an editable path and Browse button (auto-detected, overridable before
+install), an always-present activity log, and a bottom button row where the
+primary button reads Install or Update per state, next to Uninstall and the
+mod's declared actions. Settings render as a live form (changes validate in
+Rust and write to the mod's own storage file). A single-mod profile opens straight to that mod's
 page — the standalone-installer shape. All models cross the cxx bridge as
 typed structs; the C++ never parses anything.
 

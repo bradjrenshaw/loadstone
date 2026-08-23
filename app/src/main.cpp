@@ -99,7 +99,6 @@ private:
     // Operations.
     void RunOperation(OpKind kind, const wxString& actionId = wxString());
     void OnOpDone(const std::string& result, const std::string& error);
-    void EnsureOpLog();
 
     // The settings form writes through the bridge as controls change.
     // Returns false (and shows the error) when the value was rejected.
@@ -124,6 +123,7 @@ private:
     wxString pageChannel_;
     // Interactive page controls, disabled while an operation runs.
     std::vector<wxWindow*> pageControls_;
+    wxTextCtrl* gameDirCtrl_ = nullptr;
     wxTextCtrl* opLog_ = nullptr;
 
     bool fetchInFlight_ = false;
@@ -403,6 +403,7 @@ void LoadstoneFrame::GoBack() {
     pagePanel_->Destroy();
     pagePanel_ = nullptr;
     opLog_ = nullptr;
+    gameDirCtrl_ = nullptr;
     pageControls_.clear();
     catalogPanel_->Show();
     Layout();
@@ -418,6 +419,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
         pagePanel_ = nullptr;
     }
     opLog_ = nullptr;
+    gameDirCtrl_ = nullptr;
     pageControls_.clear();
     pageModId_ = FromRust(page.id);
     pageGame_ = FromRust(page.installed_game);
@@ -441,34 +443,49 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
     heading->SetFont(heading->GetFont().MakeBold().Scaled(1.2f));
     sizer->Add(heading, 0, wxALL, 8);
 
-    wxString statusText = FromRust(page.status);
-    wxString latest = FromRust(page.latest_version);
-    if (!latest.empty()) statusText += ". Latest release: " + latest;
-    auto* status = new wxStaticText(pagePanel_, wxID_ANY, statusText);
+    auto* status = new wxStaticText(pagePanel_, wxID_ANY, FromRust(page.status));
     sizer->Add(status, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+
+    // Game directory row: label, editable path, Browse — the shape every
+    // per-mod installer used, so the folder is visible and overridable
+    // before installing.
+    wxString gameName = FromRust(page.game_name);
+    wxString dirLabelText =
+        gameName.empty() ? wxString("&Game directory:")
+                         : wxString::Format("&%s directory:", gameName);
+    auto* dirRow = new wxBoxSizer(wxHORIZONTAL);
+    dirRow->Add(new wxStaticText(pagePanel_, wxID_ANY, dirLabelText), 0,
+                wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+    gameDirCtrl_ = new wxTextCtrl(pagePanel_, wxID_ANY, FromRust(page.game_dir));
+    // Installed: the folder is fixed in state; show it read-only.
+    gameDirCtrl_->Enable(!page.can_uninstall);
+    dirRow->Add(gameDirCtrl_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+    auto* browse = new wxButton(pagePanel_, wxID_ANY, "Bro&wse...");
+    browse->Enable(!page.can_uninstall);
+    browse->Bind(wxEVT_BUTTON, [this, gameName](wxCommandEvent&) {
+        wxString prompt = gameName.empty()
+                              ? wxString("Select the game folder")
+                              : wxString::Format("Select the %s folder", gameName);
+        wxDirDialog dlg(this, prompt, gameDirCtrl_->GetValue(),
+                        wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+        if (dlg.ShowModal() == wxID_OK) gameDirCtrl_->SetValue(dlg.GetPath());
+    });
+    dirRow->Add(browse, 0);
+    if (!page.can_uninstall) {
+        pageControls_.push_back(gameDirCtrl_);
+        pageControls_.push_back(browse);
+    }
+    sizer->Add(dirRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
 
     wxString description = FromRust(page.description);
     if (!description.empty()) {
         auto* descLabel = new wxStaticText(pagePanel_, wxID_ANY, "Description:");
         sizer->Add(descLabel, 0, wxLEFT | wxRIGHT, 8);
         auto* desc = new wxTextCtrl(pagePanel_, wxID_ANY, description,
-                                    wxDefaultPosition, wxSize(-1, 90),
+                                    wxDefaultPosition, wxSize(-1, 70),
                                     wxTE_MULTILINE | wxTE_READONLY | wxTE_BESTWRAP);
         sizer->Add(desc, 0, wxEXPAND | wxALL, 8);
     }
-
-    auto* ops = new wxBoxSizer(wxHORIZONTAL);
-    auto addOp = [&](const wxString& label, bool enabled, OpKind kind) {
-        auto* b = new wxButton(pagePanel_, wxID_ANY, label);
-        b->Enable(enabled);
-        b->Bind(wxEVT_BUTTON, [this, kind](wxCommandEvent&) { RunOperation(kind); });
-        if (enabled) pageControls_.push_back(b);
-        ops->Add(b, 0, wxRIGHT, 8);
-    };
-    addOp("&Install", page.can_install, OpKind::Install);
-    addOp("&Update", page.can_update, OpKind::Update);
-    addOp("U&ninstall", page.can_uninstall, OpKind::Uninstall);
-    sizer->Add(ops, 0, wxALL, 8);
 
     if (!page.settings.empty()) {
         auto* box = new wxStaticBoxSizer(wxVERTICAL, pagePanel_, "Settings");
@@ -548,29 +565,52 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
         sizer->Add(box, 0, wxEXPAND | wxALL, 8);
     }
 
-    if (!page.actions.empty()) {
-        auto* box = new wxStaticBoxSizer(wxVERTICAL, pagePanel_, "Actions");
-        wxWindow* parent = box->GetStaticBox();
-        for (const auto& a : page.actions) {
-            auto* b = new wxButton(parent, wxID_ANY, FromRust(a.label));
-            b->Enable(page.actions_available);
-            wxString describe = FromRust(a.description);
-            if (!describe.empty()) b->SetToolTip(describe);
-            wxString actionId = FromRust(a.id);
-            b->Bind(wxEVT_BUTTON, [this, actionId](wxCommandEvent&) {
-                RunOperation(OpKind::Action, actionId);
-            });
-            if (page.actions_available) pageControls_.push_back(b);
-            box->Add(b, 0, wxALL, 6);
-        }
-        sizer->Add(box, 0, wxEXPAND | wxALL, 8);
-    }
-
     for (const auto& n : page.notes) {
         auto* note = new wxStaticText(pagePanel_, wxID_ANY, FromRust(n));
         note->Wrap(640);
         sizer->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
     }
+
+    // Activity log, always present so operations narrate into a familiar
+    // place (and screen-reader users can review it afterwards).
+    sizer->Add(new wxStaticText(pagePanel_, wxID_ANY, "Activity:"), 0,
+               wxLEFT | wxRIGHT, 8);
+    opLog_ = new wxTextCtrl(pagePanel_, wxID_ANY, "", wxDefaultPosition,
+                            wxSize(-1, 130), wxTE_MULTILINE | wxTE_READONLY);
+    sizer->Add(opLog_, 1, wxEXPAND | wxALL, 8);
+
+    // Bottom button row, installer style: one primary button that reads
+    // Install or Update per state, Uninstall, then the mod's actions.
+    auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+    auto* primary = new wxButton(pagePanel_, wxID_ANY,
+                                 page.can_update ? "&Update" : "&Install");
+    primary->Enable(page.can_install || page.can_update);
+    OpKind primaryKind = page.can_update ? OpKind::Update : OpKind::Install;
+    primary->Bind(wxEVT_BUTTON,
+                  [this, primaryKind](wxCommandEvent&) { RunOperation(primaryKind); });
+    if (primary->IsEnabled()) pageControls_.push_back(primary);
+    buttons->Add(primary, 0, wxRIGHT, 8);
+
+    auto* uninstall = new wxButton(pagePanel_, wxID_ANY, "U&ninstall");
+    uninstall->Enable(page.can_uninstall);
+    uninstall->Bind(wxEVT_BUTTON,
+                    [this](wxCommandEvent&) { RunOperation(OpKind::Uninstall); });
+    if (page.can_uninstall) pageControls_.push_back(uninstall);
+    buttons->Add(uninstall, 0, wxRIGHT, 8);
+
+    for (const auto& a : page.actions) {
+        auto* b = new wxButton(pagePanel_, wxID_ANY, FromRust(a.label));
+        b->Enable(page.actions_available);
+        wxString describe = FromRust(a.description);
+        if (!describe.empty()) b->SetToolTip(describe);
+        wxString actionId = FromRust(a.id);
+        b->Bind(wxEVT_BUTTON, [this, actionId](wxCommandEvent&) {
+            RunOperation(OpKind::Action, actionId);
+        });
+        if (page.actions_available) pageControls_.push_back(b);
+        buttons->Add(b, 0, wxRIGHT, 8);
+    }
+    sizer->Add(buttons, 0, wxALL, 8);
 
     pagePanel_->SetSizer(sizer);
     pagePanel_->FitInside();
@@ -578,18 +618,6 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
 
 // ---------------------------------------------------------------------------
 // Operations.
-
-void LoadstoneFrame::EnsureOpLog() {
-    if (opLog_ || !pagePanel_) return;
-    auto* label = new wxStaticText(pagePanel_, wxID_ANY, "Activity:");
-    opLog_ = new wxTextCtrl(pagePanel_, wxID_ANY, "", wxDefaultPosition,
-                            wxSize(-1, 120), wxTE_MULTILINE | wxTE_READONLY);
-    auto* sizer = pagePanel_->GetSizer();
-    sizer->Add(label, 0, wxLEFT | wxRIGHT, 8);
-    sizer->Add(opLog_, 0, wxEXPAND | wxALL, 8);
-    pagePanel_->FitInside();
-    pagePanel_->Layout();
-}
 
 void LoadstoneFrame::AppendOpLog(const wxString& line) {
     if (opLog_) opLog_->AppendText(line + "\n");
@@ -609,8 +637,7 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId) {
     }
     opInFlight_ = true;
     for (auto* c : pageControls_) c->Enable(false);
-    EnsureOpLog();
-    opLog_->Clear();
+    if (opLog_) opLog_->Clear();
     SetStatusText("Working...");
 
     auto alive = alive_;
@@ -619,17 +646,20 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId) {
     std::string game = ToStd(pageGame_);
     std::string channel = ToStd(pageChannel_);
     std::string action = ToStd(actionId);
-    std::thread([alive, this, cb, kind, modId, game, channel, action] {
+    // The path the user sees (and may have browsed to) is the one the
+    // engine gets; empty falls back to auto-detection.
+    std::string gameDir = gameDirCtrl_ ? ToStd(gameDirCtrl_->GetValue()) : "";
+    std::thread([alive, this, cb, kind, modId, game, channel, action, gameDir] {
         std::string result, error;
         try {
             switch (kind) {
                 case OpKind::Install:
                     result = std::string(loadstone::run_install(
-                        kEmbeddedProfile, "", modId, "", false, "", "", *cb));
+                        kEmbeddedProfile, "", modId, "", false, gameDir, "", *cb));
                     break;
                 case OpKind::Update:
                     result = std::string(loadstone::run_install(
-                        kEmbeddedProfile, "", modId, channel, true, "", "", *cb));
+                        kEmbeddedProfile, "", modId, channel, true, gameDir, "", *cb));
                     break;
                 case OpKind::Uninstall:
                     result = std::string(loadstone::run_uninstall("", game, modId, *cb));
@@ -766,6 +796,8 @@ bool LoadstoneApp::OnInit() {
                         << " | latest=" << std::string(page.latest_version)
                         << " | install=" << page.can_install << " update=" << page.can_update
                         << " uninstall=" << page.can_uninstall << "\n";
+                    out << "page-game: " << std::string(page.game_name) << " | dir="
+                        << std::string(page.game_dir) << "\n";
                     for (const auto& s : page.settings)
                         out << "page-setting: " << std::string(s.id) << " ("
                             << std::string(s.kind) << ") = " << std::string(s.value)

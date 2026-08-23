@@ -81,6 +81,11 @@ mod ffi {
         description: String,
         authors: String,
         game: String,
+        /// Display name of the game ("Balatro"), for labels.
+        game_name: String,
+        /// The game folder: recorded at install time, else auto-detected,
+        /// else empty (the user browses for it).
+        game_dir: String,
         /// Empty when not installed.
         installed_version: String,
         /// The game the install is recorded under (for settings calls).
@@ -88,7 +93,8 @@ mod ffi {
         channel: String,
         /// Empty when unknown (no release manifest reachable).
         latest_version: String,
-        /// One-line summary for the top of the page.
+        /// One-line summary for the top of the page ("Ready to install
+        /// version 1.0.9.", "Update available: 1.0.8 to 1.0.9.", ...).
         status: String,
         can_install: bool,
         can_update: bool,
@@ -537,18 +543,28 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
     let state = installed.iter().find(|s| s.id == mod_id);
     let notes = Rc::new(RefCell::new(Vec::new()));
 
-    // Resolve the manifest through the registries; an installed mod still
-    // gets a page when resolution fails (offline, delisted).
+    // Resolve the manifest (and its game package, for detection) through
+    // the registries; an installed mod still gets a page when resolution
+    // fails (offline, delisted).
     let mut resolved: Option<ResolvedPackage> = None;
+    let mut game_manifest: Option<loadstone_core::types::GameManifest> = None;
     if !profile.registries.is_empty() {
         let (mut fetcher, sources) = build_resolver(&profile.registries, notes.clone())?;
-        match Resolver::from_sources(&sources, &mut fetcher)
-            .and_then(|mut r| r.resolve_project(mod_id))
-        {
-            Ok(r) => resolved = Some(r),
+        match Resolver::from_sources(&sources, &mut fetcher) {
+            Ok(mut r) => match r.resolve_project(mod_id) {
+                Ok(res) => {
+                    if let Some(game_id) = &res.manifest.game {
+                        game_manifest = r.resolve_game(game_id, &res.scope).ok();
+                    }
+                    resolved = Some(res);
+                }
+                Err(e) => notes
+                    .borrow_mut()
+                    .push(format!("Not found in the configured registries: {e:#}")),
+            },
             Err(e) => notes
                 .borrow_mut()
-                .push(format!("Not found in the configured registries: {e:#}")),
+                .push(format!("Could not load registries: {e:#}")),
         }
     } else if state.is_none() {
         anyhow::bail!("\"{mod_id}\" is not installed and no registries are configured");
@@ -589,10 +605,42 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
     let can_update = state.is_some()
         && resolved.is_some()
         && (is_dev_channel || (!latest_version.is_empty() && latest_version != installed_version));
-    let status = match state {
-        Some(s) => format!("{} for {}", installed_status(s), s.game),
-        None => "Not installed".to_string(),
+
+    // The game folder: recorded state wins, else auto-detection.
+    let game_dir = match state {
+        Some(s) => s.game_dir.display().to_string(),
+        None => game_manifest
+            .as_ref()
+            .and_then(|g| loadstone_core::detect::detect(g).ok().flatten())
+            .map(|found| found.game_dir.display().to_string())
+            .unwrap_or_default(),
     };
+    let game_name = game_manifest
+        .as_ref()
+        .map(|g| g.name.clone())
+        .or_else(|| state.map(|s| s.game.clone()))
+        .unwrap_or_default();
+
+    // Status in the installers' familiar voice.
+    let mut status = match state {
+        Some(s) if s.channel == "dev" => {
+            format!("Installed {} (dev channel).", s.version)
+        }
+        Some(s) if !latest_version.is_empty() && latest_version == s.version => {
+            format!("Up to date (version {}).", s.version)
+        }
+        Some(s) if !latest_version.is_empty() => {
+            format!("Update available: {} to {}.", s.version, latest_version)
+        }
+        Some(s) => format!("Installed {}.", s.version),
+        None if !latest_version.is_empty() => {
+            format!("Ready to install version {latest_version}.")
+        }
+        None => "Not installed.".to_string(),
+    };
+    if game_dir.is_empty() && state.is_none() {
+        status.push_str(" Game directory not found; use Browse to select it.");
+    }
 
     // Settings: the schema frozen in state when installed (editable), else
     // the manifest's defaults as a preview.
@@ -641,6 +689,8 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
         description,
         authors,
         game: state.map(|s| s.game.clone()).unwrap_or(game),
+        game_name,
+        game_dir,
         installed_version,
         installed_game: state.map(|s| s.game.clone()).unwrap_or_default(),
         channel: state.map(|s| s.channel.clone()).unwrap_or_default(),
@@ -733,7 +783,9 @@ mod tests {
 
         let page = fetch_mod_page(r#"{"mode":"manager"}"#, &state_dir, "fake-mod").unwrap();
         assert_eq!(page.name, "fake-mod");
-        assert_eq!(page.status, "Installed 1.2.3 for fake-game");
+        assert_eq!(page.status, "Installed 1.2.3.");
+        assert_eq!(page.game_name, "fake-game");
+        assert_eq!(page.game_dir, tmp.path().join("game").display().to_string());
         assert!(page.can_uninstall && !page.can_install && !page.can_update);
         assert!(page.settings_editable);
         assert_eq!(page.settings_note, "Restart the game.");

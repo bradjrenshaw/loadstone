@@ -168,6 +168,10 @@ void LoadstoneFrame::StartCatalogFetch() {
     SetStatusText("Fetching the mod catalog...");
     detailsBtn_->Enable(false);
     refreshBtn_->Enable(false);
+    // Placeholder so the list never reads as empty while the fetch runs.
+    modList_->Clear();
+    entryIds_.clear();
+    modList_->Append("Loading mod list...");
 
     auto alive = alive_;
     std::thread([alive, this] {
@@ -183,6 +187,8 @@ void LoadstoneFrame::StartCatalogFetch() {
                 if (!alive->load()) return;
                 fetchInFlight_ = false;
                 refreshBtn_->Enable(true);
+                modList_->Clear();
+                modList_->Append("Could not load the mod list. Press Refresh to retry.");
                 SetStatusText("Catalog fetch failed.");
                 wxMessageBox(wxString::FromUTF8(msg.c_str()),
                              "Could not load the mod catalog", wxOK | wxICON_ERROR, this);

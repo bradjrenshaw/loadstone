@@ -66,7 +66,7 @@ pub struct ProjectManifest {
     /// Tools only: how an existing copy installed outside the manager is treated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_policy: Option<String>,
-    /// Dev-only block consumed by `loadstone package`; never emitted into release.json.
+    /// Dev-only block consumed by `loadstone package`; never emitted into loadstone-release.json.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packaging: Option<Packaging>,
 }
@@ -99,7 +99,7 @@ pub struct Detect {
     pub distributions: BTreeMap<String, Value>,
 }
 
-/// A generated release manifest (`release.json`), attached to a GitHub release.
+/// A generated release manifest (`loadstone-release.json`), attached to a GitHub release.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseManifest {
@@ -140,7 +140,7 @@ pub struct ReleaseArtifact {
 }
 
 /// A release pinned in the package file itself, for upstreams that publish no
-/// `release.json` (SPEC 13.1).
+/// `loadstone-release.json` (SPEC 13.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PinnedRelease {
     pub version: String,

@@ -43,7 +43,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Validate package files: project manifests, game packages, release.json, links.
+    /// Validate package files: project manifests, game packages, loadstone-release.json, links.
     Validate {
         /// Files to validate, or directories of package files.
         #[arg(required = true)]
@@ -54,7 +54,7 @@ enum Command {
         #[arg(long = "scope")]
         scopes: Vec<PathBuf>,
     },
-    /// Build release.json from a project manifest and built artifacts.
+    /// Build loadstone-release.json from a project manifest and built artifacts.
     Package {
         /// Path to the project manifest. Defaults to the single mod/tool/library
         /// package file in ./loadstone-packages.
@@ -67,7 +67,7 @@ enum Command {
         #[arg(long = "artifact")]
         artifacts: Vec<PathBuf>,
         /// Where to write the release manifest.
-        #[arg(long, default_value = "release.json")]
+        #[arg(long, default_value = "loadstone-release.json")]
         out: PathBuf,
         /// Release notes text.
         #[arg(long, conflicts_with = "notes_file")]
@@ -99,7 +99,7 @@ enum Command {
         /// Override the installed-state directory (mainly for testing).
         #[arg(long)]
         state_dir: Option<PathBuf>,
-        /// Install from a local release.json instead of fetching from GitHub.
+        /// Install from a local loadstone-release.json instead of fetching from GitHub.
         #[arg(long)]
         local_release: Option<PathBuf>,
         /// Artifact file for --local-release (default: named file next to it).

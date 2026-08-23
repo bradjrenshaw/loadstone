@@ -95,13 +95,13 @@ pub fn branch_tip_sha(source: &str, branch: &str) -> Result<String> {
     Ok(sha.chars().take(7).collect())
 }
 
-/// Fetch and parse the latest release.json for a source repo.
+/// Fetch and parse the latest loadstone-release.json for a source repo.
 pub fn fetch_latest_release_manifest(source: &str) -> Result<crate::types::ReleaseManifest> {
-    let url = latest_asset_url(source, "release.json")?;
+    let url = latest_asset_url(source, "loadstone-release.json")?;
     let bytes = download(&url, |_| {})?;
-    let text = String::from_utf8(bytes).context("release.json is not UTF-8")?;
+    let text = String::from_utf8(bytes).context("loadstone-release.json is not UTF-8")?;
     serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .with_context(|| format!("release.json from {source} does not parse"))
+        .with_context(|| format!("loadstone-release.json from {source} does not parse"))
 }
 
 #[cfg(test)]

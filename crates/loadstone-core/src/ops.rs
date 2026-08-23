@@ -180,7 +180,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     let store = StateStore::open(opts.state_dir.clone())?;
 
     // Resolve the release: branch zipball (dev channels), a local
-    // release.json + artifact pair, or the source repo's latest release.
+    // loadstone-release.json + artifact pair, or the source repo's latest release.
     let (version, install_steps, uninstall_steps, user_data_decl, artifact, expected_sha);
     let (settings, actions, strip_top_level);
     let is_branch_channel = manifest

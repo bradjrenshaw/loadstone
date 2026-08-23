@@ -93,7 +93,7 @@ fn all_example_files_validate_without_errors() {
     // The release manifest validates in its mod repo's scope.
     let blindfold_scope =
         scope_of(&examples_dir().join("mod-repos/blindfold/loadstone-packages"));
-    let release = examples_dir().join("releases/blindfold.release.json");
+    let release = examples_dir().join("releases/blindfold.loadstone-release.json");
     assert_no_errors(&release, &blindfold_scope);
     checked += 1;
 

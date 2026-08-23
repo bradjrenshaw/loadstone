@@ -19,7 +19,7 @@ mod's own repo — is a source with a `loadstone-packages/` directory.
   reviewed link file per listed mod repo (the one-time PR), plus
   `lovely-injector.json`, a tool package hosted by the registry itself with a
   `source` field naming the repo its artifacts come from.
-- `releases/` — an example generated `release.json` (what the dev CLI attaches
+- `releases/` — an example generated `loadstone-release.json` (what the dev CLI attaches
   to a GitHub release; the sha256 here is a placeholder)
 
 ## Say the Spire 2 (`mods/say-the-spire-2.mod.json`)
@@ -79,7 +79,7 @@ Maps 1:1 to the current installer:
 - Epic/GOG detection data for these games is absent because none of the three
   mods support those distributions yet; the schema has room when they do.
 - The lovely-injector package uses a `pinnedRelease` (SPEC §13.1) because
-  upstream publishes no `release.json`. Asset names are verified against its
+  upstream publishes no `loadstone-release.json`. Asset names are verified against its
   v0.9.0 release; the sha256 values are placeholders and must be computed from
   the real assets before the file is used. The Linux artifact
   (`lovely-x86_64-unknown-linux-gnu.tar.gz`) is omitted until someone tests

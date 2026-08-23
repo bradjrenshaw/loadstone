@@ -55,7 +55,7 @@ to the mod is found automatically; `--scope <dir>` (repeatable) adds outer
 scopes for `${game.*}` checks against a registry checkout. When the game
 package isn't in scope, those checks are skipped with a warning.
 
-Build a `release.json` for a version from your project manifest plus built
+Build a `loadstone-release.json` for a version from your project manifest plus built
 artifacts (with no `--manifest`, the single mod/tool/library file in
 `./loadstone-packages` is used):
 
@@ -79,8 +79,8 @@ carry platform/distribution constraints:
 
 `loadstone package` validates the manifest first and refuses to package on
 errors, hashes each artifact with SHA-256, and writes a self-contained
-`release.json`. Attach it and the artifacts to the GitHub release; the manager
-fetches it via `.../releases/latest/download/release.json`.
+`loadstone-release.json`. Attach it and the artifacts to the GitHub release; the manager
+fetches it via `.../releases/latest/download/loadstone-release.json`.
 
 CLI output is plain text, one finding per line, with no colors or progress
 animations — it reads identically in a terminal and a screen reader.
@@ -103,8 +103,8 @@ loadstone uninstall blindfold --game balatro
 
 - Package ids resolve from the `--scope` directories, innermost first; the
   game is auto-detected (Steam today) or passed with `--game-dir`.
-- Releases come from the package's `source` repo (`release.json` +
-  hash-verified artifact), or locally via `--local-release path/to/release.json`
+- Releases come from the package's `source` repo (`loadstone-release.json` +
+  hash-verified artifact), or locally via `--local-release path/to/loadstone-release.json`
   for offline and pre-publish testing.
 - Tool dependencies install first (hash-pinned via `pinnedRelease`), are
   reference-counted per game, and refuse removal while a mod still needs them.

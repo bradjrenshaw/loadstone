@@ -1,4 +1,4 @@
-//! Building a `release.json` from a project manifest plus built artifacts.
+//! Building a `loadstone-release.json` from a project manifest plus built artifacts.
 
 use std::fs;
 use std::path::{Path, PathBuf};

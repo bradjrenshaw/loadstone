@@ -109,6 +109,42 @@ loadstone uninstall blindfold --game balatro
   offers to purge declared user data.
 - `--user-data`, `--state-dir`, and `--yes` support sandboxed/automated runs.
 
+## Distribution profiles: one binary, manager or standalone installer
+
+Some users want a mod manager; some want a per-mod standalone installer. The
+same binary is both — a **distribution profile** decides its shape, resolved
+at startup (first match wins):
+
+1. a profile **embedded at compile time** — a developer's branded,
+   self-contained installer;
+2. a **`loadstone.json`** file next to the executable;
+3. the default: full manager.
+
+```json
+{
+  "mode": "single-mod",
+  "mod": "blindfold",
+  "title": "Blindfold Installer",
+  "registries": ["github:bradjrenshaw/loadstone-registry"],
+  "lockRegistries": true
+}
+```
+
+- `mode: "manager"` (default) services everything reachable through its
+  registries; `"single-mod"` pins one package id — the standalone-installer
+  experience, with no id needed on the command line (and, later, a
+  single-page GUI titled from the profile).
+- `registries` lists `github:owner/repo` sources or local directories,
+  innermost first. Remote registries are fetched as repo zipballs (no API
+  rate limits), only their `loadstone-packages/*.json` files are kept, and a
+  cached copy under the local data directory serves as offline fallback.
+  Link files are followed one level, honoring their `packages` allowlists.
+- To build a branded installer: `LOADSTONE_EMBED_PROFILE=path\to\profile.json
+  cargo build --release` — the profile bakes into the exe, which the mod
+  developer then signs as their own artifact. Everyone chooses their slice:
+  ship the full manager, a registry-pinned manager, or a single-mod
+  installer, all from this one open-source codebase.
+
 ## Not yet built
 
 - The C++ wxWidgets GUI described above (the engine API is its backend).

@@ -16,6 +16,20 @@ use loadstone_core::validate::{validate_value, Severity, ValidationContext};
 
 mod manage;
 
+/// Compile-time distribution profile ("null" unless the binary was built
+/// with LOADSTONE_EMBED_PROFILE=<file> — see loadstone-core::profile).
+const EMBEDDED_PROFILE: &str = include_str!(concat!(env!("OUT_DIR"), "/embedded_profile.json"));
+
+fn load_profile() -> Result<loadstone_core::profile::Profile> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let profile =
+        loadstone_core::profile::Profile::load(Some(EMBEDDED_PROFILE), exe_dir.as_deref())?;
+    profile.validate()?;
+    Ok(profile)
+}
+
 #[derive(Parser)]
 #[command(
     name = "loadstone",
@@ -67,11 +81,15 @@ enum Command {
     },
     /// Install a mod (and its tool dependencies) into a game.
     Install {
-        /// Package id of the mod.
-        id: String,
-        /// Directories of package files to resolve ids from (innermost first).
-        #[arg(long = "scope", required = true)]
+        /// Package id of the mod (optional when the profile pins one).
+        id: Option<String>,
+        /// Local directories of package files (innermost scopes).
+        #[arg(long = "scope")]
         scopes: Vec<PathBuf>,
+        /// Registries to resolve from: github:owner/repo or a directory.
+        /// Listed ahead of the profile's registries.
+        #[arg(long = "registry")]
+        registries: Vec<String>,
         /// Game folder; skips auto-detection.
         #[arg(long)]
         game_dir: Option<PathBuf>,
@@ -130,19 +148,24 @@ fn main() -> ExitCode {
             cmd_package(manifest.as_deref(), &version, &artifacts, &out, notes, notes_file, &scopes)
         }
         Command::Install {
-            id, scopes, game_dir, user_data, state_dir, local_release, local_artifact, no_deps, yes,
-        } => manage::cmd_install(&manage::InstallArgs {
-            id,
-            scopes,
-            game_dir,
-            user_data,
-            state_dir,
-            local_release,
-            local_artifact,
-            no_deps,
-            assume_yes: yes,
-        })
-        .map(|()| true),
+            id, scopes, registries, game_dir, user_data, state_dir, local_release, local_artifact,
+            no_deps, yes,
+        } => load_profile().and_then(|profile| {
+            manage::cmd_install(&manage::InstallArgs {
+                id,
+                scopes,
+                registries,
+                profile,
+                game_dir,
+                user_data,
+                state_dir,
+                local_release,
+                local_artifact,
+                no_deps,
+                assume_yes: yes,
+            })
+            .map(|()| true)
+        }),
         Command::Uninstall { id, game, state_dir, purge, keep_settings, yes } => {
             let purge_choice = if purge {
                 Some(true)

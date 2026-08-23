@@ -12,8 +12,10 @@ use loadstone_core::context::InstallContext;
 use loadstone_core::detect;
 use loadstone_core::engine::{self, EngineUi, InstallPlan, RetryChoice};
 use loadstone_core::fetch;
+use loadstone_core::profile::Profile;
+use loadstone_core::registry::{HttpFetcher, ResolvedPackage, Resolver};
 use loadstone_core::track::StateStore;
-use loadstone_core::types::{GameManifest, Kind, ProjectManifest, ReleaseManifest};
+use loadstone_core::types::{Kind, ReleaseManifest};
 
 use crate::load_json;
 
@@ -96,71 +98,16 @@ impl EngineUi for TerminalUi {
 }
 
 // ---------------------------------------------------------------------------
-// Package resolution from scope directories.
-
-pub struct ScopedPackages {
-    /// (dir, id, parsed doc) in scope order — earlier dirs win.
-    entries: Vec<(PathBuf, String, serde_json::Value)>,
-}
-
-impl ScopedPackages {
-    pub fn load(scopes: &[PathBuf]) -> Result<Self> {
-        let mut entries = Vec::new();
-        for dir in scopes {
-            if !dir.is_dir() {
-                bail!("scope directory not found: {}", dir.display());
-            }
-            let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-                .collect();
-            files.sort();
-            for file in files {
-                let doc = load_json(&file)?;
-                let id = doc
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                if !id.is_empty() {
-                    entries.push((dir.clone(), id, doc));
-                }
-            }
-        }
-        Ok(Self { entries })
-    }
-
-    fn find(&self, id: &str) -> Option<&serde_json::Value> {
-        self.entries
-            .iter()
-            .find(|(_, entry_id, _)| entry_id == id)
-            .map(|(_, _, doc)| doc)
-    }
-
-    pub fn project(&self, id: &str) -> Result<ProjectManifest> {
-        let doc = self
-            .find(id)
-            .with_context(|| format!("package \"{id}\" not found in any --scope directory"))?;
-        serde_json::from_value(doc.clone())
-            .with_context(|| format!("package \"{id}\" is not a valid project manifest"))
-    }
-
-    pub fn game(&self, id: &str) -> Result<GameManifest> {
-        let doc = self
-            .find(id)
-            .with_context(|| format!("game package \"{id}\" not found in any --scope directory"))?;
-        serde_json::from_value(doc.clone())
-            .with_context(|| format!("\"{id}\" is not a valid game package"))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // install
 
 pub struct InstallArgs {
-    pub id: String,
+    /// Package id; None falls back to the profile's pinned mod.
+    pub id: Option<String>,
+    /// Local package directories (innermost scopes, ahead of registries).
     pub scopes: Vec<PathBuf>,
+    /// Extra registries (github:owner/repo or paths), ahead of the profile's.
+    pub registries: Vec<String>,
+    pub profile: Profile,
     pub game_dir: Option<PathBuf>,
     pub user_data: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
@@ -170,15 +117,44 @@ pub struct InstallArgs {
     pub assume_yes: bool,
 }
 
+/// The full registry-source list for a command: local --scope dirs
+/// (innermost), then --registry flags, then the profile's registries.
+fn source_chain(args: &InstallArgs) -> Result<Vec<String>> {
+    let mut sources = Vec::new();
+    for dir in &args.scopes {
+        if !dir.is_dir() {
+            bail!("scope directory not found: {}", dir.display());
+        }
+        sources.push(dir.to_string_lossy().into_owned());
+    }
+    sources.extend(args.registries.iter().cloned());
+    sources.extend(args.profile.registries.iter().cloned());
+    if sources.is_empty() {
+        bail!("no package sources: pass --scope or --registry, or configure registries in the profile");
+    }
+    Ok(sources)
+}
+
 pub fn cmd_install(args: &InstallArgs) -> Result<()> {
     let mut ui = TerminalUi::new(args.assume_yes);
-    let packages = ScopedPackages::load(&args.scopes)?;
-    let manifest = packages.project(&args.id)?;
+    let id = match (&args.id, &args.profile.mod_id) {
+        (Some(id), _) => id.clone(),
+        (None, Some(pinned)) => pinned.clone(),
+        (None, None) => bail!("no package id given (and the profile pins no mod)"),
+    };
+
+    let sources = source_chain(args)?;
+    let mut fetcher = HttpFetcher::new(None, Box::new(|msg| println!("{msg}")))?;
+    let mut resolver = Resolver::from_sources(&sources, &mut fetcher)?;
+    let resolved = resolver.resolve_project(&id)?;
+    let ResolvedPackage { manifest, scope: mod_scope, release_source } = resolved;
     if manifest.kind != Kind::Mod {
-        bail!("\"{}\" is a {:?}; `install` takes a mod (tools install as dependencies)", args.id, manifest.kind);
+        bail!("\"{id}\" is a {:?}; `install` takes a mod (tools install as dependencies)", manifest.kind);
     }
     let game_id = manifest.game.clone().context("mod declares no game")?;
-    let game = packages.game(&game_id)?;
+    let game = resolver.resolve_game(&game_id, &mod_scope)?;
+    let base_scopes = resolver.scopes.clone();
+    drop(resolver);
 
     // Locate the game.
     let (game_dir, distribution) = match &args.game_dir {
@@ -252,10 +228,9 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
             user_data_decl = release.user_data.clone();
         }
         None => {
-            let source = manifest
-                .source
+            let source = release_source
                 .clone()
-                .context("no --local-release given and the manifest has no \"source\" repo to fetch from")?;
+                .context("no --local-release given and no source repo is known for this package")?;
             ui.log(&format!("Fetching latest release information from {source}..."));
             let release = fetch::fetch_latest_release_manifest(&source)?;
             let entry = pick_artifact(&ctx, &release.artifacts)?;
@@ -270,10 +245,14 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
         }
     }
 
-    // Dependencies first, so the mod lands on a working loader.
+    // Dependencies first, so the mod lands on a working loader. They resolve
+    // through the mod's own chain: its scope innermost, then the registries.
     if !args.no_deps {
+        let mut dep_scopes = vec![mod_scope.clone()];
+        dep_scopes.extend(base_scopes.iter().cloned());
+        let mut dep_resolver = Resolver { scopes: dep_scopes, fetcher: &mut fetcher };
         for dep in &manifest.dependencies {
-            install_dependency(&packages, &store, &mut ctx, &game_id, &args.id, &dep.id, &mut ui)?;
+            install_dependency(&mut dep_resolver, &store, &mut ctx, &game_id, &id, &dep.id, &mut ui)?;
         }
     }
 
@@ -313,7 +292,7 @@ fn pick_artifact<'a>(
 }
 
 fn install_dependency(
-    packages: &ScopedPackages,
+    resolver: &mut Resolver,
     store: &StateStore,
     ctx: &mut InstallContext,
     game_id: &str,
@@ -330,15 +309,16 @@ fn install_dependency(
         return Ok(());
     }
 
-    let tool = packages.project(dep_id)?;
+    let resolved = resolver.resolve_project(dep_id)?;
+    let tool = resolved.manifest;
     if tool.kind != Kind::Tool && tool.kind != Kind::Library {
         bail!("dependency \"{dep_id}\" is not a tool or library package");
     }
     let pinned = tool.pinned_release.as_ref().with_context(|| {
         format!("dependency \"{dep_id}\" has no pinnedRelease; other dependency sources are not supported yet")
     })?;
-    let source = tool
-        .source
+    let source = resolved
+        .release_source
         .as_ref()
         .with_context(|| format!("dependency \"{dep_id}\" has no source repo"))?;
 

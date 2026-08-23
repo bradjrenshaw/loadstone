@@ -26,8 +26,10 @@
 // LOADSTONE_SMOKE_GAME_DIR / _STATE / _RELEASE overrides).
 
 #include <wx/wx.h>
+#include <wx/choicdlg.h>
 #include <wx/choice.h>
 #include <wx/dirdlg.h>
+#include <wx/filedlg.h>
 #include <wx/listbox.h>
 #include <wx/scrolwin.h>
 
@@ -97,7 +99,10 @@ private:
     void GoBack();
 
     // Operations.
-    void RunOperation(OpKind kind, const wxString& actionId = wxString());
+    void StartVersionPick(OpKind kind);
+    void RunOperation(OpKind kind, const wxString& actionId = wxString(),
+                      const wxString& tag = wxString(),
+                      const wxString& localRelease = wxString());
     void OnOpDone(const std::string& result, const std::string& error);
 
     // The settings form writes through the bridge as controls change.
@@ -586,10 +591,26 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
                                  page.can_update ? "&Update" : "&Install");
     primary->Enable(page.can_install || page.can_update);
     OpKind primaryKind = page.can_update ? OpKind::Update : OpKind::Install;
-    primary->Bind(wxEVT_BUTTON,
-                  [this, primaryKind](wxCommandEvent&) { RunOperation(primaryKind); });
+    primary->Bind(wxEVT_BUTTON, [this, primaryKind](wxCommandEvent&) {
+        StartVersionPick(primaryKind);
+    });
     if (primary->IsEnabled()) pageControls_.push_back(primary);
     buttons->Add(primary, 0, wxRIGHT, 8);
+
+    // Offline path: install from a loadstone-release.json on disk (its
+    // artifact paths resolve relative to that file).
+    auto* fromFile = new wxButton(pagePanel_, wxID_ANY, "Install from &file...");
+    fromFile->Enable(page.can_install || page.can_update);
+    fromFile->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        wxFileDialog dlg(this, "Select the mod's loadstone-release.json", "", "",
+                         "loadstone-release.json|loadstone-release.json|"
+                         "JSON files (*.json)|*.json|All files (*.*)|*.*",
+                         wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dlg.ShowModal() != wxID_OK) return;
+        RunOperation(OpKind::Install, wxString(), wxString(), dlg.GetPath());
+    });
+    if (fromFile->IsEnabled()) pageControls_.push_back(fromFile);
+    buttons->Add(fromFile, 0, wxRIGHT, 8);
 
     auto* uninstall = new wxButton(pagePanel_, wxID_ANY, "U&ninstall");
     uninstall->Enable(page.can_uninstall);
@@ -627,7 +648,72 @@ void LoadstoneFrame::SetOpProgress(unsigned percent) {
     SetStatusText(wxString::Format("Working... %u%%", percent));
 }
 
-void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId) {
+// Before installing or updating, offer the list of the repo's releases so
+// the user can pick a specific version (including pre-releases, which the
+// default "latest" path never sees). The chosen release's own
+// loadstone-release.json and assets are used. Falls back to plain latest
+// if the list cannot be fetched.
+void LoadstoneFrame::StartVersionPick(OpKind kind) {
+    if (opInFlight_ || fetchInFlight_) return;
+    fetchInFlight_ = true;
+    for (auto* c : pageControls_) c->Enable(false);
+    SetStatusText("Fetching the release list...");
+
+    auto alive = alive_;
+    std::string modId = ToStd(pageModId_);
+    std::thread([alive, this, kind, modId] {
+        std::vector<loadstone::ReleaseEntry> releases;
+        std::string error;
+        try {
+            auto fetched = loadstone::list_mod_releases(kEmbeddedProfile, modId);
+            releases.assign(fetched.begin(), fetched.end());
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        wxTheApp->CallAfter([alive, this, kind, releases, error] {
+            if (!alive->load()) return;
+            fetchInFlight_ = false;
+            for (auto* c : pageControls_) c->Enable(true);
+            SetStatusText("");
+            if (!error.empty()) {
+                wxString msg = wxString::Format(
+                    "Could not fetch the release list: %s\n\n"
+                    "Install the latest release instead?",
+                    wxString::FromUTF8(error.c_str()));
+                if (wxMessageBox(msg, "Release list unavailable",
+                                 wxYES_NO | wxICON_QUESTION, this) == wxYES)
+                    RunOperation(kind);
+                return;
+            }
+            if (releases.empty()) {
+                wxMessageBox("This mod's repository has no releases yet.",
+                             "No releases", wxOK | wxICON_INFORMATION, this);
+                return;
+            }
+            wxArrayString labels;
+            for (const auto& r : releases) labels.Add(FromRust(r.label));
+            // Default to the newest stable release, like "latest" would.
+            int defaultIdx = 0;
+            for (size_t i = 0; i < releases.size(); ++i) {
+                if (!releases[i].prerelease) {
+                    defaultIdx = static_cast<int>(i);
+                    break;
+                }
+            }
+            wxSingleChoiceDialog dlg(
+                this, "Select the version to install:", "Choose version", labels);
+            dlg.SetSelection(defaultIdx);
+            if (dlg.ShowModal() != wxID_OK) return;
+            int sel = dlg.GetSelection();
+            if (sel < 0 || sel >= static_cast<int>(releases.size())) return;
+            RunOperation(kind, wxString(), FromRust(releases[sel].tag));
+        });
+    }).detach();
+}
+
+void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
+                                  const wxString& tag,
+                                  const wxString& localRelease) {
     if (opInFlight_ || fetchInFlight_) return;
     if (kind == OpKind::Uninstall) {
         if (wxMessageBox(wxString::Format("Uninstall %s?", pageModId_),
@@ -646,20 +732,25 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId) {
     std::string game = ToStd(pageGame_);
     std::string channel = ToStd(pageChannel_);
     std::string action = ToStd(actionId);
+    std::string tagStr = ToStd(tag);
+    std::string local = ToStd(localRelease);
     // The path the user sees (and may have browsed to) is the one the
     // engine gets; empty falls back to auto-detection.
     std::string gameDir = gameDirCtrl_ ? ToStd(gameDirCtrl_->GetValue()) : "";
-    std::thread([alive, this, cb, kind, modId, game, channel, action, gameDir] {
+    std::thread([alive, this, cb, kind, modId, game, channel, action, tagStr,
+                 local, gameDir] {
         std::string result, error;
         try {
             switch (kind) {
                 case OpKind::Install:
                     result = std::string(loadstone::run_install(
-                        kEmbeddedProfile, "", modId, "", false, gameDir, "", *cb));
+                        kEmbeddedProfile, "", modId, "", false, tagStr, gameDir,
+                        local, *cb));
                     break;
                 case OpKind::Update:
                     result = std::string(loadstone::run_install(
-                        kEmbeddedProfile, "", modId, channel, true, gameDir, "", *cb));
+                        kEmbeddedProfile, "", modId, channel, true, tagStr,
+                        gameDir, "", *cb));
                     break;
                 case OpKind::Uninstall:
                     result = std::string(loadstone::run_uninstall("", game, modId, *cb));
@@ -812,16 +903,31 @@ bool LoadstoneApp::OnInit() {
                 if (const char* installId = std::getenv("LOADSTONE_SMOKE_INSTALL")) {
                     const char* gameDir = std::getenv("LOADSTONE_SMOKE_GAME_DIR");
                     const char* release = std::getenv("LOADSTONE_SMOKE_RELEASE");
+                    const char* tag = std::getenv("LOADSTONE_SMOKE_TAG");
                     SmokeUi sui(out);
                     try {
                         auto summary = loadstone::run_install(
                             kEmbeddedProfile, state, installId, "", false,
-                            gameDir ? gameDir : "", release ? release : "", sui);
+                            tag ? tag : "", gameDir ? gameDir : "",
+                            release ? release : "", sui);
                         out << "op-result: " << std::string(summary) << "\n";
                         out << "installed-after: "
                             << std::string(loadstone::installed_json(state)) << "\n";
                     } catch (const std::exception& e) {
                         out << "op-error: " << e.what() << "\n";
+                    }
+                }
+                // Optional: dump the version-picker release list for a mod.
+                if (const char* relId = std::getenv("LOADSTONE_SMOKE_RELEASES")) {
+                    try {
+                        auto releases =
+                            loadstone::list_mod_releases(kEmbeddedProfile, relId);
+                        out << "releases: " << releases.size() << "\n";
+                        for (const auto& r : releases)
+                            out << "release-entry: " << std::string(r.tag) << " | "
+                                << std::string(r.label) << "\n";
+                    } catch (const std::exception& e) {
+                        out << "releases-error: " << e.what() << "\n";
                     }
                 }
                 // Optional: uninstall driver, value "game:id".

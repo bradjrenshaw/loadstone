@@ -95,13 +95,72 @@ pub fn branch_tip_sha(source: &str, branch: &str) -> Result<String> {
     Ok(sha.chars().take(7).collect())
 }
 
+fn parse_release_manifest(bytes: Vec<u8>, source: &str) -> Result<crate::types::ReleaseManifest> {
+    let text = String::from_utf8(bytes).context("loadstone-release.json is not UTF-8")?;
+    serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .with_context(|| format!("loadstone-release.json from {source} does not parse"))
+}
+
 /// Fetch and parse the latest loadstone-release.json for a source repo.
 pub fn fetch_latest_release_manifest(source: &str) -> Result<crate::types::ReleaseManifest> {
     let url = latest_asset_url(source, "loadstone-release.json")?;
     let bytes = download(&url, |_| {})?;
-    let text = String::from_utf8(bytes).context("loadstone-release.json is not UTF-8")?;
-    serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .with_context(|| format!("loadstone-release.json from {source} does not parse"))
+    parse_release_manifest(bytes, source)
+}
+
+/// Fetch and parse the loadstone-release.json attached to one specific
+/// release, by tag — version pickers install exactly what was chosen.
+pub fn fetch_release_manifest_for_tag(
+    source: &str,
+    tag: &str,
+) -> Result<crate::types::ReleaseManifest> {
+    let url = tagged_asset_url(source, tag, "loadstone-release.json")?;
+    let bytes = download(&url, |_| {}).with_context(|| {
+        format!("release {tag} has no loadstone-release.json asset (or it is unreachable)")
+    })?;
+    parse_release_manifest(bytes, source)
+}
+
+/// One GitHub release, for version pickers.
+#[derive(Debug, Clone)]
+pub struct ReleaseInfo {
+    pub tag: String,
+    pub name: String,
+    pub prerelease: bool,
+}
+
+/// List a repo's releases, newest first, via the GitHub API (rate-limited
+/// to 60 unauthenticated requests/hour — call only on explicit user
+/// action). Drafts are skipped.
+pub fn list_releases(source: &str) -> Result<Vec<ReleaseInfo>> {
+    let (owner, repo) = parse_github_source(source)?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases");
+    let bytes = download(&url, |_| {})?;
+    let doc: serde_json::Value =
+        serde_json::from_slice(&bytes).context("release list API response does not parse")?;
+    let list = doc.as_array().context("release list API response is not a list")?;
+    let mut out = Vec::new();
+    for entry in list {
+        if entry.get("draft").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let Some(tag) = entry.get("tag_name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        out.push(ReleaseInfo {
+            tag: tag.to_string(),
+            name: entry
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            prerelease: entry
+                .get("prerelease")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

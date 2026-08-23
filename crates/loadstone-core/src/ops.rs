@@ -34,6 +34,11 @@ pub struct InstallOptions {
     /// Channel name: "stable" (default) fetches releases; a branch channel
     /// declared by the manifest installs the branch zipball (dev).
     pub channel: String,
+    /// A specific release tag to install. Its own loadstone-release.json
+    /// and assets are used — never the latest release's. Ignored for
+    /// branch channels; an explicitly chosen tag also skips the
+    /// already-up-to-date early return (reinstalling it is deliberate).
+    pub tag: Option<String>,
     pub no_deps: bool,
     /// Update mode: bail early when the resolved version is already installed.
     pub update_mode: bool,
@@ -52,6 +57,7 @@ impl Default for InstallOptions {
             local_release: None,
             local_artifact: None,
             channel: "stable".to_string(),
+            tag: None,
             no_deps: false,
             update_mode: false,
         }
@@ -242,11 +248,19 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 let source = release_source
                     .clone()
                     .context("no --local-release given and no source repo is known for this package")?;
-                ui.log(&format!("Fetching latest release information from {source}..."));
-                fetch::fetch_latest_release_manifest(&source)?
+                match &opts.tag {
+                    Some(tag) => {
+                        ui.log(&format!("Fetching release {tag} information from {source}..."));
+                        fetch::fetch_release_manifest_for_tag(&source, tag)?
+                    }
+                    None => {
+                        ui.log(&format!("Fetching latest release information from {source}..."));
+                        fetch::fetch_latest_release_manifest(&source)?
+                    }
+                }
             }
         };
-        if opts.update_mode {
+        if opts.update_mode && opts.tag.is_none() {
             if let Some(state) = store.load(&game_id, &id)? {
                 let same = crate::release::normalize_version(&release.version)
                     .map(|v| v == state.version)
@@ -273,7 +287,11 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
             }
             None => {
                 let source = release_source.clone().unwrap();
-                let url = fetch::latest_asset_url(&source, &entry.file)?;
+                // Assets come from the same release the manifest did.
+                let url = match &opts.tag {
+                    Some(tag) => fetch::tagged_asset_url(&source, tag, &entry.file)?,
+                    None => fetch::latest_asset_url(&source, &entry.file)?,
+                };
                 ui.log(&format!("Downloading {}...", entry.file));
                 artifact = fetch::download(&url, |p| ui.progress(p))?;
             }

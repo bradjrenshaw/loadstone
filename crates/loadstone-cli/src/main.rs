@@ -109,6 +109,10 @@ enum Command {
         /// (development builds from that branch's tip, not hash-pinned).
         #[arg(long, default_value = "stable")]
         channel: String,
+        /// Install a specific release by tag (uses that release's own
+        /// loadstone-release.json and assets).
+        #[arg(long)]
+        tag: Option<String>,
         /// Skip dependency installation.
         #[arg(long)]
         no_deps: bool,
@@ -132,6 +136,9 @@ enum Command {
         state_dir: Option<PathBuf>,
         #[arg(long, default_value = "stable")]
         channel: String,
+        /// Update to a specific release by tag instead of the latest.
+        #[arg(long)]
+        tag: Option<String>,
         #[arg(long)]
         yes: bool,
     },
@@ -202,7 +209,7 @@ fn main() -> ExitCode {
         }
         Command::Install {
             id, scopes, registries, game_dir, user_data, state_dir, local_release, local_artifact,
-            channel, no_deps, yes,
+            channel, tag, no_deps, yes,
         } => load_profile().and_then(|profile| {
             manage::cmd_install(&manage::InstallArgs {
                 id,
@@ -215,13 +222,16 @@ fn main() -> ExitCode {
                 local_release,
                 local_artifact,
                 channel,
+                tag,
                 no_deps,
                 assume_yes: yes,
                 update_mode: false,
             })
             .map(|()| true)
         }),
-        Command::Update { id, scopes, registries, game_dir, user_data, state_dir, channel, yes } => {
+        Command::Update {
+            id, scopes, registries, game_dir, user_data, state_dir, channel, tag, yes,
+        } => {
             load_profile().and_then(|profile| {
                 manage::cmd_install(&manage::InstallArgs {
                     id,
@@ -234,6 +244,7 @@ fn main() -> ExitCode {
                     local_release: None,
                     local_artifact: None,
                     channel,
+                    tag,
                     no_deps: false,
                     assume_yes: yes,
                     update_mode: true,

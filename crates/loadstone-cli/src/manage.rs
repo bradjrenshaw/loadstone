@@ -112,6 +112,7 @@ pub struct InstallArgs {
     pub local_release: Option<PathBuf>,
     pub local_artifact: Option<PathBuf>,
     pub channel: String,
+    pub tag: Option<String>,
     pub no_deps: bool,
     pub assume_yes: bool,
     pub update_mode: bool,
@@ -130,6 +131,7 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
         local_release: args.local_release.clone(),
         local_artifact: args.local_artifact.clone(),
         channel: args.channel.clone(),
+        tag: args.tag.clone(),
         no_deps: args.no_deps,
         update_mode: args.update_mode,
     };

@@ -18,7 +18,7 @@ use loadstone_core::track::{InstalledState, StateStore};
 use loadstone_core::types::SettingType;
 
 use crate::ffi::{
-    ActionItem, Catalog, CatalogEntry, ChoiceItem, ModPage, SettingItem, UiProfile,
+    ActionItem, Catalog, CatalogEntry, ChoiceItem, ModPage, ReleaseEntry, SettingItem, UiProfile,
 };
 
 #[cxx::bridge(namespace = "loadstone")]
@@ -73,6 +73,14 @@ mod ffi {
         id: String,
         label: String,
         description: String,
+    }
+
+    /// One GitHub release, for the version picker.
+    struct ReleaseEntry {
+        tag: String,
+        /// Display text: tag, optional release title, pre-release marker.
+        label: String,
+        prerelease: bool,
     }
 
     struct ModPage {
@@ -152,18 +160,27 @@ mod ffi {
         /// Install (or with `update` = true, update) a mod through the
         /// profile's registries. Blocking (network + disk) — call from a
         /// worker thread; the engine talks back through `ui`. `channel` ""
-        /// means stable; `game_dir`/`local_release` "" mean none (test
-        /// drivers use them). Returns a one-line summary.
+        /// means stable; `tag` "" means the latest release (a named tag
+        /// installs exactly that release, from its own
+        /// loadstone-release.json); `game_dir` overrides detection;
+        /// `local_release` names a local loadstone-release.json for
+        /// offline/from-file installs ("" = none). Returns a summary.
         fn run_install(
             embedded: &str,
             state_dir: &str,
             mod_id: &str,
             channel: &str,
             update: bool,
+            tag: &str,
             game_dir: &str,
             local_release: &str,
             ui: Pin<&mut UiCallbacks>,
         ) -> Result<String>;
+
+        /// List the mod's source repo's releases, newest first, for the
+        /// version picker. Blocking (GitHub API) — worker thread only, and
+        /// only on explicit user action (the API is rate-limited).
+        fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntry>>;
 
         /// Uninstall an installed package. The engine asks about purging
         /// user data through `ui.confirm`. Blocking — worker thread.
@@ -260,6 +277,7 @@ pub fn run_install(
     mod_id: &str,
     channel: &str,
     update: bool,
+    tag: &str,
     game_dir: &str,
     local_release: &str,
     ui: std::pin::Pin<&mut ffi::UiCallbacks>,
@@ -272,10 +290,39 @@ pub fn run_install(
         game_dir: opt_path(game_dir),
         local_release: opt_path(local_release),
         channel: if channel.is_empty() { "stable".to_string() } else { channel.to_string() },
+        tag: if tag.is_empty() { None } else { Some(tag.to_string()) },
         update_mode: update,
         ..Default::default()
     };
     loadstone_core::ops::install(&opts, &mut GuiUi(ui))
+}
+
+pub fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntry>> {
+    let profile = load_profile(embedded)?;
+    if profile.registries.is_empty() {
+        anyhow::bail!("no registries are configured");
+    }
+    let notes = Rc::new(RefCell::new(Vec::new()));
+    let (mut fetcher, sources) = build_resolver(&profile.registries, notes)?;
+    let resolved = Resolver::from_sources(&sources, &mut fetcher)?.resolve_project(mod_id)?;
+    let source = resolved
+        .release_source
+        .with_context(|| format!("no source repo is known for \"{mod_id}\""))?;
+    let releases = loadstone_core::fetch::list_releases(&source)?;
+    Ok(releases
+        .into_iter()
+        .map(|r| {
+            let mut label = r.tag.clone();
+            if !r.name.is_empty() && r.name != r.tag {
+                label.push_str(", ");
+                label.push_str(&r.name);
+            }
+            if r.prerelease {
+                label.push_str(" (pre-release)");
+            }
+            ReleaseEntry { tag: r.tag, label, prerelease: r.prerelease }
+        })
+        .collect())
 }
 
 pub fn run_uninstall(

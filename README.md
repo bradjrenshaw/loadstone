@@ -175,19 +175,28 @@ runtime is currently dynamic; release builds will pin it). It resolves its
 distribution profile exactly like the CLI — embedded, then a `loadstone.json`
 sidecar, then the manager default. Manager mode shows the catalog (everything
 visible through the profile's registries, merged with installed state) and a
-per-mod page: status, install/update/uninstall buttons, a live settings form
+per-mod page: status, working Install/Update/Uninstall, a live settings form
 (changes validate in Rust and write to the mod's own storage file), and
-declared actions. A single-mod profile opens straight to that mod's page —
-the standalone-installer shape. All models cross the cxx bridge as typed
-structs; the C++ never parses anything.
+declared action buttons. A single-mod profile opens straight to that mod's
+page — the standalone-installer shape. All models cross the cxx bridge as
+typed structs; the C++ never parses anything.
 
-Registry fetches run on worker threads and land back on the GUI thread via
-`wxTheApp->CallAfter`; every control is a native wx widget with a real label,
-so screen readers see a proper list, checkboxes, and buttons.
+Operations run the shared `loadstone_core::ops` orchestration (the same code
+behind the CLI) on a worker thread. The engine's `EngineUi` calls come back
+through a `UiCallbacks` object (`crates/loadstone-bridge/include/`): logs and
+progress post to the GUI thread via `wxTheApp->CallAfter`; questions —
+confirm, retry/skip/cancel, pick-directory, first-install setting prompts —
+block the worker on a future until a native dialog answers. A closed window
+answers "cancel", which the engine turns into a rollback. Every control is a
+native wx widget with a real label, so screen readers see a proper list,
+checkboxes, and buttons.
 
 A headless smoke mode prints what the bridge returned for CI:
 `LOADSTONE_SMOKE_OUT=<file>` dumps the profile, installed state, and catalog;
-`LOADSTONE_SMOKE_MOD=<id>` additionally dumps that mod's page model.
+`LOADSTONE_SMOKE_MOD=<id>` dumps that mod's page model;
+`LOADSTONE_SMOKE_INSTALL=<id>` / `LOADSTONE_SMOKE_UNINSTALL=<game:id>` run
+real operations with auto-answered callbacks (`_STATE`, `_GAME_DIR`,
+`_RELEASE` override the sandbox).
 
 Known toolchain note: very new MSVC releases (VS 18 preview era) can throw
 nondeterministic internal compiler errors building wxWidgets at high
@@ -195,8 +204,6 @@ parallelism; building wx with `-- -j 4` and retrying gets past it.
 
 ## Not yet built
 
-- Install/update/uninstall and actions from the GUI (the buttons exist and
-  explain this; the engine runs on worker threads with progress events next).
 - `loadstone link` for development checkouts (the engine already refuses to
   write through them), and `repair`.
 - tar.gz artifact extraction (macOS/Linux tool artifacts).

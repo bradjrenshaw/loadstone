@@ -142,7 +142,164 @@ mod ffi {
             setting_id: &str,
             raw_value: &str,
         ) -> Result<String>;
+
+        /// Install (or with `update` = true, update) a mod through the
+        /// profile's registries. Blocking (network + disk) — call from a
+        /// worker thread; the engine talks back through `ui`. `channel` ""
+        /// means stable; `game_dir`/`local_release` "" mean none (test
+        /// drivers use them). Returns a one-line summary.
+        fn run_install(
+            embedded: &str,
+            state_dir: &str,
+            mod_id: &str,
+            channel: &str,
+            update: bool,
+            game_dir: &str,
+            local_release: &str,
+            ui: Pin<&mut UiCallbacks>,
+        ) -> Result<String>;
+
+        /// Uninstall an installed package. The engine asks about purging
+        /// user data through `ui.confirm`. Blocking — worker thread.
+        fn run_uninstall(
+            state_dir: &str,
+            game: &str,
+            mod_id: &str,
+            ui: Pin<&mut UiCallbacks>,
+        ) -> Result<String>;
+
+        /// Run one of an installed mod's declared actions. Blocking —
+        /// worker thread (pick-directory steps prompt through `ui`).
+        fn run_mod_action(
+            state_dir: &str,
+            game: &str,
+            mod_id: &str,
+            action_id: &str,
+            ui: Pin<&mut UiCallbacks>,
+        ) -> Result<String>;
     }
+
+    unsafe extern "C++" {
+        include!("loadstone-bridge/include/ui_callbacks.h");
+
+        /// Implemented by the frontend (see include/ui_callbacks.h); the
+        /// engine's EngineUi calls arrive through these methods on the
+        /// worker thread.
+        type UiCallbacks;
+
+        fn log(self: Pin<&mut UiCallbacks>, message: &str);
+        fn progress(self: Pin<&mut UiCallbacks>, percent: u32);
+        fn confirm(self: Pin<&mut UiCallbacks>, message: &str) -> bool;
+        fn retry_skip_cancel(self: Pin<&mut UiCallbacks>, message: &str) -> u8;
+        fn pick_directory(
+            self: Pin<&mut UiCallbacks>,
+            id: &str,
+            prompt: &str,
+            suggest: &str,
+        ) -> String;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EngineUi adapter over the C++ callback object.
+
+struct GuiUi<'a>(std::pin::Pin<&'a mut ffi::UiCallbacks>);
+
+impl loadstone_core::engine::EngineUi for GuiUi<'_> {
+    fn log(&mut self, message: &str) {
+        self.0.as_mut().log(message);
+    }
+
+    fn progress(&mut self, percent: u32) {
+        self.0.as_mut().progress(percent);
+    }
+
+    fn confirm(&mut self, message: &str) -> bool {
+        self.0.as_mut().confirm(message)
+    }
+
+    fn retry_skip_cancel(&mut self, message: &str) -> loadstone_core::engine::RetryChoice {
+        use loadstone_core::engine::RetryChoice;
+        match self.0.as_mut().retry_skip_cancel(message) {
+            0 => RetryChoice::Retry,
+            1 => RetryChoice::Skip,
+            _ => RetryChoice::Cancel,
+        }
+    }
+
+    fn pick_directory(&mut self, id: &str, prompt: &str, suggest: Option<&str>) -> Option<PathBuf> {
+        let answer = self
+            .0
+            .as_mut()
+            .pick_directory(id, prompt, suggest.unwrap_or(""));
+        if answer.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(answer.to_string()))
+        }
+    }
+}
+
+fn opt_path(s: &str) -> Option<PathBuf> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
+    }
+}
+
+pub fn run_install(
+    embedded: &str,
+    state_dir: &str,
+    mod_id: &str,
+    channel: &str,
+    update: bool,
+    game_dir: &str,
+    local_release: &str,
+    ui: std::pin::Pin<&mut ffi::UiCallbacks>,
+) -> Result<String> {
+    let profile = load_profile(embedded)?;
+    let opts = loadstone_core::ops::InstallOptions {
+        id: Some(mod_id.to_string()),
+        profile,
+        state_dir: opt_path(state_dir),
+        game_dir: opt_path(game_dir),
+        local_release: opt_path(local_release),
+        channel: if channel.is_empty() { "stable".to_string() } else { channel.to_string() },
+        update_mode: update,
+        ..Default::default()
+    };
+    loadstone_core::ops::install(&opts, &mut GuiUi(ui))
+}
+
+pub fn run_uninstall(
+    state_dir: &str,
+    game: &str,
+    mod_id: &str,
+    ui: std::pin::Pin<&mut ffi::UiCallbacks>,
+) -> Result<String> {
+    loadstone_core::ops::uninstall(mod_id, game, opt_path(state_dir), None, &mut GuiUi(ui))
+}
+
+pub fn run_mod_action(
+    state_dir: &str,
+    game: &str,
+    mod_id: &str,
+    action_id: &str,
+    ui: std::pin::Pin<&mut ffi::UiCallbacks>,
+) -> Result<String> {
+    let store = open_store(state_dir)?;
+    let state = store
+        .load(game, mod_id)?
+        .with_context(|| format!("\"{mod_id}\" is not installed for {game}"))?;
+    let label = state
+        .actions
+        .iter()
+        .find(|a| a.id == action_id)
+        .map(|a| a.label.clone())
+        .unwrap_or_else(|| action_id.to_string());
+    loadstone_core::engine::run_action(&store, &state, action_id, &mut GuiUi(ui))?;
+    Ok(format!("{label} completed."))
 }
 
 pub fn core_version() -> String {

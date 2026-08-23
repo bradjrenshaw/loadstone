@@ -40,6 +40,9 @@ add_dependencies(loadstone-manager bridge)
 
 target_include_directories(loadstone-manager PRIVATE
     "${CARGO_TARGET_DIR}/cxxbridge"
+    # For loadstone-bridge/include/ui_callbacks.h (the callback interface
+    # the app implements).
+    "${REPO_ROOT}/crates"
 )
 
 target_link_libraries(loadstone-manager PRIVATE

@@ -3,12 +3,17 @@
 // Two views, both built from typed models the cxx bridge returns:
 //   - the catalog: every mod visible through the profile's registries,
 //     merged with installed state;
-//   - the mod page: status, install/update/uninstall buttons, a live
-//     settings form, and declared actions.
-// Network fetches run on worker threads; results hop back to the GUI
-// thread via wxTheApp->CallAfter (thread-safe), guarded by an alive flag
-// the frame clears on destruction. Install operations land in the next
-// phase — their buttons explain that for now.
+//   - the mod page: status, install/update/uninstall, a live settings
+//     form, and declared actions.
+//
+// Operations (install/update/uninstall/actions) run the Rust engine on a
+// worker thread. The engine talks back through a UiCallbacks object: logs
+// and progress are posted to the GUI thread with wxTheApp->CallAfter
+// (thread-safe); questions (confirm, retry/skip/cancel, pick-directory)
+// block the worker on a std::future until the user answers a native
+// dialog on the GUI thread. An alive flag cleared by the frame's
+// destructor guards every hop; a dead frame answers "cancel", which the
+// engine turns into a clean rollback.
 //
 // Everything is native wx controls with real labels, so screen readers see
 // a proper list, checkboxes, and buttons.
@@ -16,22 +21,27 @@
 // Smoke mode: when the LOADSTONE_SMOKE_OUT environment variable names a
 // file, the app writes what it got from the bridge there and exits without
 // showing a window — CI and terminal sessions verify the stack headlessly.
+// LOADSTONE_SMOKE_MOD dumps a mod page; LOADSTONE_SMOKE_INSTALL runs a
+// real install through the bridge with auto-answered callbacks (see the
+// LOADSTONE_SMOKE_GAME_DIR / _STATE / _RELEASE overrides).
 
 #include <wx/wx.h>
 #include <wx/choice.h>
+#include <wx/dirdlg.h>
 #include <wx/listbox.h>
 #include <wx/scrolwin.h>
-#include <wx/statline.h>
 
 #include <atomic>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "rust/cxx.h"
+#include "loadstone-bridge/include/ui_callbacks.h"
 #include "loadstone-bridge/src/lib.rs.h"
 
 // ENCODING RULE: narrow ("...") string literals must stay pure ASCII.
@@ -51,6 +61,10 @@ wxString FromRust(const rust::String& s) {
     return wxString::FromUTF8(s.data(), s.size());
 }
 
+wxString FromRust(rust::Str s) {
+    return wxString::FromUTF8(s.data(), s.size());
+}
+
 std::string ToStd(const wxString& s) {
     return std::string(s.utf8_str());
 }
@@ -59,10 +73,16 @@ std::string ToStd(const wxString& s) {
 
 // ---------------------------------------------------------------------------
 
+enum class OpKind { Install, Update, Uninstall, Action };
+
 class LoadstoneFrame : public wxFrame {
 public:
     LoadstoneFrame(loadstone::UiProfile profile, wxString coreVersion);
     ~LoadstoneFrame() override { alive_->store(false); }
+
+    // Called (on the GUI thread) by the operation callbacks.
+    void AppendOpLog(const wxString& line);
+    void SetOpProgress(unsigned percent);
 
 private:
     // Catalog view.
@@ -76,11 +96,15 @@ private:
     void BuildModPage(const loadstone::ModPage& page);
     void GoBack();
 
+    // Operations.
+    void RunOperation(OpKind kind, const wxString& actionId = wxString());
+    void OnOpDone(const std::string& result, const std::string& error);
+    void EnsureOpLog();
+
     // The settings form writes through the bridge as controls change.
     // Returns false (and shows the error) when the value was rejected.
     bool ApplySetting(const wxString& settingId, const wxString& rawValue);
 
-    void ShowNotYet(const wxString& what);
     void OnCharHook(wxKeyEvent& event);
 
     loadstone::UiProfile profile_;
@@ -97,10 +121,96 @@ private:
     wxScrolledWindow* pagePanel_ = nullptr;
     wxString pageModId_;
     wxString pageGame_;
+    wxString pageChannel_;
+    // Interactive page controls, disabled while an operation runs.
+    std::vector<wxWindow*> pageControls_;
+    wxTextCtrl* opLog_ = nullptr;
 
     bool fetchInFlight_ = false;
+    bool opInFlight_ = false;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 };
+
+// ---------------------------------------------------------------------------
+// The engine's callbacks, marshalled between the worker and GUI threads.
+
+class GuiUiCallbacks final : public loadstone::UiCallbacks {
+public:
+    GuiUiCallbacks(std::shared_ptr<std::atomic<bool>> alive, LoadstoneFrame* frame)
+        : alive_(std::move(alive)), frame_(frame) {}
+
+    void log(rust::Str message) override {
+        wxString text = FromRust(message);
+        Post([text](LoadstoneFrame* f) { f->AppendOpLog(text); });
+    }
+
+    void progress(std::uint32_t percent) override {
+        Post([percent](LoadstoneFrame* f) { f->SetOpProgress(percent); });
+    }
+
+    bool confirm(rust::Str message) override {
+        wxString text = FromRust(message);
+        return Ask<bool>(false, [text](LoadstoneFrame* f) {
+            return wxMessageBox(text, "Loadstone", wxYES_NO | wxICON_QUESTION, f) == wxYES;
+        });
+    }
+
+    std::uint8_t retry_skip_cancel(rust::Str message) override {
+        wxString text = FromRust(message);
+        return Ask<std::uint8_t>(2, [text](LoadstoneFrame* f) -> std::uint8_t {
+            wxMessageDialog dlg(f, text, "Problem during the operation",
+                                wxYES_NO | wxCANCEL | wxICON_WARNING);
+            dlg.SetYesNoCancelLabels("&Retry", "&Skip", "&Cancel");
+            switch (dlg.ShowModal()) {
+                case wxID_YES: return 0; // retry
+                case wxID_NO: return 1;  // skip
+                default: return 2;       // cancel
+            }
+        });
+    }
+
+    rust::String pick_directory(rust::Str id, rust::Str prompt, rust::Str suggest) override {
+        (void)id; // GUI has no preset answers; test drivers use them
+        wxString text = FromRust(prompt);
+        wxString start = FromRust(suggest);
+        std::string picked = Ask<std::string>(std::string(), [text, start](LoadstoneFrame* f) {
+            wxDirDialog dlg(f, text, start, wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+            if (dlg.ShowModal() != wxID_OK) return std::string();
+            return std::string(dlg.GetPath().utf8_str());
+        });
+        return rust::String(picked);
+    }
+
+private:
+    // Fire-and-forget onto the GUI thread.
+    template <typename Fn>
+    void Post(Fn fn) {
+        auto alive = alive_;
+        auto frame = frame_;
+        wxTheApp->CallAfter([alive, frame, fn] {
+            if (alive->load()) fn(frame);
+        });
+    }
+
+    // Run a dialog on the GUI thread; block this worker for the answer.
+    // A dead frame answers `fallback` (the cancelling choice).
+    template <typename T, typename Fn>
+    T Ask(T fallback, Fn fn) {
+        auto prom = std::make_shared<std::promise<T>>();
+        auto fut = prom->get_future();
+        auto alive = alive_;
+        auto frame = frame_;
+        wxTheApp->CallAfter([prom, alive, frame, fallback, fn] {
+            prom->set_value(alive->load() ? fn(frame) : fallback);
+        });
+        return fut.get();
+    }
+
+    std::shared_ptr<std::atomic<bool>> alive_;
+    LoadstoneFrame* frame_;
+};
+
+// ---------------------------------------------------------------------------
 
 LoadstoneFrame::LoadstoneFrame(loadstone::UiProfile profile, wxString coreVersion)
     : wxFrame(nullptr, wxID_ANY, FromRust(profile.title), wxDefaultPosition,
@@ -110,6 +220,18 @@ LoadstoneFrame::LoadstoneFrame(loadstone::UiProfile profile, wxString coreVersio
       singleMod_(std::string(profile_.mode) == "single-mod") {
     CreateStatusBar();
     Bind(wxEVT_CHAR_HOOK, &LoadstoneFrame::OnCharHook, this);
+    Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& ev) {
+        if (opInFlight_ && ev.CanVeto()) {
+            if (wxMessageBox("An operation is still running. Closing now may leave "
+                             "it unfinished. Close anyway?",
+                             "Operation in progress", wxYES_NO | wxICON_WARNING,
+                             this) != wxYES) {
+                ev.Veto();
+                return;
+            }
+        }
+        ev.Skip();
+    });
 
     if (singleMod_) {
         // The standalone-installer shape: straight to the one mod's page.
@@ -229,14 +351,15 @@ void LoadstoneFrame::OnCatalog(const loadstone::Catalog& catalog) {
     catalogPanel_->Layout();
 
     SetStatusText(wxString::Format("Catalog loaded: %zu mods.", entryIds_.size()));
-    modList_->SetFocus();
+    // Only steal focus when the catalog view is what's showing.
+    if (!pagePanel_) modList_->SetFocus();
 }
 
 // ---------------------------------------------------------------------------
 // Mod page view.
 
 void LoadstoneFrame::OpenMod(const wxString& id) {
-    if (fetchInFlight_) return;
+    if (fetchInFlight_ || opInFlight_) return;
     fetchInFlight_ = true;
     SetStatusText(wxString::Format("Loading %s...", id));
 
@@ -276,15 +399,16 @@ void LoadstoneFrame::OnModPage(const loadstone::ModPage& page) {
 }
 
 void LoadstoneFrame::GoBack() {
-    if (!pagePanel_ || singleMod_) return;
+    if (!pagePanel_ || singleMod_ || opInFlight_) return;
     pagePanel_->Destroy();
     pagePanel_ = nullptr;
+    opLog_ = nullptr;
+    pageControls_.clear();
     catalogPanel_->Show();
     Layout();
     SetStatusText("");
     modList_->SetFocus();
-    // Installed status may have changed once operations land; harmless now,
-    // and keeps the list honest later.
+    // Refresh so installed statuses stay honest after operations.
     StartCatalogFetch();
 }
 
@@ -293,8 +417,11 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
         pagePanel_->Destroy();
         pagePanel_ = nullptr;
     }
+    opLog_ = nullptr;
+    pageControls_.clear();
     pageModId_ = FromRust(page.id);
     pageGame_ = FromRust(page.installed_game);
+    pageChannel_ = FromRust(page.channel);
 
     pagePanel_ = new wxScrolledWindow(this);
     pagePanel_->SetScrollRate(0, 12);
@@ -303,6 +430,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
     if (!singleMod_) {
         auto* back = new wxButton(pagePanel_, wxID_ANY, "&Back to mod list");
         back->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { GoBack(); });
+        pageControls_.push_back(back);
         sizer->Add(back, 0, wxALL, 8);
     }
 
@@ -329,18 +457,17 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
         sizer->Add(desc, 0, wxEXPAND | wxALL, 8);
     }
 
-    // Install / Update / Uninstall — wired to the engine in the next build.
     auto* ops = new wxBoxSizer(wxHORIZONTAL);
-    auto addOp = [&](const wxString& label, bool enabled, const wxString& what) {
+    auto addOp = [&](const wxString& label, bool enabled, OpKind kind) {
         auto* b = new wxButton(pagePanel_, wxID_ANY, label);
         b->Enable(enabled);
-        b->Bind(wxEVT_BUTTON, [this, what](wxCommandEvent&) { ShowNotYet(what); });
+        b->Bind(wxEVT_BUTTON, [this, kind](wxCommandEvent&) { RunOperation(kind); });
+        if (enabled) pageControls_.push_back(b);
         ops->Add(b, 0, wxRIGHT, 8);
-        return b;
     };
-    addOp("&Install", page.can_install, "Installing");
-    addOp("&Update", page.can_update, "Updating");
-    addOp("U&ninstall", page.can_uninstall, "Uninstalling");
+    addOp("&Install", page.can_install, OpKind::Install);
+    addOp("&Update", page.can_update, OpKind::Update);
+    addOp("U&ninstall", page.can_uninstall, OpKind::Uninstall);
     sizer->Add(ops, 0, wxALL, 8);
 
     if (!page.settings.empty()) {
@@ -362,6 +489,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
                     if (!ApplySetting(sid, ev.IsChecked() ? "true" : "false"))
                         check->SetValue(!ev.IsChecked()); // rejected: revert
                 });
+                if (page.settings_editable) pageControls_.push_back(check);
                 box->Add(check, 0, wxALL, 6);
             } else if (kind == "choice") {
                 auto* row = new wxBoxSizer(wxHORIZONTAL);
@@ -388,6 +516,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
                                  else
                                      choice->SetSelection(previous);
                              });
+                if (page.settings_editable) pageControls_.push_back(choice);
                 row->Add(choice, 0);
                 box->Add(row, 0, wxALL, 6);
             } else { // string / number: edit, apply with Enter
@@ -406,6 +535,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
                     else
                         text->SetValue(last); // rejected: restore
                 });
+                if (page.settings_editable) pageControls_.push_back(text);
                 row->Add(text, 0);
                 row->Add(new wxStaticText(parent, wxID_ANY, "(press Enter to save)"), 0,
                          wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
@@ -426,8 +556,11 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
             b->Enable(page.actions_available);
             wxString describe = FromRust(a.description);
             if (!describe.empty()) b->SetToolTip(describe);
-            wxString label = FromRust(a.label);
-            b->Bind(wxEVT_BUTTON, [this, label](wxCommandEvent&) { ShowNotYet(label); });
+            wxString actionId = FromRust(a.id);
+            b->Bind(wxEVT_BUTTON, [this, actionId](wxCommandEvent&) {
+                RunOperation(OpKind::Action, actionId);
+            });
+            if (page.actions_available) pageControls_.push_back(b);
             box->Add(b, 0, wxALL, 6);
         }
         sizer->Add(box, 0, wxEXPAND | wxALL, 8);
@@ -442,6 +575,96 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
     pagePanel_->SetSizer(sizer);
     pagePanel_->FitInside();
 }
+
+// ---------------------------------------------------------------------------
+// Operations.
+
+void LoadstoneFrame::EnsureOpLog() {
+    if (opLog_ || !pagePanel_) return;
+    auto* label = new wxStaticText(pagePanel_, wxID_ANY, "Activity:");
+    opLog_ = new wxTextCtrl(pagePanel_, wxID_ANY, "", wxDefaultPosition,
+                            wxSize(-1, 120), wxTE_MULTILINE | wxTE_READONLY);
+    auto* sizer = pagePanel_->GetSizer();
+    sizer->Add(label, 0, wxLEFT | wxRIGHT, 8);
+    sizer->Add(opLog_, 0, wxEXPAND | wxALL, 8);
+    pagePanel_->FitInside();
+    pagePanel_->Layout();
+}
+
+void LoadstoneFrame::AppendOpLog(const wxString& line) {
+    if (opLog_) opLog_->AppendText(line + "\n");
+}
+
+void LoadstoneFrame::SetOpProgress(unsigned percent) {
+    SetStatusText(wxString::Format("Working... %u%%", percent));
+}
+
+void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId) {
+    if (opInFlight_ || fetchInFlight_) return;
+    if (kind == OpKind::Uninstall) {
+        if (wxMessageBox(wxString::Format("Uninstall %s?", pageModId_),
+                         "Confirm uninstall", wxYES_NO | wxICON_QUESTION,
+                         this) != wxYES)
+            return;
+    }
+    opInFlight_ = true;
+    for (auto* c : pageControls_) c->Enable(false);
+    EnsureOpLog();
+    opLog_->Clear();
+    SetStatusText("Working...");
+
+    auto alive = alive_;
+    auto cb = std::make_shared<GuiUiCallbacks>(alive_, this);
+    std::string modId = ToStd(pageModId_);
+    std::string game = ToStd(pageGame_);
+    std::string channel = ToStd(pageChannel_);
+    std::string action = ToStd(actionId);
+    std::thread([alive, this, cb, kind, modId, game, channel, action] {
+        std::string result, error;
+        try {
+            switch (kind) {
+                case OpKind::Install:
+                    result = std::string(loadstone::run_install(
+                        kEmbeddedProfile, "", modId, "", false, "", "", *cb));
+                    break;
+                case OpKind::Update:
+                    result = std::string(loadstone::run_install(
+                        kEmbeddedProfile, "", modId, channel, true, "", "", *cb));
+                    break;
+                case OpKind::Uninstall:
+                    result = std::string(loadstone::run_uninstall("", game, modId, *cb));
+                    break;
+                case OpKind::Action:
+                    result = std::string(
+                        loadstone::run_mod_action("", game, modId, action, *cb));
+                    break;
+            }
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        wxTheApp->CallAfter([alive, this, result, error] {
+            if (alive->load()) OnOpDone(result, error);
+        });
+    }).detach();
+}
+
+void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& error) {
+    opInFlight_ = false;
+    if (!error.empty()) {
+        SetStatusText("The operation failed.");
+        AppendOpLog(wxString::FromUTF8(error.c_str()));
+        wxMessageBox(wxString::FromUTF8(error.c_str()), "Operation failed",
+                     wxOK | wxICON_ERROR, this);
+    } else {
+        SetStatusText(wxString::FromUTF8(result.c_str()));
+        wxMessageBox(wxString::FromUTF8(result.c_str()), "Done",
+                     wxOK | wxICON_INFORMATION, this);
+    }
+    // Reload the page so status, buttons, and settings reflect reality.
+    OpenMod(pageModId_);
+}
+
+// ---------------------------------------------------------------------------
 
 bool LoadstoneFrame::ApplySetting(const wxString& settingId, const wxString& rawValue) {
     try {
@@ -459,24 +682,40 @@ bool LoadstoneFrame::ApplySetting(const wxString& settingId, const wxString& raw
     }
 }
 
-void LoadstoneFrame::ShowNotYet(const wxString& what) {
-    wxMessageBox(
-        wxString::Format(
-            "%s from this app arrives in the next build.\n\n"
-            "Until then, the loadstone command-line tool can do it, for "
-            "example: loadstone install %s",
-            what, pageModId_),
-        "Coming soon", wxOK | wxICON_INFORMATION, this);
-}
-
 void LoadstoneFrame::OnCharHook(wxKeyEvent& event) {
     // Escape returns from a mod page to the list (manager mode only).
-    if (event.GetKeyCode() == WXK_ESCAPE && pagePanel_ && !singleMod_) {
+    if (event.GetKeyCode() == WXK_ESCAPE && pagePanel_ && !singleMod_ && !opInFlight_) {
         GoBack();
         return;
     }
     event.Skip();
 }
+
+// ---------------------------------------------------------------------------
+// Smoke-mode callbacks: auto-answer, record everything.
+
+class SmokeUi final : public loadstone::UiCallbacks {
+public:
+    explicit SmokeUi(std::ofstream& out) : out_(out) {}
+
+    void log(rust::Str m) override { out_ << "op-log: " << std::string(m) << "\n"; }
+    void progress(std::uint32_t) override {}
+    bool confirm(rust::Str m) override {
+        out_ << "op-confirm: " << std::string(m) << " -> yes\n";
+        return true;
+    }
+    std::uint8_t retry_skip_cancel(rust::Str m) override {
+        out_ << "op-rsc: " << std::string(m) << " -> cancel\n";
+        return 2;
+    }
+    rust::String pick_directory(rust::Str id, rust::Str, rust::Str) override {
+        out_ << "op-pickdir: " << std::string(id) << " -> cancel\n";
+        return rust::String();
+    }
+
+private:
+    std::ofstream& out_;
+};
 
 // ---------------------------------------------------------------------------
 
@@ -507,11 +746,13 @@ bool LoadstoneApp::OnInit() {
             out << "version: " << std::string(version) << "\n";
             out << "mode: " << std::string(profile.mode) << "\n";
             out << "title: " << std::string(profile.title) << "\n";
+            const char* stateEnv = std::getenv("LOADSTONE_SMOKE_STATE");
+            std::string state = stateEnv ? stateEnv : "";
             try {
                 out << "profile: " << std::string(loadstone::resolve_profile(kEmbeddedProfile))
                     << "\n";
-                out << "installed: " << std::string(loadstone::installed_json("")) << "\n";
-                auto catalog = loadstone::fetch_catalog(kEmbeddedProfile, "");
+                out << "installed: " << std::string(loadstone::installed_json(state)) << "\n";
+                auto catalog = loadstone::fetch_catalog(kEmbeddedProfile, state);
                 out << "catalog: " << catalog.entries.size() << "\n";
                 for (const auto& e : catalog.entries)
                     out << "catalog-entry: " << std::string(e.id) << " | "
@@ -520,7 +761,7 @@ bool LoadstoneApp::OnInit() {
                     out << "catalog-note: " << std::string(n) << "\n";
                 // Optional deep check: dump one mod's page model.
                 if (const char* modId = std::getenv("LOADSTONE_SMOKE_MOD")) {
-                    auto page = loadstone::fetch_mod_page(kEmbeddedProfile, "", modId);
+                    auto page = loadstone::fetch_mod_page(kEmbeddedProfile, state, modId);
                     out << "page: " << std::string(page.name) << " | " << std::string(page.status)
                         << " | latest=" << std::string(page.latest_version)
                         << " | install=" << page.can_install << " update=" << page.can_update
@@ -533,6 +774,40 @@ bool LoadstoneApp::OnInit() {
                         out << "page-action: " << std::string(a.id) << "\n";
                     for (const auto& n : page.notes)
                         out << "page-note: " << std::string(n) << "\n";
+                }
+                // Optional full-path check: run a real install through the
+                // bridge with auto-answered callbacks.
+                if (const char* installId = std::getenv("LOADSTONE_SMOKE_INSTALL")) {
+                    const char* gameDir = std::getenv("LOADSTONE_SMOKE_GAME_DIR");
+                    const char* release = std::getenv("LOADSTONE_SMOKE_RELEASE");
+                    SmokeUi sui(out);
+                    try {
+                        auto summary = loadstone::run_install(
+                            kEmbeddedProfile, state, installId, "", false,
+                            gameDir ? gameDir : "", release ? release : "", sui);
+                        out << "op-result: " << std::string(summary) << "\n";
+                        out << "installed-after: "
+                            << std::string(loadstone::installed_json(state)) << "\n";
+                    } catch (const std::exception& e) {
+                        out << "op-error: " << e.what() << "\n";
+                    }
+                }
+                // Optional: uninstall driver, value "game:id".
+                if (const char* spec = std::getenv("LOADSTONE_SMOKE_UNINSTALL")) {
+                    std::string s(spec);
+                    auto colon = s.find(':');
+                    SmokeUi sui(out);
+                    try {
+                        if (colon == std::string::npos)
+                            throw std::runtime_error("LOADSTONE_SMOKE_UNINSTALL wants game:id");
+                        auto summary = loadstone::run_uninstall(
+                            state, s.substr(0, colon), s.substr(colon + 1), sui);
+                        out << "op-result: " << std::string(summary) << "\n";
+                        out << "installed-after: "
+                            << std::string(loadstone::installed_json(state)) << "\n";
+                    } catch (const std::exception& e) {
+                        out << "op-error: " << e.what() << "\n";
+                    }
                 }
             } catch (const std::exception& e) {
                 out << "catalog-error: " << e.what() << "\n";

@@ -12,6 +12,7 @@ pub mod detect;
 pub mod engine;
 pub mod fetch;
 pub mod jsonedit;
+pub mod ops;
 pub mod profile;
 pub mod registry;
 pub mod release;

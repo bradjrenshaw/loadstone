@@ -14,5 +14,8 @@ serde_json.workspace = true
 anyhow.workspace = true
 cxx = "1"
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [build-dependencies]
 cxx-build = "1"

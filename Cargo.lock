@@ -865,6 +865,7 @@ dependencies = [
  "cxx-build",
  "loadstone-core",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

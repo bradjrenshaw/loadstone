@@ -15,6 +15,7 @@ pub mod jsonedit;
 pub mod profile;
 pub mod registry;
 pub mod release;
+pub mod settings;
 pub mod tokens;
 pub mod track;
 pub mod types;

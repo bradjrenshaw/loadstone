@@ -446,7 +446,8 @@ pub fn cmd_settings(
     state_dir: Option<PathBuf>,
     sets: &[String],
 ) -> Result<()> {
-    use loadstone_core::types::{SettingType, Settings};
+    use loadstone_core::settings as core_settings;
+    use loadstone_core::types::Settings;
     let store = StateStore::open(state_dir)?;
     let state = store
         .load(game, id)?
@@ -460,21 +461,11 @@ pub fn cmd_settings(
         .as_ref()
         .context("no settings storage file recorded")?;
 
-    let mut values: serde_json::Map<String, serde_json::Value> = if file.exists() {
-        serde_json::from_str(
-            std::fs::read_to_string(file)?.trim_start_matches('\u{feff}'),
-        )
-        .with_context(|| format!("{} is not valid JSON", file.display()))?
-    } else {
-        Default::default()
-    };
-
     if sets.is_empty() {
         // List: one setting per line, current value first for quick reading.
+        let values = core_settings::read_values(file)?;
         for entry in &settings.entries {
-            let current = values
-                .get(&entry.id)
-                .or(entry.default.as_ref())
+            let current = core_settings::effective(entry, &values)
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "unset".to_string());
             println!("{} = {}  ({})", entry.id, current, entry.label);
@@ -485,58 +476,15 @@ pub fn cmd_settings(
         return Ok(());
     }
 
+    let mut note = None;
     for pair in sets {
         let (key, raw) = pair
             .split_once('=')
             .with_context(|| format!("--set takes id=value, got \"{pair}\""))?;
-        let entry = settings
-            .entries
-            .iter()
-            .find(|e| e.id == key)
-            .with_context(|| {
-                let known: Vec<&str> = settings.entries.iter().map(|e| e.id.as_str()).collect();
-                format!("no setting \"{key}\" (known: {})", known.join(", "))
-            })?;
-        let value = match entry.entry_type {
-            SettingType::Boolean => match raw.to_lowercase().as_str() {
-                "true" | "yes" | "on" | "1" => serde_json::Value::Bool(true),
-                "false" | "no" | "off" | "0" => serde_json::Value::Bool(false),
-                _ => bail!("\"{key}\" is a boolean; use true or false"),
-            },
-            SettingType::Number => {
-                let n: f64 = raw.parse().with_context(|| format!("\"{key}\" needs a number"))?;
-                if let Some(min) = entry.min {
-                    if n < min {
-                        bail!("\"{key}\" must be at least {min}");
-                    }
-                }
-                if let Some(max) = entry.max {
-                    if n > max {
-                        bail!("\"{key}\" must be at most {max}");
-                    }
-                }
-                serde_json::json!(n)
-            }
-            SettingType::String => serde_json::Value::String(raw.to_string()),
-            SettingType::Choice => {
-                let value = serde_json::Value::String(raw.to_string());
-                if !entry.options.iter().any(|o| o.value == value) {
-                    let options: Vec<String> =
-                        entry.options.iter().map(|o| o.value.to_string()).collect();
-                    bail!("\"{key}\" must be one of: {}", options.join(", "));
-                }
-                value
-            }
-        };
-        values.insert(key.to_string(), value);
+        note = core_settings::set(settings, file, key, raw)?;
         println!("{key} set.");
     }
-
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(file, serde_json::to_string_pretty(&serde_json::Value::Object(values))?)?;
-    if let Some(note) = &settings.note {
+    if let Some(note) = note {
         println!("{note}");
     }
     Ok(())

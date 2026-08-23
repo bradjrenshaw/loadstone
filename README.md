@@ -173,8 +173,21 @@ cmake --build build
 `build/loadstone-manager.exe` is a single statically linked binary (the VC
 runtime is currently dynamic; release builds will pin it). It resolves its
 distribution profile exactly like the CLI — embedded, then a `loadstone.json`
-sidecar, then the manager default — and a headless smoke mode
-(`LOADSTONE_SMOKE_OUT=<file>`) prints what the bridge returned for CI.
+sidecar, then the manager default. Manager mode shows the catalog (everything
+visible through the profile's registries, merged with installed state) and a
+per-mod page: status, install/update/uninstall buttons, a live settings form
+(changes validate in Rust and write to the mod's own storage file), and
+declared actions. A single-mod profile opens straight to that mod's page —
+the standalone-installer shape. All models cross the cxx bridge as typed
+structs; the C++ never parses anything.
+
+Registry fetches run on worker threads and land back on the GUI thread via
+`wxTheApp->CallAfter`; every control is a native wx widget with a real label,
+so screen readers see a proper list, checkboxes, and buttons.
+
+A headless smoke mode prints what the bridge returned for CI:
+`LOADSTONE_SMOKE_OUT=<file>` dumps the profile, installed state, and catalog;
+`LOADSTONE_SMOKE_MOD=<id>` additionally dumps that mod's page model.
 
 Known toolchain note: very new MSVC releases (VS 18 preview era) can throw
 nondeterministic internal compiler errors building wxWidgets at high
@@ -182,10 +195,8 @@ parallelism; building wx with `-- -j 4` and retrying gets past it.
 
 ## Not yet built
 
-- The real manager/mod-page UI in the wx shell (currently a walking skeleton:
-  window title from the profile, installed list from state, core version).
-- Bridge operations for install/uninstall/update with progress events
-  marshalled to the GUI thread.
+- Install/update/uninstall and actions from the GUI (the buttons exist and
+  explain this; the engine runs on worker threads with progress events next).
 - `loadstone link` for development checkouts (the engine already refuses to
   write through them), and `repair`.
 - tar.gz artifact extraction (macOS/Linux tool artifacts).

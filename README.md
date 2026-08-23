@@ -92,7 +92,11 @@ interpreter, hash verification, file tracking, dependency installs with
 `pinnedRelease`) and is driven from the CLI:
 
 ```
-loadstone install blindfold --scope path/to/repo/loadstone-packages --scope path/to/registry/loadstone-packages
+loadstone install blindfold --registry github:bradjrenshaw/loadstone-registry
+loadstone install blindfold --channel dev --registry github:bradjrenshaw/loadstone-registry
+loadstone update blindfold --registry github:bradjrenshaw/loadstone-registry
+loadstone settings say-the-spire-2 --game slay-the-spire-2 --set screen_reader=false
+loadstone action say-the-spire-2 install-jaws-config --game slay-the-spire-2
 loadstone list
 loadstone uninstall blindfold --game balatro
 ```
@@ -107,7 +111,16 @@ loadstone uninstall blindfold --game balatro
 - Updates remove the previous version's tracked files before extracting, so
   stale files never linger; uninstall works purely from recorded state and
   offers to purge declared user data.
-- `--user-data`, `--state-dir`, and `--yes` support sandboxed/automated runs.
+- `--channel dev` installs a declared branch channel from the branch's tip
+  (`main@<sha>` versions, explicitly not hash-pinned); `update` compares the
+  recorded sha against the live tip.
+- Settings declared in the manifest are initialized on first install
+  (promptOnInstall booleans are asked), listed and changed with the
+  `settings` command, and stored where the mod reads them.
+- Declared actions run with `action` — pick-directory steps prompt, or take
+  `--dir id=path` for automation.
+- `--user-data`, `--state-dir`, `--yes`, and `--dir` support
+  sandboxed/automated runs.
 
 ## Distribution profiles: one binary, manager or standalone installer
 
@@ -148,8 +161,8 @@ at startup (first match wins):
 ## Not yet built
 
 - The C++ wxWidgets GUI described above (the engine API is its backend).
-- Branch (dev) channel installs and linked development checkouts.
-- Settings, actions, and repair surfaced through the CLI.
+- `loadstone link` for development checkouts (the engine already refuses to
+  write through them), and `repair`.
 - tar.gz artifact extraction (macOS/Linux tool artifacts).
 - `loadstone release` — creating/uploading the GitHub release itself (use
   `gh release create` for now).

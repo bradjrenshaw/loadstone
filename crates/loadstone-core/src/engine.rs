@@ -30,7 +30,9 @@ pub trait EngineUi {
     fn progress(&mut self, percent: u32);
     fn confirm(&mut self, message: &str) -> bool;
     fn retry_skip_cancel(&mut self, message: &str) -> RetryChoice;
-    fn pick_directory(&mut self, prompt: &str, suggest: Option<&str>) -> Option<PathBuf>;
+    /// `id` is the pick-directory step's variable id, letting frontends
+    /// pre-supply answers (CLI --dir flags, GUI test drivers).
+    fn pick_directory(&mut self, id: &str, prompt: &str, suggest: Option<&str>) -> Option<PathBuf>;
 }
 
 /// Everything install() needs, resolved by the caller (CLI or GUI):
@@ -50,6 +52,13 @@ pub struct InstallPlan<'a> {
     pub keep_existing: bool,
     /// When this is a dependency install, the id of the package needing it.
     pub dependent_of: Option<String>,
+    /// Settings schema to freeze into state (and initialize on first install).
+    pub settings: Option<&'a crate::types::Settings>,
+    /// Actions to freeze into state.
+    pub actions: &'a [crate::types::Action],
+    /// Branch-zipball installs: strip the archive's single top-level folder
+    /// before route matching (SPEC §8).
+    pub strip_top_level: bool,
 }
 
 pub fn install(
@@ -93,11 +102,12 @@ pub fn install(
 
     // 3. Run the steps, tracking every write; roll back on failure.
     let mut written: Vec<PathBuf> = Vec::new();
-    let run = run_steps(
+    let run = run_steps_inner(
         ctx,
         plan.install_steps,
         Some(plan.artifact),
         plan.keep_existing,
+        plan.strip_top_level,
         &mut written,
         ui,
     );
@@ -106,6 +116,20 @@ pub fn install(
         let _ = remove_tracked_files(&written, &roots_of(ctx));
         return Err(e);
     }
+
+    // 3b. Settings: freeze the schema; on a fresh install (or a missing
+    //     storage file) materialize values, prompting for promptOnInstall
+    //     booleans. An existing file is the user's — leave it alone.
+    let settings_file = match plan.settings {
+        Some(settings) => {
+            let path = ctx.resolve_path(&settings.storage.file)?;
+            if !path.exists() {
+                initialize_settings(ctx, settings, prior.is_none(), &path, ui)?;
+            }
+            Some(path)
+        }
+        None => None,
+    };
 
     // 4. Record state, with uninstall data pre-resolved so removal never
     //    needs manifests or token resolution again.
@@ -142,9 +166,108 @@ pub fn install(
         game_dir: ctx.game_dir.clone(),
         user_data: ctx.user_data.clone(),
         distribution: ctx.distribution.clone(),
+        game_paths: ctx.game_paths.clone(),
+        settings: plan.settings.cloned(),
+        settings_file,
+        actions: plan.actions.to_vec(),
     };
     store.save(&state)?;
     Ok(state)
+}
+
+/// Write the settings storage file from schema defaults, asking the user the
+/// promptOnInstall booleans on a fresh install. Non-boolean prompts fall back
+/// to their defaults with a note (the settings command changes them later).
+fn initialize_settings(
+    ctx: &InstallContext,
+    settings: &crate::types::Settings,
+    fresh: bool,
+    path: &PathBuf,
+    ui: &mut dyn EngineUi,
+) -> Result<()> {
+    use crate::types::SettingType;
+    let mut values = serde_json::Map::new();
+    for entry in &settings.entries {
+        let mut value = entry.default.clone().unwrap_or(serde_json::Value::Null);
+        if fresh && entry.prompt_on_install {
+            if entry.entry_type == SettingType::Boolean {
+                let mut message = entry.label.clone();
+                if let Some(desc) = &entry.description {
+                    message.push_str("\n");
+                    message.push_str(desc);
+                }
+                value = serde_json::Value::Bool(ui.confirm(&message));
+            } else {
+                ui.log(&format!(
+                    "Setting \"{}\" starts at its default; change it later with the settings command.",
+                    entry.label
+                ));
+            }
+        }
+        values.insert(entry.id.clone(), value);
+    }
+    ctx.check_write_allowed(path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&serde_json::Value::Object(values))?)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    ui.log(&format!("Wrote settings to {}.", path.display()));
+    Ok(())
+}
+
+/// Rebuild an install context from recorded state (offline; no manifests).
+pub fn context_from_state(state: &InstalledState) -> InstallContext {
+    InstallContext {
+        platform: crate::context::current_platform().to_string(),
+        arch: crate::context::current_arch().to_string(),
+        distribution: state.distribution.clone(),
+        game_dir: state.game_dir.clone(),
+        user_data: state.user_data.clone(),
+        game_paths: state.game_paths.clone(),
+        vars: Default::default(),
+    }
+}
+
+/// Run one of the package's declared actions, tracking any files it writes.
+pub fn run_action(
+    store: &StateStore,
+    state: &InstalledState,
+    action_id: &str,
+    ui: &mut dyn EngineUi,
+) -> Result<()> {
+    let action = state
+        .actions
+        .iter()
+        .find(|a| a.id == action_id)
+        .with_context(|| {
+            let available: Vec<&str> = state.actions.iter().map(|a| a.id.as_str()).collect();
+            format!(
+                "\"{action_id}\" is not an action of {} (available: {})",
+                state.id,
+                if available.is_empty() { "none".to_string() } else { available.join(", ") }
+            )
+        })?;
+    let mut ctx = context_from_state(state);
+    if let Some(cond) = &action.enabled_when {
+        if !ctx.condition_matches(cond)? {
+            bail!(
+                "\"{}\" is not available right now (its precondition doesn't hold)",
+                action.label
+            );
+        }
+    }
+    ui.log(&format!("Running \"{}\"...", action.label));
+    let mut written = Vec::new();
+    let result = run_steps(&mut ctx, &action.steps, None, false, &mut written, ui);
+    if !written.is_empty() {
+        let mut updated = state.clone();
+        updated.files.extend(written);
+        store.save(&updated)?;
+    }
+    result?;
+    ui.log(&format!("\"{}\" finished.", action.label));
+    Ok(())
 }
 
 /// Refuse to delete tracked files that now sit behind a symlink or junction:
@@ -183,6 +306,18 @@ pub fn run_steps(
     written: &mut Vec<PathBuf>,
     ui: &mut dyn EngineUi,
 ) -> Result<()> {
+    run_steps_inner(ctx, steps, artifact, keep_existing, false, written, ui)
+}
+
+fn run_steps_inner(
+    ctx: &mut InstallContext,
+    steps: &[Step],
+    artifact: Option<&[u8]>,
+    keep_existing: bool,
+    strip_top_level: bool,
+    written: &mut Vec<PathBuf>,
+    ui: &mut dyn EngineUi,
+) -> Result<()> {
     'steps: for step in steps {
         // Conditional skip.
         if let Some(cond) = &step.common().when {
@@ -218,7 +353,8 @@ pub fn run_steps(
             Step::ExtractArchive { routes, .. } => {
                 let data = artifact.context("extract-archive step but no artifact available")?;
                 ui.log("Extracting files...");
-                let outcome = archive::extract_routed(ctx, data, routes, keep_existing)?;
+                let outcome =
+                    archive::extract_routed(ctx, data, routes, keep_existing, strip_top_level)?;
                 ui.log(&format!("Placed {} file(s).", outcome.written.len()));
                 for kept in &outcome.kept_existing {
                     ui.log(&format!(
@@ -289,7 +425,7 @@ pub fn run_steps(
                 }
             }
             Step::PickDirectory { id, prompt, suggest, .. } => {
-                match ui.pick_directory(prompt, suggest.as_deref()) {
+                match ui.pick_directory(id, prompt, suggest.as_deref()) {
                     Some(dir) => {
                         ctx.vars.insert(id.clone(), dir);
                     }
@@ -332,16 +468,8 @@ pub fn uninstall(
     }
 
     if !state.uninstall_steps.is_empty() {
-        // Steps were pre-resolved at install time; rebuild a minimal context.
-        let mut ctx = InstallContext {
-            platform: crate::context::current_platform().to_string(),
-            arch: crate::context::current_arch().to_string(),
-            distribution: state.distribution.clone(),
-            game_dir: state.game_dir.clone(),
-            user_data: state.user_data.clone(),
-            game_paths: Default::default(),
-            vars: Default::default(),
-        };
+        // Steps were pre-resolved at install time.
+        let mut ctx = context_from_state(state);
         let mut scratch = Vec::new();
         run_steps(&mut ctx, &state.uninstall_steps, None, false, &mut scratch, ui)?;
     }

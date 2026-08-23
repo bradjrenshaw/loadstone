@@ -73,6 +73,28 @@ pub fn download(url: &str, mut progress: impl FnMut(u32)) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
+/// URL of a branch's zipball (plain archive endpoint, not rate-limited).
+pub fn branch_zipball_url(source: &str, branch: &str) -> Result<String> {
+    let (owner, repo) = parse_github_source(source)?;
+    Ok(format!(
+        "https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip"
+    ))
+}
+
+/// Short sha of the tip of a branch, via the GitHub API (rate-limited to 60
+/// unauthenticated requests/hour — callers treat failures as best-effort).
+pub fn branch_tip_sha(source: &str, branch: &str) -> Result<String> {
+    let (owner, repo) = parse_github_source(source)?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{branch}");
+    let bytes = download(&url, |_| {})?;
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).context("commit API response")?;
+    let sha = doc
+        .get("sha")
+        .and_then(serde_json::Value::as_str)
+        .context("commit API response has no sha")?;
+    Ok(sha.chars().take(7).collect())
+}
+
 /// Fetch and parse the latest release.json for a source repo.
 pub fn fetch_latest_release_manifest(source: &str) -> Result<crate::types::ReleaseManifest> {
     let url = latest_asset_url(source, "release.json")?;

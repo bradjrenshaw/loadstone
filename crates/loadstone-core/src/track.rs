@@ -2,12 +2,13 @@
 //! recorded per package per game; uninstall and updates work from this
 //! record, so nothing depends on re-resolving manifests later.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::types::Step;
+use crate::types::{Action, Settings, Step};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +40,18 @@ pub struct InstalledState {
     pub user_data: PathBuf,
     #[serde(default)]
     pub distribution: String,
+    /// Resolved game paths, so actions and settings work offline from state.
+    #[serde(default)]
+    pub game_paths: BTreeMap<String, PathBuf>,
+    /// The settings schema frozen at install time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Settings>,
+    /// Resolved absolute path of the settings storage file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_file: Option<PathBuf>,
+    /// Actions frozen at install time (paths unresolved; run with context).
+    #[serde(default)]
+    pub actions: Vec<Action>,
 }
 
 /// Root of the state store. Overridable for tests/sandboxes.
@@ -192,6 +205,10 @@ mod tests {
             game_dir: tmp.path().join("game"),
             user_data: tmp.path().join("ud"),
             distribution: "steam".into(),
+            game_paths: BTreeMap::new(),
+            settings: None,
+            settings_file: None,
+            actions: Vec::new(),
         };
         store.save(&state).unwrap();
         let loaded = store.load("balatro", "blindfold").unwrap().unwrap();

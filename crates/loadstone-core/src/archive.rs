@@ -61,12 +61,14 @@ pub struct ExtractOutcome {
 /// Extract `data` through `routes`. Routes with a non-matching `when` are
 /// dropped before extraction. `keep_existing` implements a tool's
 /// `keep-newer` conflict policy: an already-present destination file that we
-/// did not track is left untouched.
+/// did not track is left untouched. `strip_top_level` drops the single
+/// leading folder of branch zipballs before route matching.
 pub fn extract_routed(
     ctx: &InstallContext,
     data: &[u8],
     routes: &[Route],
     keep_existing: bool,
+    strip_top_level: bool,
 ) -> Result<ExtractOutcome> {
     // Resolve route destinations once, dropping routes whose `when` misses.
     let mut resolved: Vec<(String, PathBuf)> = Vec::new();
@@ -105,11 +107,20 @@ pub fn extract_routed(
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).context("failed to open archive as zip")?;
 
+    let effective_name = |raw: &str| -> Result<Option<String>> {
+        let name = sanitize(raw)?;
+        if !strip_top_level {
+            return Ok(Some(name));
+        }
+        // "<repo-ref>/rest..." -> "rest..."; entries at the root are dropped.
+        Ok(name.split_once('/').map(|(_, rest)| rest.to_string()).filter(|r| !r.is_empty()))
+    };
+
     // Preflight: the archive must contain at least one routed entry.
     let mut any_match = false;
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
-        let name = sanitize(entry.name())?;
+        let Some(name) = effective_name(entry.name())? else { continue };
         if !name.ends_with('/') {
             if let Target::File(_) = route_entry(ctx, &resolved, &name) {
                 any_match = true;
@@ -124,7 +135,7 @@ pub fn extract_routed(
     let mut outcome = ExtractOutcome { written: Vec::new(), kept_existing: Vec::new() };
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let name = sanitize(entry.name())?;
+        let Some(name) = effective_name(entry.name())? else { continue };
         if name.ends_with('/') {
             continue;
         }
@@ -208,6 +219,7 @@ mod tests {
             &zip,
             &routes(serde_json::json!([{ "from": "Blindfold/**", "to": "${game.mods}/Blindfold" }])),
             false,
+            false,
         )
         .unwrap();
         assert_eq!(out.written.len(), 2);
@@ -229,6 +241,7 @@ mod tests {
             &zip,
             &routes(serde_json::json!([{ "from": "version.dll", "to": "${gameDir}/version.dll" }])),
             true,
+            false,
         )
         .unwrap();
         assert!(out.written.is_empty());
@@ -242,10 +255,10 @@ mod tests {
         let ctx = ctx(tmp.path());
         let evil = make_zip(&[("../evil.dll", b"x"), ("Blindfold/a.lua", b"y")]);
         let r = routes(serde_json::json!([{ "from": "Blindfold/**", "to": "${game.mods}/Blindfold" }]));
-        assert!(extract_routed(&ctx, &evil, &r, false).is_err());
+        assert!(extract_routed(&ctx, &evil, &r, false, false).is_err());
 
         let unrelated = make_zip(&[("Other/readme.txt", b"z")]);
-        let err = extract_routed(&ctx, &unrelated, &r, false).unwrap_err();
+        let err = extract_routed(&ctx, &unrelated, &r, false, false).unwrap_err();
         assert!(err.to_string().contains("expected payload"));
     }
 }

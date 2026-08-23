@@ -105,10 +105,63 @@ enum Command {
         /// Artifact file for --local-release (default: named file next to it).
         #[arg(long, requires = "local_release")]
         local_artifact: Option<PathBuf>,
+        /// Channel: "stable" (releases) or a branch channel the mod declares
+        /// (development builds from that branch's tip, not hash-pinned).
+        #[arg(long, default_value = "stable")]
+        channel: String,
         /// Skip dependency installation.
         #[arg(long)]
         no_deps: bool,
         /// Answer prompts automatically (confirms yes, skips retryable steps).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Update an installed mod to the latest version on its channel.
+    Update {
+        /// Package id (optional when the profile pins one).
+        id: Option<String>,
+        #[arg(long = "scope")]
+        scopes: Vec<PathBuf>,
+        #[arg(long = "registry")]
+        registries: Vec<String>,
+        #[arg(long)]
+        game_dir: Option<PathBuf>,
+        #[arg(long)]
+        user_data: Option<PathBuf>,
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show or change an installed mod's settings.
+    Settings {
+        /// Package id.
+        id: String,
+        /// Game id the package is installed for.
+        #[arg(long)]
+        game: String,
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Change a setting: --set id=value (repeatable). Without it, lists all.
+        #[arg(long = "set")]
+        sets: Vec<String>,
+    },
+    /// Run one of an installed mod's actions.
+    Action {
+        /// Package id.
+        id: String,
+        /// Action id (as declared in the manifest).
+        action: String,
+        /// Game id the package is installed for.
+        #[arg(long)]
+        game: String,
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Pre-answer a pick-directory step: --dir id=path (repeatable).
+        #[arg(long = "dir")]
+        dirs: Vec<String>,
         #[arg(long)]
         yes: bool,
     },
@@ -149,7 +202,7 @@ fn main() -> ExitCode {
         }
         Command::Install {
             id, scopes, registries, game_dir, user_data, state_dir, local_release, local_artifact,
-            no_deps, yes,
+            channel, no_deps, yes,
         } => load_profile().and_then(|profile| {
             manage::cmd_install(&manage::InstallArgs {
                 id,
@@ -161,11 +214,39 @@ fn main() -> ExitCode {
                 state_dir,
                 local_release,
                 local_artifact,
+                channel,
                 no_deps,
                 assume_yes: yes,
+                update_mode: false,
             })
             .map(|()| true)
         }),
+        Command::Update { id, scopes, registries, game_dir, user_data, state_dir, channel, yes } => {
+            load_profile().and_then(|profile| {
+                manage::cmd_install(&manage::InstallArgs {
+                    id,
+                    scopes,
+                    registries,
+                    profile,
+                    game_dir,
+                    user_data,
+                    state_dir,
+                    local_release: None,
+                    local_artifact: None,
+                    channel,
+                    no_deps: false,
+                    assume_yes: yes,
+                    update_mode: true,
+                })
+                .map(|()| true)
+            })
+        }
+        Command::Settings { id, game, state_dir, sets } => {
+            manage::cmd_settings(&id, &game, state_dir, &sets).map(|()| true)
+        }
+        Command::Action { id, action, game, state_dir, dirs, yes } => {
+            manage::cmd_action(&id, &action, &game, state_dir, &dirs, yes).map(|()| true)
+        }
         Command::Uninstall { id, game, state_dir, purge, keep_settings, yes } => {
             let purge_choice = if purge {
                 Some(true)

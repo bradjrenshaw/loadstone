@@ -24,12 +24,15 @@ use crate::load_json;
 
 pub struct TerminalUi {
     pub assume_yes: bool,
+    /// Pre-supplied answers for pick-directory steps, by variable id
+    /// (from --dir id=path flags).
+    pub preset_dirs: std::collections::BTreeMap<String, PathBuf>,
     last_percent: u32,
 }
 
 impl TerminalUi {
     pub fn new(assume_yes: bool) -> Self {
-        Self { assume_yes, last_percent: 200 }
+        Self { assume_yes, preset_dirs: Default::default(), last_percent: 200 }
     }
 
     fn ask(&self, prompt: &str) -> String {
@@ -82,9 +85,13 @@ impl EngineUi for TerminalUi {
         }
     }
 
-    fn pick_directory(&mut self, prompt: &str, suggest: Option<&str>) -> Option<PathBuf> {
+    fn pick_directory(&mut self, id: &str, prompt: &str, suggest: Option<&str>) -> Option<PathBuf> {
+        if let Some(preset) = self.preset_dirs.get(id) {
+            println!("{prompt} -- using {} (--dir {id}=...)", preset.display());
+            return Some(preset.clone());
+        }
         if self.assume_yes {
-            println!("{prompt} -- cannot prompt with --yes; step fails");
+            println!("{prompt} -- cannot prompt with --yes; step fails (pass --dir {id}=path)");
             return None;
         }
         let hint = suggest.map(|s| format!(" (suggested: {s})")).unwrap_or_default();
@@ -113,8 +120,13 @@ pub struct InstallArgs {
     pub state_dir: Option<PathBuf>,
     pub local_release: Option<PathBuf>,
     pub local_artifact: Option<PathBuf>,
+    /// Channel name: "stable" (default) fetches releases; a branch channel
+    /// declared by the manifest installs the branch zipball (dev).
+    pub channel: String,
     pub no_deps: bool,
     pub assume_yes: bool,
+    /// Update mode: bail early when the resolved version is already installed.
+    pub update_mode: bool,
 }
 
 /// The full registry-source list for a command: local --scope dirs
@@ -204,45 +216,115 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
     let mut ctx = InstallContext::build(&game, game_dir, args.user_data.clone(), distribution)?;
     let store = StateStore::open(args.state_dir.clone())?;
 
-    // Resolve the release: local pair, or fetch from the source repo.
+    // Resolve the release: branch zipball (dev channels), a local
+    // release.json + artifact pair, or the source repo's latest release.
     let (version, install_steps, uninstall_steps, user_data_decl, artifact, expected_sha);
-    match &args.local_release {
-        Some(release_path) => {
-            let release: ReleaseManifest = serde_json::from_value(load_json(release_path)?)
-                .with_context(|| format!("{} is not a release manifest", release_path.display()))?;
-            let entry = pick_artifact(&ctx, &release.artifacts)?;
-            let artifact_path = match &args.local_artifact {
-                Some(p) => p.clone(),
-                None => release_path
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join(&entry.file),
-            };
-            ui.log(&format!("Using local artifact {}", artifact_path.display()));
-            artifact = std::fs::read(&artifact_path)
-                .with_context(|| format!("failed to read {}", artifact_path.display()))?;
-            expected_sha = Some(entry.sha256.clone());
-            version = release.version.clone();
-            install_steps = release.install.clone();
-            uninstall_steps = release.uninstall.clone();
-            user_data_decl = release.user_data.clone();
+    let (settings, actions, strip_top_level);
+    let is_branch_channel = manifest
+        .channels
+        .get(&args.channel)
+        .map(|c| c.source == loadstone_core::types::ChannelSource::Branch)
+        .unwrap_or(false);
+
+    if args.channel != "stable" && !is_branch_channel {
+        bail!(
+            "\"{}\" declares no \"{}\" branch channel",
+            manifest.id,
+            args.channel
+        );
+    }
+
+    if is_branch_channel {
+        let branch = manifest.channels[&args.channel]
+            .branch
+            .clone()
+            .context("branch channel without a branch name")?;
+        let source = release_source
+            .clone()
+            .context("branch installs need a source repo (install via a registry)")?;
+        if manifest.source_install.is_empty() {
+            bail!("\"{}\" has no sourceInstall steps; the {} channel cannot install", id, args.channel);
         }
-        None => {
-            let source = release_source
-                .clone()
-                .context("no --local-release given and no source repo is known for this package")?;
-            ui.log(&format!("Fetching latest release information from {source}..."));
-            let release = fetch::fetch_latest_release_manifest(&source)?;
-            let entry = pick_artifact(&ctx, &release.artifacts)?;
-            let url = fetch::latest_asset_url(&source, &entry.file)?;
-            ui.log(&format!("Downloading {}...", entry.file));
-            artifact = fetch::download(&url, |p| ui.progress(p))?;
-            expected_sha = Some(entry.sha256.clone());
-            version = release.version.clone();
-            install_steps = release.install.clone();
-            uninstall_steps = release.uninstall.clone();
-            user_data_decl = release.user_data.clone();
+        let sha = match fetch::branch_tip_sha(&source, &branch) {
+            Ok(sha) => sha,
+            Err(_) => "unknown".to_string(),
+        };
+        version = format!("{branch}@{sha}");
+        if args.update_mode {
+            if let Some(state) = store.load(&game_id, &id)? {
+                if state.version == version && sha != "unknown" {
+                    ui.log(&format!("{} is up to date ({version}).", manifest.name));
+                    return Ok(());
+                }
+            }
         }
+        ui.log(&format!(
+            "Installing {} from the tip of {branch} ({version}). Development installs \
+             are not hash-pinned; you are trusting the repository's current contents.",
+            manifest.name
+        ));
+        let url = fetch::branch_zipball_url(&source, &branch)?;
+        artifact = fetch::download(&url, |p| ui.progress(p))?;
+        expected_sha = None;
+        install_steps = manifest.source_install.clone();
+        uninstall_steps = manifest.uninstall.clone();
+        user_data_decl = manifest.user_data.clone();
+        settings = manifest.settings.clone();
+        actions = manifest.actions.clone();
+        strip_top_level = true;
+    } else {
+        let release: ReleaseManifest = match &args.local_release {
+            Some(release_path) => serde_json::from_value(load_json(release_path)?)
+                .with_context(|| format!("{} is not a release manifest", release_path.display()))?,
+            None => {
+                let source = release_source
+                    .clone()
+                    .context("no --local-release given and no source repo is known for this package")?;
+                ui.log(&format!("Fetching latest release information from {source}..."));
+                fetch::fetch_latest_release_manifest(&source)?
+            }
+        };
+        if args.update_mode {
+            if let Some(state) = store.load(&game_id, &id)? {
+                let same = loadstone_core::release::normalize_version(&release.version)
+                    .map(|v| v == state.version)
+                    .unwrap_or(release.version == state.version);
+                if same {
+                    ui.log(&format!("{} is up to date ({}).", manifest.name, state.version));
+                    return Ok(());
+                }
+                ui.log(&format!(
+                    "Updating {} {} -> {}.",
+                    manifest.name, state.version, release.version
+                ));
+            }
+        }
+        let entry = pick_artifact(&ctx, &release.artifacts)?;
+        match &args.local_release {
+            Some(release_path) => {
+                let artifact_path = match &args.local_artifact {
+                    Some(p) => p.clone(),
+                    None => release_path.parent().unwrap_or(Path::new(".")).join(&entry.file),
+                };
+                ui.log(&format!("Using local artifact {}", artifact_path.display()));
+                artifact = std::fs::read(&artifact_path)
+                    .with_context(|| format!("failed to read {}", artifact_path.display()))?;
+            }
+            None => {
+                let source = release_source.clone().unwrap();
+                let url = fetch::latest_asset_url(&source, &entry.file)?;
+                ui.log(&format!("Downloading {}...", entry.file));
+                artifact = fetch::download(&url, |p| ui.progress(p))?;
+            }
+        }
+        expected_sha = Some(entry.sha256.clone());
+        version = release.version.clone();
+        install_steps = release.install.clone();
+        uninstall_steps = release.uninstall.clone();
+        user_data_decl = release.user_data.clone();
+        settings = release.settings.clone();
+        actions = release.actions.clone();
+        strip_top_level = false;
     }
 
     // Dependencies first, so the mod lands on a working loader. They resolve
@@ -260,7 +342,7 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
         manifest: &manifest,
         game_id: game_id.clone(),
         version: version.clone(),
-        channel: "stable".to_string(),
+        channel: args.channel.clone(),
         install_steps: &install_steps,
         uninstall_steps: &uninstall_steps,
         user_data_decl: &user_data_decl,
@@ -268,6 +350,9 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
         expected_sha256: expected_sha.as_deref(),
         keep_existing: false,
         dependent_of: None,
+        settings: settings.as_ref(),
+        actions: &actions,
+        strip_top_level,
     };
     engine::install(&store, &mut ctx, &plan, &mut ui)?;
     ui.log(&format!("{} {} installed.", manifest.name, version));
@@ -344,9 +429,139 @@ fn install_dependency(
         expected_sha256: Some(&entry.sha256),
         keep_existing,
         dependent_of: Some(dependent.to_string()),
+        settings: tool.settings.as_ref(),
+        actions: &tool.actions,
+        strip_top_level: false,
     };
     engine::install(store, ctx, &plan, ui)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// settings / action
+
+pub fn cmd_settings(
+    id: &str,
+    game: &str,
+    state_dir: Option<PathBuf>,
+    sets: &[String],
+) -> Result<()> {
+    use loadstone_core::types::{SettingType, Settings};
+    let store = StateStore::open(state_dir)?;
+    let state = store
+        .load(game, id)?
+        .with_context(|| format!("\"{id}\" is not installed for {game}"))?;
+    let settings: &Settings = state
+        .settings
+        .as_ref()
+        .with_context(|| format!("\"{id}\" declares no settings"))?;
+    let file = state
+        .settings_file
+        .as_ref()
+        .context("no settings storage file recorded")?;
+
+    let mut values: serde_json::Map<String, serde_json::Value> = if file.exists() {
+        serde_json::from_str(
+            std::fs::read_to_string(file)?.trim_start_matches('\u{feff}'),
+        )
+        .with_context(|| format!("{} is not valid JSON", file.display()))?
+    } else {
+        Default::default()
+    };
+
+    if sets.is_empty() {
+        // List: one setting per line, current value first for quick reading.
+        for entry in &settings.entries {
+            let current = values
+                .get(&entry.id)
+                .or(entry.default.as_ref())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unset".to_string());
+            println!("{} = {}  ({})", entry.id, current, entry.label);
+            if let Some(desc) = &entry.description {
+                println!("    {desc}");
+            }
+        }
+        return Ok(());
+    }
+
+    for pair in sets {
+        let (key, raw) = pair
+            .split_once('=')
+            .with_context(|| format!("--set takes id=value, got \"{pair}\""))?;
+        let entry = settings
+            .entries
+            .iter()
+            .find(|e| e.id == key)
+            .with_context(|| {
+                let known: Vec<&str> = settings.entries.iter().map(|e| e.id.as_str()).collect();
+                format!("no setting \"{key}\" (known: {})", known.join(", "))
+            })?;
+        let value = match entry.entry_type {
+            SettingType::Boolean => match raw.to_lowercase().as_str() {
+                "true" | "yes" | "on" | "1" => serde_json::Value::Bool(true),
+                "false" | "no" | "off" | "0" => serde_json::Value::Bool(false),
+                _ => bail!("\"{key}\" is a boolean; use true or false"),
+            },
+            SettingType::Number => {
+                let n: f64 = raw.parse().with_context(|| format!("\"{key}\" needs a number"))?;
+                if let Some(min) = entry.min {
+                    if n < min {
+                        bail!("\"{key}\" must be at least {min}");
+                    }
+                }
+                if let Some(max) = entry.max {
+                    if n > max {
+                        bail!("\"{key}\" must be at most {max}");
+                    }
+                }
+                serde_json::json!(n)
+            }
+            SettingType::String => serde_json::Value::String(raw.to_string()),
+            SettingType::Choice => {
+                let value = serde_json::Value::String(raw.to_string());
+                if !entry.options.iter().any(|o| o.value == value) {
+                    let options: Vec<String> =
+                        entry.options.iter().map(|o| o.value.to_string()).collect();
+                    bail!("\"{key}\" must be one of: {}", options.join(", "));
+                }
+                value
+            }
+        };
+        values.insert(key.to_string(), value);
+        println!("{key} set.");
+    }
+
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(file, serde_json::to_string_pretty(&serde_json::Value::Object(values))?)?;
+    if let Some(note) = &settings.note {
+        println!("{note}");
+    }
+    Ok(())
+}
+
+pub fn cmd_action(
+    id: &str,
+    action_id: &str,
+    game: &str,
+    state_dir: Option<PathBuf>,
+    dirs: &[String],
+    assume_yes: bool,
+) -> Result<()> {
+    let mut ui = TerminalUi::new(assume_yes);
+    for pair in dirs {
+        let (var, path) = pair
+            .split_once('=')
+            .with_context(|| format!("--dir takes id=path, got \"{pair}\""))?;
+        ui.preset_dirs.insert(var.to_string(), PathBuf::from(path));
+    }
+    let store = StateStore::open(state_dir)?;
+    let state = store
+        .load(game, id)?
+        .with_context(|| format!("\"{id}\" is not installed for {game}"))?;
+    engine::run_action(&store, &state, action_id, &mut ui)
 }
 
 // ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ impl EngineUi for SilentUi {
     fn retry_skip_cancel(&mut self, _message: &str) -> RetryChoice {
         RetryChoice::Cancel
     }
-    fn pick_directory(&mut self, _prompt: &str, _suggest: Option<&str>) -> Option<PathBuf> {
+    fn pick_directory(&mut self, _id: &str, _prompt: &str, _suggest: Option<&str>) -> Option<PathBuf> {
         None
     }
 }
@@ -118,6 +118,9 @@ fn install_update_uninstall_roundtrip() {
             expected_sha256: Some(&sha_v1),
             keep_existing: false,
             dependent_of: None,
+            settings: None,
+            actions: &[],
+            strip_top_level: false,
         },
         &mut ui,
     )
@@ -143,6 +146,9 @@ fn install_update_uninstall_roundtrip() {
             expected_sha256: Some("00000000000000000000000000000000000000000000000000000000deadbeef"),
             keep_existing: false,
             dependent_of: None,
+            settings: None,
+            actions: &[],
+            strip_top_level: false,
         },
         &mut ui,
     );
@@ -171,6 +177,9 @@ fn install_update_uninstall_roundtrip() {
             expected_sha256: Some(&sha_v2),
             keep_existing: false,
             dependent_of: None,
+            settings: None,
+            actions: &[],
+            strip_top_level: false,
         },
         &mut ui,
     )
@@ -240,6 +249,9 @@ fn refuses_to_install_over_linked_dev_checkout() {
             expected_sha256: Some(&sha),
             keep_existing: false,
             dependent_of: None,
+            settings: None,
+            actions: &[],
+            strip_top_level: false,
         },
         &mut ui,
     )
@@ -295,6 +307,9 @@ fn tool_refuses_uninstall_while_needed() {
             expected_sha256: Some(&sha),
             keep_existing: true,
             dependent_of: Some("blindfold".into()),
+            settings: None,
+            actions: &[],
+            strip_top_level: false,
         },
         &mut ui,
     )

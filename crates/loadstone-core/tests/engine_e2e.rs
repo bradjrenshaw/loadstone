@@ -154,7 +154,7 @@ fn install_update_uninstall_roundtrip() {
     );
     assert!(bad.is_err());
     assert!(mods.join("core.lua").exists(), "failed verify must not touch the install");
-    assert_eq!(store.load("balatro", "blindfold").unwrap().unwrap().version, "1.0.0");
+    assert_eq!(store.load("balatro", "blindfold", &game_dir).unwrap().unwrap().version, "1.0.0");
 
     // --- v2 update drops old_module.lua; stale file must disappear ---
     let zip_v2 = make_zip(&[
@@ -189,12 +189,12 @@ fn install_update_uninstall_roundtrip() {
 
     // --- uninstall with purge ---
     std::fs::write(user_data.join("blindfold_settings.lua"), b"prefs").unwrap();
-    let state = store.load("balatro", "blindfold").unwrap().unwrap();
+    let state = store.load("balatro", "blindfold", &game_dir).unwrap().unwrap();
     engine::uninstall(&store, &state, Some(true), &mut ui).unwrap();
     assert!(!mods.exists(), "mod dir pruned");
     assert!(!user_data.join("blindfold_settings.lua").exists(), "settings purged");
     assert!(game_dir.join("Balatro.exe").exists(), "game files untouched");
-    assert!(store.load("balatro", "blindfold").unwrap().is_none());
+    assert!(store.load("balatro", "blindfold", &game_dir).unwrap().is_none());
 }
 
 /// The deploy-script scenario: Mods/Blindfold is a junction into a git

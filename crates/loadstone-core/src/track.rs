@@ -54,7 +54,25 @@ pub struct InstalledState {
     pub actions: Vec<Action>,
 }
 
+/// Stable identity of one game copy: hash of its canonical directory.
+/// Two paths that name the same folder (case, trailing slash, 8.3 names)
+/// must produce the same key, so canonicalize when the folder exists.
+pub fn copy_key(game_dir: &Path) -> String {
+    let canonical = std::fs::canonicalize(game_dir).unwrap_or_else(|_| game_dir.to_path_buf());
+    let mut text = canonical.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        text = text.to_lowercase();
+    }
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Root of the state store. Overridable for tests/sandboxes.
+///
+/// Layout: `<root>/<game>/<copy-key>/<id>.json` — one subdirectory per game
+/// copy (Steam, Epic, a hand-picked folder), so the same mod can be
+/// installed to several copies of one game independently.
 pub struct StateStore {
     root: PathBuf,
 }
@@ -68,27 +86,68 @@ impl StateStore {
                 .join("Loadstone")
                 .join("installed"),
         };
-        Ok(Self { root })
+        let store = Self { root };
+        store.migrate_flat_layout();
+        Ok(store)
     }
 
-    fn file(&self, game: &str, id: &str) -> PathBuf {
-        self.root.join(game).join(format!("{id}.json"))
+    /// Move pre-copy-aware state files (`<game>/<id>.json`) into the copy
+    /// subdirectory their recorded game_dir implies. Best effort: files
+    /// that fail to read or parse stay where they are.
+    fn migrate_flat_layout(&self) {
+        let Ok(games) = std::fs::read_dir(&self.root) else { return };
+        for game in games.filter_map(|e| e.ok()) {
+            let game_dir = game.path();
+            if !game_dir.is_dir() {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&game_dir) else { continue };
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let Ok(state) = serde_json::from_str::<InstalledState>(&text) else { continue };
+                let target_dir = game_dir.join(copy_key(&state.game_dir));
+                if std::fs::create_dir_all(&target_dir).is_ok() {
+                    let target = target_dir.join(format!("{}.json", state.id));
+                    let _ = std::fs::rename(&path, &target);
+                }
+            }
+        }
     }
 
-    pub fn load(&self, game: &str, id: &str) -> Result<Option<InstalledState>> {
-        let path = self.file(game, id);
+    fn file(&self, game: &str, id: &str, game_dir: &Path) -> PathBuf {
+        self.root
+            .join(game)
+            .join(copy_key(game_dir))
+            .join(format!("{id}.json"))
+    }
+
+    fn read_state(path: &Path) -> Result<InstalledState> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("{} is not a valid state file", path.display()))
+    }
+
+    /// The install of `id` in this specific game copy.
+    pub fn load(&self, game: &str, id: &str, game_dir: &Path) -> Result<Option<InstalledState>> {
+        let path = self.file(game, id, game_dir);
         if !path.exists() {
             return Ok(None);
         }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        Ok(Some(serde_json::from_str(&text).with_context(|| {
-            format!("{} is not a valid state file", path.display())
-        })?))
+        Ok(Some(Self::read_state(&path)?))
+    }
+
+    /// Every copy's install of `id` for this game.
+    pub fn find_all(&self, game: &str, id: &str) -> Result<Vec<InstalledState>> {
+        Ok(self.list(game)?.into_iter().filter(|s| s.id == id).collect())
     }
 
     pub fn save(&self, state: &InstalledState) -> Result<()> {
-        let path = self.file(&state.game, &state.id);
+        let path = self.file(&state.game, &state.id, &state.game_dir);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -97,32 +156,43 @@ impl StateStore {
             .with_context(|| format!("failed to write {}", path.display()))
     }
 
-    pub fn remove(&self, game: &str, id: &str) -> Result<()> {
-        let path = self.file(game, id);
+    pub fn remove(&self, game: &str, id: &str, game_dir: &Path) -> Result<()> {
+        let path = self.file(game, id, game_dir);
         if path.exists() {
             std::fs::remove_file(&path)
                 .with_context(|| format!("failed to remove {}", path.display()))?;
+            // Drop the copy directory once its last record is gone.
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
         }
         Ok(())
     }
 
-    /// All installed packages for a game (empty if none).
+    /// All installed packages for a game, across every copy (empty if none).
     pub fn list(&self, game: &str) -> Result<Vec<InstalledState>> {
         let dir = self.root.join(game);
         let mut out = Vec::new();
         if !dir.is_dir() {
             return Ok(out);
         }
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let text = std::fs::read_to_string(&path)?;
-                if let Ok(state) = serde_json::from_str(&text) {
-                    out.push(state);
+        for copy in std::fs::read_dir(&dir)? {
+            let copy_dir = copy?.path();
+            if !copy_dir.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&copy_dir)? {
+                let path = entry?.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    if let Ok(state) = Self::read_state(&path) {
+                        out.push(state);
+                    }
                 }
             }
         }
-        out.sort_by(|a: &InstalledState, b: &InstalledState| a.id.cmp(&b.id));
+        out.sort_by(|a: &InstalledState, b: &InstalledState| {
+            a.id.cmp(&b.id).then_with(|| a.game_dir.cmp(&b.game_dir))
+        });
         Ok(out)
     }
 
@@ -211,12 +281,59 @@ mod tests {
             actions: Vec::new(),
         };
         store.save(&state).unwrap();
-        let loaded = store.load("balatro", "blindfold").unwrap().unwrap();
+        let game_dir = state.game_dir.clone();
+        let loaded = store.load("balatro", "blindfold", &game_dir).unwrap().unwrap();
         assert_eq!(loaded.version, "1.0.9");
         assert_eq!(store.list("balatro").unwrap().len(), 1);
         assert_eq!(store.games().unwrap(), vec!["balatro".to_string()]);
-        store.remove("balatro", "blindfold").unwrap();
-        assert!(store.load("balatro", "blindfold").unwrap().is_none());
+
+        // A second copy of the game holds its own independent install.
+        let mut second = state.clone();
+        second.game_dir = tmp.path().join("game-epic");
+        second.version = "1.1.0".into();
+        second.distribution = "epic".into();
+        store.save(&second).unwrap();
+        assert_eq!(store.list("balatro").unwrap().len(), 2);
+        assert_eq!(store.find_all("balatro", "blindfold").unwrap().len(), 2);
+        assert_eq!(
+            store.load("balatro", "blindfold", &game_dir).unwrap().unwrap().version,
+            "1.0.9"
+        );
+        assert_eq!(
+            store.load("balatro", "blindfold", &second.game_dir).unwrap().unwrap().version,
+            "1.1.0"
+        );
+
+        store.remove("balatro", "blindfold", &game_dir).unwrap();
+        assert!(store.load("balatro", "blindfold", &game_dir).unwrap().is_none());
+        assert_eq!(store.find_all("balatro", "blindfold").unwrap().len(), 1);
+        store.remove("balatro", "blindfold", &second.game_dir).unwrap();
+    }
+
+    /// Pre-copy-aware state files migrate into copy subdirectories on open.
+    #[test]
+    fn flat_state_files_migrate_on_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let flat = tmp.path().join("balatro").join("blindfold.json");
+        std::fs::create_dir_all(flat.parent().unwrap()).unwrap();
+        let game_dir = tmp.path().join("game");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        std::fs::write(
+            &flat,
+            serde_json::json!({
+                "id": "blindfold", "kind": "mod", "version": "1.1.0",
+                "channel": "stable", "game": "balatro", "files": [],
+                "gameDir": game_dir, "userData": tmp.path().join("ud"),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = StateStore::open(Some(tmp.path().to_path_buf())).unwrap();
+        assert!(!flat.exists(), "flat file moved into the copy subdirectory");
+        let loaded = store.load("balatro", "blindfold", &game_dir).unwrap().unwrap();
+        assert_eq!(loaded.version, "1.1.0");
+        assert_eq!(store.list("balatro").unwrap().len(), 1);
     }
 
     #[test]

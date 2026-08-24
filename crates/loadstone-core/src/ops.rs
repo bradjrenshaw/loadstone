@@ -120,9 +120,41 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         ui.log(&note);
     }
 
-    // Locate the game: explicit dir, store detection, or ask the user.
-    let (game_dir, distribution) = match &opts.game_dir {
-        Some(dir) => {
+    let store = StateStore::open(opts.state_dir.clone())?;
+
+    // Locate the game copy: explicit dir, the copy an update is recorded
+    // for, store detection, or ask the user.
+    let recorded_copy = if opts.update_mode && opts.game_dir.is_none() {
+        let records = store.find_all(&game_id, &id)?;
+        match records.len() {
+            0 => None,
+            1 => {
+                let r = &records[0];
+                ui.log(&format!(
+                    "Updating the {} copy at {}.",
+                    r.distribution,
+                    r.game_dir.display()
+                ));
+                Some((r.game_dir.clone(), r.distribution.clone()))
+            }
+            _ => {
+                let dirs: Vec<String> = records
+                    .iter()
+                    .map(|r| format!("{} ({})", r.game_dir.display(), r.distribution))
+                    .collect();
+                bail!(
+                    "\"{id}\" is installed for more than one copy of {}: {}. Pass --game-dir to say which copy to update.",
+                    game.name,
+                    dirs.join(", ")
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let (game_dir, distribution) = match (&opts.game_dir, recorded_copy) {
+        (_, Some(copy)) => copy,
+        (Some(dir), None) => {
             if !detect::validate_game_dir(&game, dir) {
                 bail!(
                     "{} does not look like a {} folder (none of the expected files found)",
@@ -132,7 +164,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
             }
             (dir.clone(), detect::infer_distribution(dir))
         }
-        None => match detect::detect(&game)? {
+        (None, None) => match detect::detect(&game)? {
             Some(found) => {
                 ui.log(&format!("Found {} at {}", game.name, found.game_dir.display()));
                 (found.game_dir, found.distribution)
@@ -183,7 +215,6 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     }
 
     let mut ctx = InstallContext::build(&game, game_dir, opts.user_data.clone(), distribution)?;
-    let store = StateStore::open(opts.state_dir.clone())?;
 
     // Resolve the release: branch zipball (dev channels), a local
     // loadstone-release.json + artifact pair, or the source repo's latest release.
@@ -220,7 +251,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         };
         version = format!("{branch}@{sha}");
         if opts.update_mode {
-            if let Some(state) = store.load(&game_id, &id)? {
+            if let Some(state) = store.load(&game_id, &id, &ctx.game_dir)? {
                 if state.version == version && sha != "unknown" {
                     return Ok(format!("{} is up to date ({version}).", manifest.name));
                 }
@@ -261,7 +292,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
             }
         };
         if opts.update_mode && opts.tag.is_none() {
-            if let Some(state) = store.load(&game_id, &id)? {
+            if let Some(state) = store.load(&game_id, &id, &ctx.game_dir)? {
                 let same = crate::release::normalize_version(&release.version)
                     .map(|v| v == state.version)
                     .unwrap_or(release.version == state.version);
@@ -366,7 +397,7 @@ fn install_dependency(
     dep_id: &str,
     ui: &mut dyn EngineUi,
 ) -> Result<()> {
-    if let Some(mut state) = store.load(game_id, dep_id)? {
+    if let Some(mut state) = store.load(game_id, dep_id, &ctx.game_dir)? {
         if !state.dependents.iter().any(|d| d == dependent) {
             state.dependents.push(dependent.to_string());
             store.save(&state)?;
@@ -418,23 +449,53 @@ fn install_dependency(
     Ok(())
 }
 
+/// The install of `id` for `game`, addressed by copy: an explicit game
+/// directory names the copy; without one there must be exactly one copy
+/// with this package installed.
+pub fn find_installed(
+    store: &StateStore,
+    game: &str,
+    id: &str,
+    game_dir: Option<&Path>,
+) -> Result<crate::track::InstalledState> {
+    if let Some(dir) = game_dir {
+        return store
+            .load(game, id, dir)?
+            .with_context(|| format!("\"{id}\" is not installed for the {game} copy at {}", dir.display()));
+    }
+    let mut records = store.find_all(game, id)?;
+    match records.len() {
+        0 => bail!("\"{id}\" is not installed for {game}"),
+        1 => Ok(records.remove(0)),
+        _ => {
+            let dirs: Vec<String> = records
+                .iter()
+                .map(|r| format!("{} ({})", r.game_dir.display(), r.distribution))
+                .collect();
+            bail!(
+                "\"{id}\" is installed for more than one copy of {game}: {}. Pass --game-dir to say which copy.",
+                dirs.join(", ")
+            );
+        }
+    }
+}
+
 /// Uninstall an installed package, releasing its claims on any tool
 /// dependencies. Returns a one-line summary.
 pub fn uninstall(
     id: &str,
     game: &str,
+    game_dir: Option<&Path>,
     state_dir: Option<PathBuf>,
     purge: Option<bool>,
     ui: &mut dyn EngineUi,
 ) -> Result<String> {
     let store = StateStore::open(state_dir)?;
-    let state = store
-        .load(game, id)?
-        .with_context(|| format!("\"{id}\" is not installed for {game}"))?;
+    let state = find_installed(&store, game, id, game_dir)?;
     engine::uninstall(&store, &state, purge, ui)?;
-    // Release our claim on any tools we pulled in.
+    // Release our claim on any tools we pulled in (this copy's).
     for dep_id in &state.dependencies {
-        if let Some(mut dep_state) = store.load(game, dep_id)? {
+        if let Some(mut dep_state) = store.load(game, dep_id, &state.game_dir)? {
             dep_state.dependents.retain(|d| d != id);
             store.save(&dep_state)?;
             if dep_state.dependents.is_empty() {

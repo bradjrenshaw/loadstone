@@ -84,7 +84,7 @@ pub fn install(
 
     // 2. An older version's tracked files go first, so updates never leave
     //    stale files behind.
-    let prior = store.load(&plan.game_id, &plan.manifest.id)?;
+    let prior = store.load(&plan.game_id, &plan.manifest.id, &ctx.game_dir)?;
     let prior_dependents = prior.as_ref().map(|p| p.dependents.clone()).unwrap_or_default();
     if let Some(prior) = &prior {
         refuse_links_over(&prior.files, &prior.roots)?;
@@ -97,7 +97,7 @@ pub fn install(
         for e in &errors {
             ui.log(&format!("Warning: {e}"));
         }
-        store.remove(&plan.game_id, &plan.manifest.id)?;
+        store.remove(&plan.game_id, &plan.manifest.id, &ctx.game_dir)?;
     }
 
     // 3. Run the steps, tracking every write; roll back on failure.
@@ -491,7 +491,7 @@ pub fn uninstall(
         }
     }
 
-    store.remove(&state.game, &state.id)?;
+    store.remove(&state.game, &state.id, &state.game_dir)?;
     ui.log(&format!("{} uninstalled.", state.id));
     Ok(())
 }

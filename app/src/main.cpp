@@ -92,10 +92,13 @@ private:
     void StartCatalogFetch();
     void OnCatalog(const loadstone::Catalog& catalog);
 
-    // Mod page view.
+    // Mod page view. The page shows one game copy at a time; when several
+    // copies are known, a list at the top switches which one the detail
+    // section below reflects.
     void OpenMod(const wxString& id);
-    void OnModPage(const loadstone::ModPage& page);
-    void BuildModPage(const loadstone::ModPage& page);
+    void OnModPage(std::shared_ptr<loadstone::ModPage> page);
+    void BuildModPage();
+    void BuildDetail();
     void GoBack();
 
     // Operations.
@@ -125,7 +128,13 @@ private:
     wxScrolledWindow* pagePanel_ = nullptr;
     wxString pageModId_;
     wxString pageGame_;
-    wxString pageChannel_;
+    std::shared_ptr<loadstone::ModPage> pageModel_;
+    // Which of the page's game copies the detail section reflects, and its
+    // recorded folder (so reloads after an operation stay on the same copy).
+    size_t currentCopy_ = 0;
+    wxString currentCopyDir_;
+    wxListBox* copiesList_ = nullptr;
+    wxPanel* detailPanel_ = nullptr;
     // Interactive page controls, disabled while an operation runs.
     std::vector<wxWindow*> pageControls_;
     wxTextCtrl* gameDirCtrl_ = nullptr;
@@ -375,7 +384,7 @@ void LoadstoneFrame::OpenMod(const wxString& id) {
             auto page = std::make_shared<loadstone::ModPage>(
                 loadstone::fetch_mod_page(kEmbeddedProfile, "", modId));
             wxTheApp->CallAfter([alive, this, page] {
-                if (alive->load()) OnModPage(*page);
+                if (alive->load()) OnModPage(page);
             });
         } catch (const std::exception& e) {
             std::string msg = e.what();
@@ -390,26 +399,47 @@ void LoadstoneFrame::OpenMod(const wxString& id) {
     }).detach();
 }
 
-void LoadstoneFrame::OnModPage(const loadstone::ModPage& page) {
+void LoadstoneFrame::OnModPage(std::shared_ptr<loadstone::ModPage> page) {
     fetchInFlight_ = false;
-    BuildModPage(page);
+    pageModel_ = std::move(page);
+    // Stay on the copy the user was managing across reloads; otherwise the
+    // bridge's pick (the first installed copy).
+    currentCopy_ = pageModel_->selected_copy;
+    if (!currentCopyDir_.empty()) {
+        for (size_t i = 0; i < pageModel_->copies.size(); ++i) {
+            if (FromRust(pageModel_->copies[i].game_dir) == currentCopyDir_) {
+                currentCopy_ = i;
+                break;
+            }
+        }
+    }
+    if (currentCopy_ >= pageModel_->copies.size()) currentCopy_ = 0;
+    currentCopyDir_ = FromRust(pageModel_->copies[currentCopy_].game_dir);
+    BuildModPage();
     if (catalogPanel_) catalogPanel_->Hide();
     Layout();
-    SetStatusText(FromRust(page.status));
-    // Land keyboard focus on the page's first control.
-    if (wxWindow* first = pagePanel_->GetChildren().IsEmpty()
-                              ? nullptr
-                              : pagePanel_->GetChildren().front())
-        first->SetFocus();
+    SetStatusText(FromRust(pageModel_->copies[currentCopy_].status));
+    // Land keyboard focus on the page's first control: the copies list when
+    // there is one, else the first detail control.
+    if (copiesList_) {
+        copiesList_->SetFocus();
+    } else if (detailPanel_ && !detailPanel_->GetChildren().IsEmpty()) {
+        detailPanel_->GetChildren().front()->SetFocus();
+    }
 }
 
 void LoadstoneFrame::GoBack() {
     if (!pagePanel_ || singleMod_ || opInFlight_) return;
     pagePanel_->Destroy();
     pagePanel_ = nullptr;
+    detailPanel_ = nullptr;
+    copiesList_ = nullptr;
     opLog_ = nullptr;
     gameDirCtrl_ = nullptr;
     pageControls_.clear();
+    pageModel_.reset();
+    currentCopy_ = 0;
+    currentCopyDir_.clear();
     catalogPanel_->Show();
     Layout();
     SetStatusText("");
@@ -418,24 +448,73 @@ void LoadstoneFrame::GoBack() {
     StartCatalogFetch();
 }
 
-void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
+void LoadstoneFrame::BuildModPage() {
     if (pagePanel_) {
         pagePanel_->Destroy();
         pagePanel_ = nullptr;
     }
+    copiesList_ = nullptr;
+    detailPanel_ = nullptr;
     opLog_ = nullptr;
     gameDirCtrl_ = nullptr;
     pageControls_.clear();
+    const loadstone::ModPage& page = *pageModel_;
     pageModId_ = FromRust(page.id);
-    pageGame_ = FromRust(page.installed_game);
-    pageChannel_ = FromRust(page.channel);
+    pageGame_ = FromRust(page.game);
 
     pagePanel_ = new wxScrolledWindow(this);
     pagePanel_->SetScrollRate(0, 12);
     auto* sizer = new wxBoxSizer(wxVERTICAL);
 
+    // More than one known copy of the game (Steam and Epic, say): a list is
+    // the page's first element, and arrowing through it retargets the whole
+    // detail section below to the focused copy.
+    if (page.copies.size() > 1) {
+        wxString gameName = FromRust(page.game_name);
+        wxString listLabel =
+            gameName.empty()
+                ? wxString("&Copy of the game to manage:")
+                : wxString::Format("&Copy of %s to manage:", gameName);
+        sizer->Add(new wxStaticText(pagePanel_, wxID_ANY, listLabel), 0,
+                   wxLEFT | wxRIGHT | wxTOP, 8);
+        copiesList_ = new wxListBox(pagePanel_, wxID_ANY);
+        for (const auto& c : page.copies) copiesList_->Append(FromRust(c.label));
+        copiesList_->SetSelection(static_cast<int>(currentCopy_));
+        copiesList_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent& ev) {
+            int sel = ev.GetSelection();
+            if (sel < 0 || static_cast<size_t>(sel) >= pageModel_->copies.size())
+                return;
+            if (static_cast<size_t>(sel) == currentCopy_) return;
+            currentCopy_ = static_cast<size_t>(sel);
+            currentCopyDir_ = FromRust(pageModel_->copies[currentCopy_].game_dir);
+            BuildDetail();
+            SetStatusText(FromRust(pageModel_->copies[currentCopy_].status));
+        });
+        pageControls_.push_back(copiesList_);
+        sizer->Add(copiesList_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+    }
+
+    detailPanel_ = new wxPanel(pagePanel_);
+    sizer->Add(detailPanel_, 1, wxEXPAND);
+    pagePanel_->SetSizer(sizer);
+    BuildDetail();
+}
+
+// Everything below the copies list, rebuilt whenever the focused copy
+// changes (focus itself stays in the list).
+void LoadstoneFrame::BuildDetail() {
+    detailPanel_->DestroyChildren();
+    opLog_ = nullptr;
+    gameDirCtrl_ = nullptr;
+    pageControls_.clear();
+    if (copiesList_) pageControls_.push_back(copiesList_);
+
+    const loadstone::ModPage& page = *pageModel_;
+    const loadstone::CopyPage& copy = page.copies[currentCopy_];
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+
     if (!singleMod_) {
-        auto* back = new wxButton(pagePanel_, wxID_ANY, "&Back to mod list");
+        auto* back = new wxButton(detailPanel_, wxID_ANY, "&Back to mod list");
         back->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { GoBack(); });
         pageControls_.push_back(back);
         sizer->Add(back, 0, wxALL, 8);
@@ -444,11 +523,11 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
     wxString headingText = FromRust(page.name);
     wxString authors = FromRust(page.authors);
     if (!authors.empty()) headingText += " by " + authors;
-    auto* heading = new wxStaticText(pagePanel_, wxID_ANY, headingText);
+    auto* heading = new wxStaticText(detailPanel_, wxID_ANY, headingText);
     heading->SetFont(heading->GetFont().MakeBold().Scaled(1.2f));
     sizer->Add(heading, 0, wxALL, 8);
 
-    auto* status = new wxStaticText(pagePanel_, wxID_ANY, FromRust(page.status));
+    auto* status = new wxStaticText(detailPanel_, wxID_ANY, FromRust(copy.status));
     sizer->Add(status, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
 
     // Game directory row: label, editable path, Browse — the shape every
@@ -459,14 +538,14 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
         gameName.empty() ? wxString("&Game directory:")
                          : wxString::Format("&%s directory:", gameName);
     auto* dirRow = new wxBoxSizer(wxHORIZONTAL);
-    dirRow->Add(new wxStaticText(pagePanel_, wxID_ANY, dirLabelText), 0,
+    dirRow->Add(new wxStaticText(detailPanel_, wxID_ANY, dirLabelText), 0,
                 wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-    gameDirCtrl_ = new wxTextCtrl(pagePanel_, wxID_ANY, FromRust(page.game_dir));
+    gameDirCtrl_ = new wxTextCtrl(detailPanel_, wxID_ANY, FromRust(copy.game_dir));
     // Installed: the folder is fixed in state; show it read-only.
-    gameDirCtrl_->Enable(!page.can_uninstall);
+    gameDirCtrl_->Enable(!copy.can_uninstall);
     dirRow->Add(gameDirCtrl_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-    auto* browse = new wxButton(pagePanel_, wxID_ANY, "Bro&wse...");
-    browse->Enable(!page.can_uninstall);
+    auto* browse = new wxButton(detailPanel_, wxID_ANY, "Bro&wse...");
+    browse->Enable(!copy.can_uninstall);
     browse->Bind(wxEVT_BUTTON, [this, gameName](wxCommandEvent&) {
         wxString prompt = gameName.empty()
                               ? wxString("Select the game folder")
@@ -476,7 +555,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
         if (dlg.ShowModal() == wxID_OK) gameDirCtrl_->SetValue(dlg.GetPath());
     });
     dirRow->Add(browse, 0);
-    if (!page.can_uninstall) {
+    if (!copy.can_uninstall) {
         pageControls_.push_back(gameDirCtrl_);
         pageControls_.push_back(browse);
     }
@@ -484,18 +563,18 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
 
     wxString description = FromRust(page.description);
     if (!description.empty()) {
-        auto* descLabel = new wxStaticText(pagePanel_, wxID_ANY, "Description:");
+        auto* descLabel = new wxStaticText(detailPanel_, wxID_ANY, "Description:");
         sizer->Add(descLabel, 0, wxLEFT | wxRIGHT, 8);
-        auto* desc = new wxTextCtrl(pagePanel_, wxID_ANY, description,
+        auto* desc = new wxTextCtrl(detailPanel_, wxID_ANY, description,
                                     wxDefaultPosition, wxSize(-1, 70),
                                     wxTE_MULTILINE | wxTE_READONLY | wxTE_BESTWRAP);
         sizer->Add(desc, 0, wxEXPAND | wxALL, 8);
     }
 
-    if (!page.settings.empty()) {
-        auto* box = new wxStaticBoxSizer(wxVERTICAL, pagePanel_, "Settings");
+    if (!copy.settings.empty()) {
+        auto* box = new wxStaticBoxSizer(wxVERTICAL, detailPanel_, "Settings");
         wxWindow* parent = box->GetStaticBox();
-        for (const auto& s : page.settings) {
+        for (const auto& s : copy.settings) {
             wxString kind = FromRust(s.kind);
             wxString label = FromRust(s.label);
             wxString value = FromRust(s.value);
@@ -505,13 +584,13 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
             if (kind == "boolean") {
                 auto* check = new wxCheckBox(parent, wxID_ANY, label);
                 check->SetValue(value == "true");
-                check->Enable(page.settings_editable);
+                check->Enable(copy.settings_editable);
                 if (!describe.empty()) check->SetToolTip(describe);
                 check->Bind(wxEVT_CHECKBOX, [this, sid, check](wxCommandEvent& ev) {
                     if (!ApplySetting(sid, ev.IsChecked() ? "true" : "false"))
                         check->SetValue(!ev.IsChecked()); // rejected: revert
                 });
-                if (page.settings_editable) pageControls_.push_back(check);
+                if (copy.settings_editable) pageControls_.push_back(check);
                 box->Add(check, 0, wxALL, 6);
             } else if (kind == "choice") {
                 auto* row = new wxBoxSizer(wxHORIZONTAL);
@@ -526,7 +605,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
                     if (values.back() == value) selected = choice->GetCount() - 1;
                 }
                 if (!values.empty()) choice->SetSelection(selected);
-                choice->Enable(page.settings_editable);
+                choice->Enable(copy.settings_editable);
                 if (!describe.empty()) choice->SetToolTip(describe);
                 int previous = selected;
                 choice->Bind(wxEVT_CHOICE,
@@ -538,7 +617,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
                                  else
                                      choice->SetSelection(previous);
                              });
-                if (page.settings_editable) pageControls_.push_back(choice);
+                if (copy.settings_editable) pageControls_.push_back(choice);
                 row->Add(choice, 0);
                 box->Add(row, 0, wxALL, 6);
             } else { // string / number: edit, apply with Enter
@@ -548,7 +627,7 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
                 auto* text = new wxTextCtrl(parent, wxID_ANY, value,
                                             wxDefaultPosition, wxSize(180, -1),
                                             wxTE_PROCESS_ENTER);
-                text->Enable(page.settings_editable);
+                text->Enable(copy.settings_editable);
                 if (!describe.empty()) text->SetToolTip(describe);
                 wxString last = value;
                 text->Bind(wxEVT_TEXT_ENTER, [this, sid, text, last](wxCommandEvent&) mutable {
@@ -557,40 +636,40 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
                     else
                         text->SetValue(last); // rejected: restore
                 });
-                if (page.settings_editable) pageControls_.push_back(text);
+                if (copy.settings_editable) pageControls_.push_back(text);
                 row->Add(text, 0);
                 row->Add(new wxStaticText(parent, wxID_ANY, "(press Enter to save)"), 0,
                          wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
                 box->Add(row, 0, wxALL, 6);
             }
         }
-        wxString note = FromRust(page.settings_note);
+        wxString note = FromRust(copy.settings_note);
         if (!note.empty())
             box->Add(new wxStaticText(parent, wxID_ANY, note), 0, wxALL, 6);
         sizer->Add(box, 0, wxEXPAND | wxALL, 8);
     }
 
     for (const auto& n : page.notes) {
-        auto* note = new wxStaticText(pagePanel_, wxID_ANY, FromRust(n));
+        auto* note = new wxStaticText(detailPanel_, wxID_ANY, FromRust(n));
         note->Wrap(640);
         sizer->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
     }
 
     // Activity log, always present so operations narrate into a familiar
     // place (and screen-reader users can review it afterwards).
-    sizer->Add(new wxStaticText(pagePanel_, wxID_ANY, "Activity:"), 0,
+    sizer->Add(new wxStaticText(detailPanel_, wxID_ANY, "Activity:"), 0,
                wxLEFT | wxRIGHT, 8);
-    opLog_ = new wxTextCtrl(pagePanel_, wxID_ANY, "", wxDefaultPosition,
+    opLog_ = new wxTextCtrl(detailPanel_, wxID_ANY, "", wxDefaultPosition,
                             wxSize(-1, 130), wxTE_MULTILINE | wxTE_READONLY);
     sizer->Add(opLog_, 1, wxEXPAND | wxALL, 8);
 
     // Bottom button row, installer style: one primary button that reads
     // Install or Update per state, Uninstall, then the mod's actions.
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
-    auto* primary = new wxButton(pagePanel_, wxID_ANY,
-                                 page.can_update ? "&Update" : "&Install");
-    primary->Enable(page.can_install || page.can_update);
-    OpKind primaryKind = page.can_update ? OpKind::Update : OpKind::Install;
+    auto* primary = new wxButton(detailPanel_, wxID_ANY,
+                                 copy.can_update ? "&Update" : "&Install");
+    primary->Enable(copy.can_install || copy.can_update);
+    OpKind primaryKind = copy.can_update ? OpKind::Update : OpKind::Install;
     primary->Bind(wxEVT_BUTTON, [this, primaryKind](wxCommandEvent&) {
         StartVersionPick(primaryKind);
     });
@@ -599,8 +678,8 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
 
     // Offline path: install from a loadstone-release.json on disk (its
     // artifact paths resolve relative to that file).
-    auto* fromFile = new wxButton(pagePanel_, wxID_ANY, "Install from &file...");
-    fromFile->Enable(page.can_install || page.can_update);
+    auto* fromFile = new wxButton(detailPanel_, wxID_ANY, "Install from &file...");
+    fromFile->Enable(copy.can_install || copy.can_update);
     fromFile->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         wxFileDialog dlg(this, "Select the mod's loadstone-release.json", "", "",
                          "loadstone-release.json|loadstone-release.json|"
@@ -612,29 +691,31 @@ void LoadstoneFrame::BuildModPage(const loadstone::ModPage& page) {
     if (fromFile->IsEnabled()) pageControls_.push_back(fromFile);
     buttons->Add(fromFile, 0, wxRIGHT, 8);
 
-    auto* uninstall = new wxButton(pagePanel_, wxID_ANY, "U&ninstall");
-    uninstall->Enable(page.can_uninstall);
+    auto* uninstall = new wxButton(detailPanel_, wxID_ANY, "U&ninstall");
+    uninstall->Enable(copy.can_uninstall);
     uninstall->Bind(wxEVT_BUTTON,
                     [this](wxCommandEvent&) { RunOperation(OpKind::Uninstall); });
-    if (page.can_uninstall) pageControls_.push_back(uninstall);
+    if (copy.can_uninstall) pageControls_.push_back(uninstall);
     buttons->Add(uninstall, 0, wxRIGHT, 8);
 
-    for (const auto& a : page.actions) {
-        auto* b = new wxButton(pagePanel_, wxID_ANY, FromRust(a.label));
-        b->Enable(page.actions_available);
+    for (const auto& a : copy.actions) {
+        auto* b = new wxButton(detailPanel_, wxID_ANY, FromRust(a.label));
+        b->Enable(copy.actions_available);
         wxString describe = FromRust(a.description);
         if (!describe.empty()) b->SetToolTip(describe);
         wxString actionId = FromRust(a.id);
         b->Bind(wxEVT_BUTTON, [this, actionId](wxCommandEvent&) {
             RunOperation(OpKind::Action, actionId);
         });
-        if (page.actions_available) pageControls_.push_back(b);
+        if (copy.actions_available) pageControls_.push_back(b);
         buttons->Add(b, 0, wxRIGHT, 8);
     }
     sizer->Add(buttons, 0, wxALL, 8);
 
-    pagePanel_->SetSizer(sizer);
+    detailPanel_->SetSizer(sizer);
+    detailPanel_->Layout();
     pagePanel_->FitInside();
+    pagePanel_->Layout();
 }
 
 // ---------------------------------------------------------------------------
@@ -730,15 +811,23 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
     auto cb = std::make_shared<GuiUiCallbacks>(alive_, this);
     std::string modId = ToStd(pageModId_);
     std::string game = ToStd(pageGame_);
-    std::string channel = ToStd(pageChannel_);
+    const loadstone::CopyPage& copy = pageModel_->copies[currentCopy_];
+    std::string channel = std::string(copy.channel);
+    // The copy's recorded folder addresses state-backed operations
+    // (uninstall, actions) even when several copies exist.
+    std::string copyDir = std::string(copy.game_dir);
     std::string action = ToStd(actionId);
     std::string tagStr = ToStd(tag);
     std::string local = ToStd(localRelease);
     // The path the user sees (and may have browsed to) is the one the
-    // engine gets; empty falls back to auto-detection.
+    // engine gets for installs; empty falls back to auto-detection.
     std::string gameDir = gameDirCtrl_ ? ToStd(gameDirCtrl_->GetValue()) : "";
-    std::thread([alive, this, cb, kind, modId, game, channel, action, tagStr,
-                 local, gameDir] {
+    // After the reload, land back on the copy this operation targets.
+    currentCopyDir_ = (kind == OpKind::Install || kind == OpKind::Update)
+                          ? wxString::FromUTF8(gameDir.c_str())
+                          : wxString::FromUTF8(copyDir.c_str());
+    std::thread([alive, this, cb, kind, modId, game, channel, copyDir, action,
+                 tagStr, local, gameDir] {
         std::string result, error;
         try {
             switch (kind) {
@@ -753,11 +842,12 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
                         gameDir, "", *cb));
                     break;
                 case OpKind::Uninstall:
-                    result = std::string(loadstone::run_uninstall("", game, modId, *cb));
+                    result = std::string(
+                        loadstone::run_uninstall("", game, copyDir, modId, *cb));
                     break;
                 case OpKind::Action:
-                    result = std::string(
-                        loadstone::run_mod_action("", game, modId, action, *cb));
+                    result = std::string(loadstone::run_mod_action(
+                        "", game, copyDir, modId, action, *cb));
                     break;
             }
         } catch (const std::exception& e) {
@@ -789,8 +879,10 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
 
 bool LoadstoneFrame::ApplySetting(const wxString& settingId, const wxString& rawValue) {
     try {
+        std::string copyDir = std::string(pageModel_->copies[currentCopy_].game_dir);
         rust::String note = loadstone::apply_setting(
-            "", ToStd(pageGame_), ToStd(pageModId_), ToStd(settingId), ToStd(rawValue));
+            "", ToStd(pageGame_), copyDir, ToStd(pageModId_), ToStd(settingId),
+            ToStd(rawValue));
         wxString msg = "Setting saved.";
         wxString noteText = FromRust(note);
         if (!noteText.empty()) msg += " " + noteText;
@@ -883,17 +975,23 @@ bool LoadstoneApp::OnInit() {
                 // Optional deep check: dump one mod's page model.
                 if (const char* modId = std::getenv("LOADSTONE_SMOKE_MOD")) {
                     auto page = loadstone::fetch_mod_page(kEmbeddedProfile, state, modId);
-                    out << "page: " << std::string(page.name) << " | " << std::string(page.status)
+                    const auto& sel = page.copies[page.selected_copy];
+                    out << "page: " << std::string(page.name) << " | " << std::string(sel.status)
                         << " | latest=" << std::string(page.latest_version)
-                        << " | install=" << page.can_install << " update=" << page.can_update
-                        << " uninstall=" << page.can_uninstall << "\n";
+                        << " | install=" << sel.can_install << " update=" << sel.can_update
+                        << " uninstall=" << sel.can_uninstall << "\n";
                     out << "page-game: " << std::string(page.game_name) << " | dir="
-                        << std::string(page.game_dir) << "\n";
-                    for (const auto& s : page.settings)
+                        << std::string(sel.game_dir) << "\n";
+                    out << "page-copies: " << page.copies.size()
+                        << " selected=" << page.selected_copy << "\n";
+                    for (const auto& c : page.copies)
+                        out << "page-copy: " << std::string(c.label) << " | "
+                            << std::string(c.status) << "\n";
+                    for (const auto& s : sel.settings)
                         out << "page-setting: " << std::string(s.id) << " ("
                             << std::string(s.kind) << ") = " << std::string(s.value)
-                            << (page.settings_editable ? "" : " [read-only]") << "\n";
-                    for (const auto& a : page.actions)
+                            << (sel.settings_editable ? "" : " [read-only]") << "\n";
+                    for (const auto& a : sel.actions)
                         out << "page-action: " << std::string(a.id) << "\n";
                     for (const auto& n : page.notes)
                         out << "page-note: " << std::string(n) << "\n";
@@ -939,7 +1037,7 @@ bool LoadstoneApp::OnInit() {
                         if (colon == std::string::npos)
                             throw std::runtime_error("LOADSTONE_SMOKE_UNINSTALL wants game:id");
                         auto summary = loadstone::run_uninstall(
-                            state, s.substr(0, colon), s.substr(colon + 1), sui);
+                            state, s.substr(0, colon), "", s.substr(colon + 1), sui);
                         out << "op-result: " << std::string(summary) << "\n";
                         out << "installed-after: "
                             << std::string(loadstone::installed_json(state)) << "\n";

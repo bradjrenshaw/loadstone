@@ -18,7 +18,8 @@ use loadstone_core::track::{InstalledState, StateStore};
 use loadstone_core::types::SettingType;
 
 use crate::ffi::{
-    ActionItem, Catalog, CatalogEntry, ChoiceItem, ModPage, ReleaseEntry, SettingItem, UiProfile,
+    ActionItem, Catalog, CatalogEntry, ChoiceItem, CopyPage, ModPage, ReleaseEntry, SettingItem,
+    UiProfile,
 };
 
 #[cxx::bridge(namespace = "loadstone")]
@@ -83,24 +84,19 @@ mod ffi {
         prerelease: bool,
     }
 
-    struct ModPage {
-        id: String,
-        name: String,
-        description: String,
-        authors: String,
-        game: String,
-        /// Display name of the game ("Balatro"), for labels.
-        game_name: String,
-        /// The game folder: recorded at install time, else auto-detected,
+    /// One known copy of the game (Steam, Epic, a hand-picked folder) with
+    /// this mod's state in it. The page shows one copy at a time; a list of
+    /// labels lets the user switch when there is more than one.
+    struct CopyPage {
+        /// List text: "Steam copy, installed 1.1.0, C:\\...\\Balatro".
+        label: String,
+        distribution: String,
+        /// The copy's game folder: recorded at install time, else detected,
         /// else empty (the user browses for it).
         game_dir: String,
-        /// Empty when not installed.
+        /// Empty when not installed in this copy.
         installed_version: String,
-        /// The game the install is recorded under (for settings calls).
-        installed_game: String,
         channel: String,
-        /// Empty when unknown (no release manifest reachable).
-        latest_version: String,
         /// One-line summary for the top of the page ("Ready to install
         /// version 1.0.9.", "Update available: 1.0.8 to 1.0.9.", ...).
         status: String,
@@ -115,6 +111,22 @@ mod ffi {
         /// Actions run only when installed.
         actions_available: bool,
         actions: Vec<ActionItem>,
+    }
+
+    struct ModPage {
+        id: String,
+        name: String,
+        description: String,
+        authors: String,
+        game: String,
+        /// Display name of the game ("Balatro"), for labels.
+        game_name: String,
+        /// Empty when unknown (no release manifest reachable).
+        latest_version: String,
+        /// Index into `copies` the page should open on.
+        selected_copy: usize,
+        /// Never empty: at least one (possibly empty-dir) copy.
+        copies: Vec<CopyPage>,
         /// Informational lines for the bottom of the page.
         notes: Vec<String>,
     }
@@ -147,11 +159,13 @@ mod ffi {
         /// a worker thread.
         fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<ModPage>;
 
-        /// Validate and persist one setting for an installed mod. Returns
+        /// Validate and persist one setting for an installed mod. `game_dir`
+        /// names the copy ("" = the only copy it is installed in). Returns
         /// the schema's note ("" when none) for the UI to show.
         fn apply_setting(
             state_dir: &str,
             game: &str,
+            game_dir: &str,
             mod_id: &str,
             setting_id: &str,
             raw_value: &str,
@@ -182,20 +196,24 @@ mod ffi {
         /// only on explicit user action (the API is rate-limited).
         fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntry>>;
 
-        /// Uninstall an installed package. The engine asks about purging
-        /// user data through `ui.confirm`. Blocking — worker thread.
+        /// Uninstall an installed package from one game copy (`game_dir`,
+        /// "" = the only copy it is installed in). The engine asks about
+        /// purging user data through `ui.confirm`. Blocking — worker thread.
         fn run_uninstall(
             state_dir: &str,
             game: &str,
+            game_dir: &str,
             mod_id: &str,
             ui: Pin<&mut UiCallbacks>,
         ) -> Result<String>;
 
-        /// Run one of an installed mod's declared actions. Blocking —
+        /// Run one of an installed mod's declared actions in one game copy
+        /// (`game_dir`, "" = the only copy it is installed in). Blocking —
         /// worker thread (pick-directory steps prompt through `ui`).
         fn run_mod_action(
             state_dir: &str,
             game: &str,
+            game_dir: &str,
             mod_id: &str,
             action_id: &str,
             ui: Pin<&mut UiCallbacks>,
@@ -328,23 +346,31 @@ pub fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntr
 pub fn run_uninstall(
     state_dir: &str,
     game: &str,
+    game_dir: &str,
     mod_id: &str,
     ui: std::pin::Pin<&mut ffi::UiCallbacks>,
 ) -> Result<String> {
-    loadstone_core::ops::uninstall(mod_id, game, opt_path(state_dir), None, &mut GuiUi(ui))
+    loadstone_core::ops::uninstall(
+        mod_id,
+        game,
+        opt_path(game_dir).as_deref(),
+        opt_path(state_dir),
+        None,
+        &mut GuiUi(ui),
+    )
 }
 
 pub fn run_mod_action(
     state_dir: &str,
     game: &str,
+    game_dir: &str,
     mod_id: &str,
     action_id: &str,
     ui: std::pin::Pin<&mut ffi::UiCallbacks>,
 ) -> Result<String> {
     let store = open_store(state_dir)?;
-    let state = store
-        .load(game, mod_id)?
-        .with_context(|| format!("\"{mod_id}\" is not installed for {game}"))?;
+    let state =
+        loadstone_core::ops::find_installed(&store, game, mod_id, opt_path(game_dir).as_deref())?;
     let label = state
         .actions
         .iter()
@@ -440,6 +466,41 @@ fn installed_status(state: &InstalledState) -> String {
     }
 }
 
+/// Catalog status across every game copy a mod is installed in.
+fn aggregate_status(states: &[&InstalledState]) -> String {
+    match states {
+        [] => "Not installed".to_string(),
+        [one] => installed_status(one),
+        many => {
+            let first = &many[0].version;
+            if many.iter().all(|s| &s.version == first) {
+                format!("Installed {} for {} copies", first, many.len())
+            } else {
+                format!("Installed for {} copies (versions differ)", many.len())
+            }
+        }
+    }
+}
+
+/// Human title for a distribution id ("steam" -> "Steam").
+fn distribution_title(distribution: &str) -> String {
+    match distribution {
+        "steam" => "Steam".to_string(),
+        "epic" => "Epic".to_string(),
+        "gog" => "GOG".to_string(),
+        "gamepass" => "Game Pass".to_string(),
+        "itch" => "itch.io".to_string(),
+        "standalone" => "Standalone".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 fn first_line(text: &Option<String>) -> String {
     text.as_deref()
         .unwrap_or("")
@@ -489,19 +550,19 @@ pub fn fetch_catalog(embedded: &str, state_dir: &str) -> Result<Catalog> {
 
     let mut entries = Vec::new();
     for m in &mods {
-        let install = installed.iter().find(|s| s.id == m.manifest.id);
+        let installs: Vec<&InstalledState> =
+            installed.iter().filter(|s| s.id == m.manifest.id).collect();
         entries.push(CatalogEntry {
             id: m.manifest.id.clone(),
             name: m.manifest.name.clone(),
             summary: first_line(&m.manifest.description),
-            game: install
+            game: installs
+                .first()
                 .map(|s| s.game.clone())
                 .or_else(|| m.manifest.game.clone())
                 .unwrap_or_default(),
-            installed_version: install.map(|s| s.version.clone()).unwrap_or_default(),
-            status: install
-                .map(installed_status)
-                .unwrap_or_else(|| "Not installed".to_string()),
+            installed_version: installs.first().map(|s| s.version.clone()).unwrap_or_default(),
+            status: aggregate_status(&installs),
         });
     }
     // Installed mods that no configured registry lists still appear, so
@@ -517,13 +578,15 @@ pub fn fetch_catalog(embedded: &str, state_dir: &str) -> Result<Catalog> {
         if entries.iter().any(|e| e.id == state.id) {
             continue;
         }
+        let copies: Vec<&InstalledState> =
+            installed.iter().filter(|s| s.id == state.id).collect();
         entries.push(CatalogEntry {
             id: state.id.clone(),
             name: state.id.clone(),
             summary: "Installed, but not listed by the configured registries.".to_string(),
             game: state.game.clone(),
             installed_version: state.version.clone(),
-            status: installed_status(state),
+            status: aggregate_status(&copies),
         });
     }
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -589,7 +652,9 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
     let profile = load_profile(embedded)?;
     let store = open_store(state_dir)?;
     let installed = all_installed(&store)?;
-    let state = installed.iter().find(|s| s.id == mod_id);
+    // Every copy's install of this mod; the page shows one copy at a time.
+    let records: Vec<&InstalledState> = installed.iter().filter(|s| s.id == mod_id).collect();
+    let any_state = records.first().copied();
     let notes = Rc::new(RefCell::new(Vec::new()));
 
     // Resolve the manifest (and its game package, for detection) through
@@ -609,7 +674,7 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
                     if let Some(game_id) = &res.manifest.game {
                         game_manifest = r.resolve_game(game_id, &res.scope).ok();
                     }
-                    let dep_ids: Vec<String> = match state {
+                    let dep_ids: Vec<String> = match any_state {
                         Some(s) => s.dependencies.clone(),
                         None => res
                             .manifest
@@ -635,108 +700,184 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
                 .borrow_mut()
                 .push(format!("Could not load registries: {e:#}")),
         }
-    } else if state.is_none() {
+    } else if records.is_empty() {
         anyhow::bail!("\"{mod_id}\" is not installed and no registries are configured");
     }
-    if resolved.is_none() && state.is_none() {
+    if resolved.is_none() && records.is_empty() {
         anyhow::bail!("\"{mod_id}\" is not installed and could not be resolved");
     }
 
-    // Latest released version, when a release manifest is reachable.
+    // Latest released version, when a release manifest is reachable. The
+    // fetch is skipped only when every installed copy runs the dev channel
+    // (per-copy statuses already say "(dev channel)").
     let mut latest_version = String::new();
-    let is_dev_channel = state.map(|s| s.channel == "dev").unwrap_or(false);
+    let all_dev = !records.is_empty() && records.iter().all(|s| s.channel == "dev");
     if let Some(r) = &resolved {
-        if is_dev_channel {
-            if let Some(s) = state {
-                notes.borrow_mut().push(format!(
-                    "Installed from the development branch ({}).",
-                    s.version
-                ));
-            }
-        } else if let Some(source) = &r.release_source {
-            match loadstone_core::fetch::fetch_latest_release_manifest(source) {
-                Ok(release) => {
-                    latest_version =
-                        loadstone_core::release::normalize_version(&release.version)
-                            .unwrap_or(release.version);
+        if !all_dev {
+            if let Some(source) = &r.release_source {
+                match loadstone_core::fetch::fetch_latest_release_manifest(source) {
+                    Ok(release) => {
+                        latest_version =
+                            loadstone_core::release::normalize_version(&release.version)
+                                .unwrap_or(release.version);
+                    }
+                    Err(_) => notes.borrow_mut().push(
+                        "The latest published release has no Loadstone metadata yet, so the \
+                         newest version could not be determined."
+                            .to_string(),
+                    ),
                 }
-                Err(_) => notes.borrow_mut().push(
-                    "The latest published release has no Loadstone metadata yet, so the \
-                     newest version could not be determined."
-                        .to_string(),
-                ),
             }
         }
     }
 
-    let installed_version = state.map(|s| s.version.clone()).unwrap_or_default();
-    let can_install = state.is_none() && resolved.is_some();
-    let can_update = state.is_some()
-        && resolved.is_some()
-        && (is_dev_channel || (!latest_version.is_empty() && latest_version != installed_version));
-
-    // The game folder: recorded state wins, else auto-detection.
-    let game_dir = match state {
-        Some(s) => s.game_dir.display().to_string(),
-        None => game_manifest
-            .as_ref()
-            .and_then(|g| loadstone_core::detect::detect(g).ok().flatten())
-            .map(|found| found.game_dir.display().to_string())
-            .unwrap_or_default(),
-    };
     let game_name = game_manifest
         .as_ref()
         .map(|g| g.name.clone())
-        .or_else(|| state.map(|s| s.game.clone()))
+        .or_else(|| any_state.map(|s| s.game.clone()))
         .unwrap_or_default();
 
-    // Status in the installers' familiar voice.
-    let mut status = match state {
-        Some(s) if s.channel == "dev" => {
-            format!("Installed {} (dev channel).", s.version)
-        }
-        Some(s) if !latest_version.is_empty() && latest_version == s.version => {
-            format!("Up to date (version {}).", s.version)
-        }
-        Some(s) if !latest_version.is_empty() => {
-            format!("Update available: {} to {}.", s.version, latest_version)
-        }
-        Some(s) => format!("Installed {}.", s.version),
-        None if !latest_version.is_empty() => {
-            format!("Ready to install version {latest_version}.")
-        }
-        None => "Not installed.".to_string(),
-    };
-    if game_dir.is_empty() && state.is_none() {
-        status.push_str(" Game directory not found; use Browse to select it.");
-    }
+    // One CopyPage per known game copy, in the installers' familiar voice.
+    let build_copy = |state: Option<&InstalledState>,
+                      distribution: String,
+                      game_dir: String|
+     -> CopyPage {
+        let installed_version = state.map(|s| s.version.clone()).unwrap_or_default();
+        let is_dev = state.map(|s| s.channel == "dev").unwrap_or(false);
+        let can_install = state.is_none() && resolved.is_some();
+        let can_update = state.is_some()
+            && resolved.is_some()
+            && (is_dev || (!latest_version.is_empty() && latest_version != installed_version));
 
-    // Settings: the schema frozen in state when installed (editable), else
-    // the manifest's defaults as a preview.
-    let mut settings_editable = false;
-    let mut settings_note = String::new();
-    let mut settings = Vec::new();
-    if let Some(s) = state {
-        if let (Some(schema), Some(file)) = (&s.settings, &s.settings_file) {
-            let values = core_settings::read_values(file).unwrap_or_default();
-            settings = setting_items(schema, &values);
-            settings_editable = true;
-            settings_note = schema.note.clone().unwrap_or_default();
+        let mut status = match state {
+            Some(s) if s.channel == "dev" => {
+                format!("Installed {} (dev channel).", s.version)
+            }
+            Some(s) if !latest_version.is_empty() && latest_version == s.version => {
+                format!("Up to date (version {}).", s.version)
+            }
+            Some(s) if !latest_version.is_empty() => {
+                format!("Update available: {} to {}.", s.version, latest_version)
+            }
+            Some(s) => format!("Installed {}.", s.version),
+            None if !latest_version.is_empty() => {
+                format!("Ready to install version {latest_version}.")
+            }
+            None => "Not installed.".to_string(),
+        };
+        if game_dir.is_empty() && state.is_none() {
+            status.push_str(" Game directory not found; use Browse to select it.");
         }
-    } else if let Some(r) = &resolved {
-        if let Some(schema) = &r.manifest.settings {
-            settings = setting_items(schema, &serde_json::Map::new());
-            settings_note = "Settings become editable after install.".to_string();
+
+        // Settings: the schema frozen in state when installed (editable),
+        // else the manifest's defaults as a preview.
+        let mut settings_editable = false;
+        let mut settings_note = String::new();
+        let mut settings = Vec::new();
+        if let Some(s) = state {
+            if let (Some(schema), Some(file)) = (&s.settings, &s.settings_file) {
+                let values = core_settings::read_values(file).unwrap_or_default();
+                settings = setting_items(schema, &values);
+                settings_editable = true;
+                settings_note = schema.note.clone().unwrap_or_default();
+            }
+        } else if let Some(r) = &resolved {
+            if let Some(schema) = &r.manifest.settings {
+                settings = setting_items(schema, &serde_json::Map::new());
+                settings_note = "Settings become editable after install.".to_string();
+            }
+        }
+
+        let actions = match state {
+            Some(s) => action_items(&s.actions),
+            None => resolved
+                .as_ref()
+                .map(|r| action_items(&r.manifest.actions))
+                .unwrap_or_default(),
+        };
+
+        // The list line: which copy, its state, where it lives.
+        let short = if installed_version.is_empty() {
+            "not installed".to_string()
+        } else {
+            format!("installed {installed_version}")
+        };
+        let dist_title = distribution_title(&distribution);
+        let label = if game_dir.is_empty() {
+            "No copy found yet; use Browse to select the game folder.".to_string()
+        } else if dist_title.is_empty() {
+            format!("Copy at {game_dir}, {short}")
+        } else {
+            format!("{dist_title} copy, {short}, {game_dir}")
+        };
+
+        CopyPage {
+            label,
+            distribution,
+            game_dir,
+            installed_version,
+            channel: state.map(|s| s.channel.clone()).unwrap_or_default(),
+            status,
+            can_install,
+            can_update,
+            can_uninstall: state.is_some(),
+            settings_editable,
+            settings_note,
+            settings,
+            actions_available: state.is_some(),
+            actions,
+        }
+    };
+
+    // Installed copies first, then detected copies not already recorded,
+    // then (if nothing at all) one empty slot the user can Browse into.
+    let mut copies: Vec<CopyPage> = Vec::new();
+    let mut seen_keys: Vec<String> = Vec::new();
+    for s in &records {
+        seen_keys.push(loadstone_core::track::copy_key(&s.game_dir));
+        copies.push(build_copy(
+            Some(s),
+            s.distribution.clone(),
+            s.game_dir.display().to_string(),
+        ));
+    }
+    if let Some(g) = &game_manifest {
+        for found in loadstone_core::detect::detect_all(g).unwrap_or_default() {
+            let key = loadstone_core::track::copy_key(&found.game_dir);
+            if seen_keys.contains(&key) {
+                continue;
+            }
+            seen_keys.push(key);
+            copies.push(build_copy(
+                None,
+                found.distribution,
+                found.game_dir.display().to_string(),
+            ));
         }
     }
+    if copies.is_empty() {
+        copies.push(build_copy(None, String::new(), String::new()));
+    }
+    let selected_copy = copies
+        .iter()
+        .position(|c| !c.installed_version.is_empty())
+        .unwrap_or(0);
 
-    let actions = match state {
-        Some(s) => action_items(&s.actions),
-        None => resolved
-            .as_ref()
-            .map(|r| action_items(&r.manifest.actions))
-            .unwrap_or_default(),
-    };
+    // When copies share one mods folder (the mods path lives in user data,
+    // not the game folder), per-copy management is partly an illusion —
+    // say so rather than letting an uninstall surprise the other copy.
+    if copies.len() > 1 {
+        if let Some(g) = &game_manifest {
+            if g.paths.values().any(|p| p.contains("${userData}")) {
+                notes.borrow_mut().push(format!(
+                    "Note: copies of {} share one mods folder. Installing or \
+                     uninstalling a mod for one copy affects the others; only the \
+                     mod loader is separate per copy.",
+                    g.name
+                ));
+            }
+        }
+    }
 
     let (name, description, authors, game) = match &resolved {
         Some(r) => (
@@ -746,7 +887,7 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
             r.manifest.game.clone().unwrap_or_default(),
         ),
         None => {
-            let s = state.unwrap();
+            let s = any_state.unwrap();
             (s.id.clone(), String::new(), String::new(), s.game.clone())
         }
     };
@@ -754,11 +895,11 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
     // Offline / unresolved: the recorded dependency ids still get a note,
     // just without pretty names.
     if dep_infos.is_empty() {
-        if let Some(s) = state {
+        if let Some(s) = any_state {
             dep_infos = s.dependencies.iter().map(|d| (d.clone(), d.clone())).collect();
         }
     }
-    let page_game = state.map(|s| s.game.clone()).unwrap_or_else(|| game.clone());
+    let page_game = any_state.map(|s| s.game.clone()).unwrap_or_else(|| game.clone());
     for (id, dep_name) in &dep_infos {
         let dep_state = installed
             .iter()
@@ -778,22 +919,11 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
         name,
         description,
         authors,
-        game: state.map(|s| s.game.clone()).unwrap_or(game),
+        game: page_game,
         game_name,
-        game_dir,
-        installed_version,
-        installed_game: state.map(|s| s.game.clone()).unwrap_or_default(),
-        channel: state.map(|s| s.channel.clone()).unwrap_or_default(),
         latest_version,
-        status,
-        can_install,
-        can_update,
-        can_uninstall: state.is_some(),
-        settings_editable,
-        settings_note,
-        settings,
-        actions_available: state.is_some(),
-        actions,
+        selected_copy,
+        copies,
         notes,
     })
 }
@@ -801,14 +931,14 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
 pub fn apply_setting(
     state_dir: &str,
     game: &str,
+    game_dir: &str,
     mod_id: &str,
     setting_id: &str,
     raw_value: &str,
 ) -> Result<String> {
     let store = open_store(state_dir)?;
-    let state = store
-        .load(game, mod_id)?
-        .with_context(|| format!("\"{mod_id}\" is not installed for {game}"))?;
+    let state =
+        loadstone_core::ops::find_installed(&store, game, mod_id, opt_path(game_dir).as_deref())?;
     let schema = state
         .settings
         .as_ref()
@@ -873,23 +1003,27 @@ mod tests {
 
         let page = fetch_mod_page(r#"{"mode":"manager"}"#, &state_dir, "fake-mod").unwrap();
         assert_eq!(page.name, "fake-mod");
-        assert_eq!(page.status, "Installed 1.2.3.");
         assert_eq!(page.game_name, "fake-game");
-        assert_eq!(page.game_dir, tmp.path().join("game").display().to_string());
-        assert!(page.can_uninstall && !page.can_install && !page.can_update);
-        assert!(page.settings_editable);
-        assert_eq!(page.settings_note, "Restart the game.");
-        assert_eq!(page.settings.len(), 2);
-        assert_eq!(page.settings[0].value, "true", "default shown when unset");
-        assert_eq!(page.settings[1].options.len(), 2);
-        assert_eq!(page.actions.len(), 1);
-        assert!(page.actions_available);
+        assert_eq!(page.copies.len(), 1);
+        assert_eq!(page.selected_copy, 0);
+        let copy = &page.copies[0];
+        assert_eq!(copy.status, "Installed 1.2.3.");
+        assert_eq!(copy.game_dir, tmp.path().join("game").display().to_string());
+        assert!(copy.can_uninstall && !copy.can_install && !copy.can_update);
+        assert!(copy.settings_editable);
+        assert_eq!(copy.settings_note, "Restart the game.");
+        assert_eq!(copy.settings.len(), 2);
+        assert_eq!(copy.settings[0].value, "true", "default shown when unset");
+        assert_eq!(copy.settings[1].options.len(), 2);
+        assert_eq!(copy.actions.len(), 1);
+        assert!(copy.actions_available);
 
-        let note = apply_setting(&state_dir, "fake-game", "fake-mod", "reader", "jaws").unwrap();
+        let note =
+            apply_setting(&state_dir, "fake-game", "", "fake-mod", "reader", "jaws").unwrap();
         assert_eq!(note, "Restart the game.");
-        assert!(apply_setting(&state_dir, "fake-game", "fake-mod", "reader", "nvda").is_err());
+        assert!(apply_setting(&state_dir, "fake-game", "", "fake-mod", "reader", "nvda").is_err());
         let page = fetch_mod_page(r#"{"mode":"manager"}"#, &state_dir, "fake-mod").unwrap();
-        assert_eq!(page.settings[1].value, "jaws");
+        assert_eq!(page.copies[0].settings[1].value, "jaws");
 
         // The catalog surfaces the installed mod even with no registries.
         let catalog = fetch_catalog(r#"{"mode":"manager"}"#, &state_dir).unwrap();
@@ -956,5 +1090,60 @@ mod tests {
             "expected a dependency note, got: {:?}",
             page.notes
         );
+    }
+
+    /// A mod installed to two copies of one game: the page lists both
+    /// copies with their own state, and the catalog aggregates.
+    #[test]
+    fn two_copies_of_one_game() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        let store = StateStore::open(Some(state_dir.clone())).unwrap();
+        let base = InstalledState {
+            id: "fake-mod".into(),
+            kind: "mod".into(),
+            version: "1.0.0".into(),
+            channel: "stable".into(),
+            game: "fake-game".into(),
+            files: Vec::new(),
+            uninstall_steps: Vec::new(),
+            user_data_paths: Vec::new(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            roots: Vec::new(),
+            game_dir: tmp.path().join("steam-copy"),
+            user_data: tmp.path().join("ud"),
+            distribution: "steam".into(),
+            game_paths: BTreeMap::new(),
+            settings: None,
+            settings_file: None,
+            actions: Vec::new(),
+        };
+        store.save(&base).unwrap();
+        store
+            .save(&InstalledState {
+                version: "1.1.0".into(),
+                game_dir: tmp.path().join("epic-copy"),
+                distribution: "epic".into(),
+                ..base.clone()
+            })
+            .unwrap();
+        let state_dir = state_dir.to_string_lossy().into_owned();
+
+        let page = fetch_mod_page(r#"{"mode":"manager"}"#, &state_dir, "fake-mod").unwrap();
+        assert_eq!(page.copies.len(), 2);
+        let steam = page.copies.iter().find(|c| c.distribution == "steam").unwrap();
+        let epic = page.copies.iter().find(|c| c.distribution == "epic").unwrap();
+        assert_eq!(steam.installed_version, "1.0.0");
+        assert_eq!(epic.installed_version, "1.1.0");
+        assert!(steam.label.starts_with("Steam copy, installed 1.0.0,"), "{}", steam.label);
+        assert!(epic.label.starts_with("Epic copy, installed 1.1.0,"), "{}", epic.label);
+
+        let catalog = fetch_catalog(r#"{"mode":"manager"}"#, &state_dir).unwrap();
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].status, "Installed for 2 copies (versions differ)");
+
+        // Copy-addressed operations need the dir once there are two.
+        assert!(apply_setting(&state_dir, "fake-game", "", "fake-mod", "x", "y").is_err());
     }
 }

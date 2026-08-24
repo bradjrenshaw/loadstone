@@ -149,6 +149,10 @@ enum Command {
         /// Game id the package is installed for.
         #[arg(long)]
         game: String,
+        /// Which copy of the game (needed when the mod is installed for
+        /// more than one).
+        #[arg(long)]
+        game_dir: Option<PathBuf>,
         #[arg(long)]
         state_dir: Option<PathBuf>,
         /// Change a setting: --set id=value (repeatable). Without it, lists all.
@@ -164,6 +168,10 @@ enum Command {
         /// Game id the package is installed for.
         #[arg(long)]
         game: String,
+        /// Which copy of the game (needed when the mod is installed for
+        /// more than one).
+        #[arg(long)]
+        game_dir: Option<PathBuf>,
         #[arg(long)]
         state_dir: Option<PathBuf>,
         /// Pre-answer a pick-directory step: --dir id=path (repeatable).
@@ -179,6 +187,10 @@ enum Command {
         /// Game id the package was installed for.
         #[arg(long)]
         game: String,
+        /// Which copy of the game (needed when the mod is installed for
+        /// more than one).
+        #[arg(long)]
+        game_dir: Option<PathBuf>,
         /// Override the installed-state directory (mainly for testing).
         #[arg(long)]
         state_dir: Option<PathBuf>,
@@ -252,13 +264,13 @@ fn main() -> ExitCode {
                 .map(|()| true)
             })
         }
-        Command::Settings { id, game, state_dir, sets } => {
-            manage::cmd_settings(&id, &game, state_dir, &sets).map(|()| true)
+        Command::Settings { id, game, game_dir, state_dir, sets } => {
+            manage::cmd_settings(&id, &game, game_dir, state_dir, &sets).map(|()| true)
         }
-        Command::Action { id, action, game, state_dir, dirs, yes } => {
-            manage::cmd_action(&id, &action, &game, state_dir, &dirs, yes).map(|()| true)
+        Command::Action { id, action, game, game_dir, state_dir, dirs, yes } => {
+            manage::cmd_action(&id, &action, &game, game_dir, state_dir, &dirs, yes).map(|()| true)
         }
-        Command::Uninstall { id, game, state_dir, purge, keep_settings, yes } => {
+        Command::Uninstall { id, game, game_dir, state_dir, purge, keep_settings, yes } => {
             let purge_choice = if purge {
                 Some(true)
             } else if keep_settings {
@@ -266,7 +278,7 @@ fn main() -> ExitCode {
             } else {
                 None
             };
-            manage::cmd_uninstall(&id, &game, state_dir, purge_choice, yes).map(|()| true)
+            manage::cmd_uninstall(&id, &game, game_dir, state_dir, purge_choice, yes).map(|()| true)
         }
         Command::List { state_dir } => manage::cmd_list(state_dir).map(|()| true),
     };

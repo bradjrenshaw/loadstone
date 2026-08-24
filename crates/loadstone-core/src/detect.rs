@@ -49,10 +49,18 @@ pub fn infer_distribution(dir: &Path) -> String {
     "standalone".to_string()
 }
 
-/// Try to auto-detect the game. Currently implements Steam (the only
-/// distribution the existing installers detect); other distributions
-/// resolve via the user browsing to the folder.
+/// Try to auto-detect the game's first-found copy.
 pub fn detect(game: &GameManifest) -> Result<Option<DetectedGame>> {
+    Ok(detect_all(game)?.into_iter().next())
+}
+
+/// Every copy of the game detection can find. Currently implements Steam
+/// (the only distribution the existing installers detect, though several
+/// Steam libraries can each hold a copy); other distributions resolve via
+/// the user browsing to the folder.
+pub fn detect_all(game: &GameManifest) -> Result<Vec<DetectedGame>> {
+    let mut found: Vec<DetectedGame> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
     if let Some(steam) = game.detect.distributions.get("steam") {
         let dir_name = steam.get("dirName").and_then(|v| v.as_str());
         if let Some(dir_name) = dir_name {
@@ -67,16 +75,21 @@ pub fn detect(game: &GameManifest) -> Result<Option<DetectedGame>> {
                 for lib in libraries {
                     let candidate = lib.join("steamapps").join("common").join(dir_name);
                     if candidate.is_dir() && validate_game_dir(game, &candidate) {
-                        return Ok(Some(DetectedGame {
-                            game_dir: candidate,
-                            distribution: "steam".to_string(),
-                        }));
+                        let canonical =
+                            std::fs::canonicalize(&candidate).unwrap_or(candidate.clone());
+                        if !seen.contains(&canonical) {
+                            seen.push(canonical);
+                            found.push(DetectedGame {
+                                game_dir: candidate,
+                                distribution: "steam".to_string(),
+                            });
+                        }
                     }
                 }
             }
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// Steam install roots to probe, best first: the registry-configured path,

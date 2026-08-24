@@ -146,15 +146,14 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
 pub fn cmd_settings(
     id: &str,
     game: &str,
+    game_dir: Option<PathBuf>,
     state_dir: Option<PathBuf>,
     sets: &[String],
 ) -> Result<()> {
     use loadstone_core::settings as core_settings;
     use loadstone_core::types::Settings;
     let store = StateStore::open(state_dir)?;
-    let state = store
-        .load(game, id)?
-        .with_context(|| format!("\"{id}\" is not installed for {game}"))?;
+    let state = ops::find_installed(&store, game, id, game_dir.as_deref())?;
     let settings: &Settings = state
         .settings
         .as_ref()
@@ -197,6 +196,7 @@ pub fn cmd_action(
     id: &str,
     action_id: &str,
     game: &str,
+    game_dir: Option<PathBuf>,
     state_dir: Option<PathBuf>,
     dirs: &[String],
     assume_yes: bool,
@@ -209,9 +209,7 @@ pub fn cmd_action(
         ui.preset_dirs.insert(var.to_string(), PathBuf::from(path));
     }
     let store = StateStore::open(state_dir)?;
-    let state = store
-        .load(game, id)?
-        .with_context(|| format!("\"{id}\" is not installed for {game}"))?;
+    let state = ops::find_installed(&store, game, id, game_dir.as_deref())?;
     engine::run_action(&store, &state, action_id, &mut ui)
 }
 
@@ -221,12 +219,13 @@ pub fn cmd_action(
 pub fn cmd_uninstall(
     id: &str,
     game: &str,
+    game_dir: Option<PathBuf>,
     state_dir: Option<PathBuf>,
     purge: Option<bool>,
     assume_yes: bool,
 ) -> Result<()> {
     let mut ui = TerminalUi::new(assume_yes);
-    let summary = ops::uninstall(id, game, state_dir, purge, &mut ui)?;
+    let summary = ops::uninstall(id, game, game_dir.as_deref(), state_dir, purge, &mut ui)?;
     println!("{summary}");
     Ok(())
 }
@@ -240,12 +239,16 @@ pub fn cmd_list(state_dir: Option<PathBuf>) -> Result<()> {
     }
     for game in games {
         println!("{game}:");
-        for state in store.list(&game)? {
-            let extra = if state.kind == "tool" {
-                format!(" (tool; needed by: {})", if state.dependents.is_empty() { "nobody".to_string() } else { state.dependents.join(", ") })
-            } else {
-                String::new()
-            };
+        let states = store.list(&game)?;
+        for state in &states {
+            let mut extra = String::new();
+            if state.kind == "tool" {
+                extra = format!(" (tool; needed by: {})", if state.dependents.is_empty() { "nobody".to_string() } else { state.dependents.join(", ") });
+            }
+            // Same package in several copies of the game: say which copy.
+            if states.iter().filter(|s| s.id == state.id).count() > 1 {
+                extra += &format!(" ({} copy at {})", state.distribution, state.game_dir.display());
+            }
             println!("  {} {} [{}]{}", state.id, state.version, state.channel, extra);
         }
     }

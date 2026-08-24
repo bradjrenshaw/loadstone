@@ -504,21 +504,23 @@ pub fn fetch_catalog(embedded: &str, state_dir: &str) -> Result<Catalog> {
                 .unwrap_or_else(|| "Not installed".to_string()),
         });
     }
-    // Installed packages that no configured registry lists (including tools
-    // pulled in as dependencies) still appear, so nothing is invisible.
+    // Installed mods that no configured registry lists still appear, so
+    // nothing the user must manage is invisible. Tools and libraries are
+    // excluded: the manager installs, updates, and removes those
+    // automatically as dependencies, so listing them alongside mods
+    // misreads. Dependent mod pages name them; `loadstone list` shows
+    // them with their dependents.
     for state in &installed {
+        if state.kind == "tool" || state.kind == "library" {
+            continue;
+        }
         if entries.iter().any(|e| e.id == state.id) {
             continue;
         }
-        let summary = if state.kind == "tool" {
-            "Tool, installed as a dependency.".to_string()
-        } else {
-            "Installed, but not listed by the configured registries.".to_string()
-        };
         entries.push(CatalogEntry {
             id: state.id.clone(),
             name: state.id.clone(),
-            summary,
+            summary: "Installed, but not listed by the configured registries.".to_string(),
             game: state.game.clone(),
             installed_version: state.version.clone(),
             status: installed_status(state),
@@ -595,6 +597,10 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
     // fails (offline, delisted).
     let mut resolved: Option<ResolvedPackage> = None;
     let mut game_manifest: Option<loadstone_core::types::GameManifest> = None;
+    // Dependencies (id, display name) for the "Requires ..." note. Installed
+    // state's recorded ids win (what actually got pulled in); a fresh
+    // manifest supplies them pre-install.
+    let mut dep_infos: Vec<(String, String)> = Vec::new();
     if !profile.registries.is_empty() {
         let (mut fetcher, sources) = build_resolver(&profile.registries, notes.clone())?;
         match Resolver::from_sources(&sources, &mut fetcher) {
@@ -602,6 +608,22 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
                 Ok(res) => {
                     if let Some(game_id) = &res.manifest.game {
                         game_manifest = r.resolve_game(game_id, &res.scope).ok();
+                    }
+                    let dep_ids: Vec<String> = match state {
+                        Some(s) => s.dependencies.clone(),
+                        None => res
+                            .manifest
+                            .dependencies
+                            .iter()
+                            .map(|d| d.id.clone())
+                            .collect(),
+                    };
+                    for id in dep_ids {
+                        let name = r
+                            .resolve_project(&id)
+                            .map(|d| d.manifest.name.clone())
+                            .unwrap_or_else(|_| id.clone());
+                        dep_infos.push((id, name));
                     }
                     resolved = Some(res);
                 }
@@ -729,6 +751,27 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
         }
     };
 
+    // Offline / unresolved: the recorded dependency ids still get a note,
+    // just without pretty names.
+    if dep_infos.is_empty() {
+        if let Some(s) = state {
+            dep_infos = s.dependencies.iter().map(|d| (d.clone(), d.clone())).collect();
+        }
+    }
+    let page_game = state.map(|s| s.game.clone()).unwrap_or_else(|| game.clone());
+    for (id, dep_name) in &dep_infos {
+        let dep_state = installed
+            .iter()
+            .find(|d| d.id == *id && (page_game.is_empty() || d.game == page_game));
+        notes.borrow_mut().push(match dep_state {
+            Some(d) => format!(
+                "Requires {dep_name} (installed automatically, currently {}).",
+                d.version
+            ),
+            None => format!("Requires {dep_name} (installed automatically)."),
+        });
+    }
+
     let notes = notes.borrow().clone();
     Ok(ModPage {
         id: mod_id.to_string(),
@@ -852,5 +895,66 @@ mod tests {
         let catalog = fetch_catalog(r#"{"mode":"manager"}"#, &state_dir).unwrap();
         assert_eq!(catalog.entries.len(), 1);
         assert_eq!(catalog.entries[0].status, "Installed 1.2.3");
+    }
+
+    /// Dependency tools never appear in the catalog as peer mods; the
+    /// dependent mod's page names them in a note instead.
+    #[test]
+    fn tools_hidden_from_catalog_but_named_on_mod_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        let store = StateStore::open(Some(state_dir.clone())).unwrap();
+        let base = InstalledState {
+            id: String::new(),
+            kind: String::new(),
+            version: String::new(),
+            channel: "stable".into(),
+            game: "fake-game".into(),
+            files: Vec::new(),
+            uninstall_steps: Vec::new(),
+            user_data_paths: Vec::new(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            roots: Vec::new(),
+            game_dir: tmp.path().join("game"),
+            user_data: tmp.path().join("ud"),
+            distribution: "steam".into(),
+            game_paths: BTreeMap::new(),
+            settings: None,
+            settings_file: None,
+            actions: Vec::new(),
+        };
+        store
+            .save(&InstalledState {
+                id: "fake-mod".into(),
+                kind: "mod".into(),
+                version: "1.2.3".into(),
+                dependencies: vec!["fake-tool".into()],
+                ..base.clone()
+            })
+            .unwrap();
+        store
+            .save(&InstalledState {
+                id: "fake-tool".into(),
+                kind: "tool".into(),
+                version: "0.9.0".into(),
+                dependents: vec!["fake-mod".into()],
+                ..base
+            })
+            .unwrap();
+        let state_dir = state_dir.to_string_lossy().into_owned();
+
+        let catalog = fetch_catalog(r#"{"mode":"manager"}"#, &state_dir).unwrap();
+        assert_eq!(catalog.entries.len(), 1, "tool must not be listed as a mod");
+        assert_eq!(catalog.entries[0].id, "fake-mod");
+
+        let page = fetch_mod_page(r#"{"mode":"manager"}"#, &state_dir, "fake-mod").unwrap();
+        assert!(
+            page.notes.iter().any(
+                |n| n == "Requires fake-tool (installed automatically, currently 0.9.0)."
+            ),
+            "expected a dependency note, got: {:?}",
+            page.notes
+        );
     }
 }

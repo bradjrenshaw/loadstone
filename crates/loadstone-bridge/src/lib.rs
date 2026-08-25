@@ -532,16 +532,46 @@ pub fn fetch_catalog(embedded: &str, state_dir: &str) -> Result<Catalog> {
     let notes = Rc::new(RefCell::new(Vec::new()));
 
     let mut mods: Vec<ResolvedPackage> = Vec::new();
+    // Mods with no state record whose files are nonetheless present in a
+    // detected game copy — installed by hand or by an old standalone
+    // installer.
+    let mut foreign_ids: Vec<String> = Vec::new();
     if profile.registries.is_empty() {
         notes
             .borrow_mut()
             .push("No registries are configured; showing installed mods only.".to_string());
     } else {
         let (mut fetcher, sources) = build_resolver(&profile.registries, notes.clone())?;
-        match Resolver::from_sources(&sources, &mut fetcher)
-            .and_then(|mut r| r.list_mods())
-        {
-            Ok(list) => mods = list,
+        match Resolver::from_sources(&sources, &mut fetcher) {
+            Ok(mut r) => match r.list_mods() {
+                Ok(list) => {
+                    for m in &list {
+                        if installed.iter().any(|s| s.id == m.manifest.id) {
+                            continue;
+                        }
+                        let Some(game_id) = &m.manifest.game else { continue };
+                        let Ok(g) = r.resolve_game(game_id, &m.scope) else { continue };
+                        let present = loadstone_core::detect::detect_all(&g)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .any(|found| {
+                                loadstone_core::ops::foreign_install_present(
+                                    &g,
+                                    &m.manifest,
+                                    &found.game_dir,
+                                    &found.distribution,
+                                )
+                            });
+                        if present {
+                            foreign_ids.push(m.manifest.id.clone());
+                        }
+                    }
+                    mods = list;
+                }
+                Err(e) => notes
+                    .borrow_mut()
+                    .push(format!("Could not load registries: {e:#}")),
+            },
             Err(e) => notes
                 .borrow_mut()
                 .push(format!("Could not load registries: {e:#}")),
@@ -562,7 +592,11 @@ pub fn fetch_catalog(embedded: &str, state_dir: &str) -> Result<Catalog> {
                 .or_else(|| m.manifest.game.clone())
                 .unwrap_or_default(),
             installed_version: installs.first().map(|s| s.version.clone()).unwrap_or_default(),
-            status: aggregate_status(&installs),
+            status: if installs.is_empty() && foreign_ids.contains(&m.manifest.id) {
+                "Installed outside Loadstone".to_string()
+            } else {
+                aggregate_status(&installs)
+            },
         });
     }
     // Installed mods that no configured registry lists still appear, so
@@ -749,6 +783,22 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
             && resolved.is_some()
             && (is_dev || (!latest_version.is_empty() && latest_version != installed_version));
 
+        // A copy Loadstone never installed may still hold the mod's files
+        // (placed by hand, or by the mod's old standalone installer). Say
+        // so rather than claiming the copy is clean; installing through
+        // Loadstone adopts it.
+        let foreign = state.is_none()
+            && !game_dir.is_empty()
+            && match (&resolved, &game_manifest) {
+                (Some(r), Some(g)) => loadstone_core::ops::foreign_install_present(
+                    g,
+                    &r.manifest,
+                    std::path::Path::new(&game_dir),
+                    &distribution,
+                ),
+                _ => false,
+            };
+
         let mut status = match state {
             Some(s) if s.channel == "dev" => {
                 format!("Installed {} (dev channel).", s.version)
@@ -760,6 +810,13 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
                 format!("Update available: {} to {}.", s.version, latest_version)
             }
             Some(s) => format!("Installed {}.", s.version),
+            None if foreign && !latest_version.is_empty() => format!(
+                "Installed outside Loadstone (version unknown). Install version \
+                 {latest_version} to let Loadstone manage this copy."
+            ),
+            None if foreign => "Installed outside Loadstone (version unknown). Install to \
+                                let Loadstone manage this copy."
+                .to_string(),
             None if !latest_version.is_empty() => {
                 format!("Ready to install version {latest_version}.")
             }
@@ -797,10 +854,12 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
         };
 
         // The list line: which copy, its state, where it lives.
-        let short = if installed_version.is_empty() {
-            "not installed".to_string()
-        } else {
+        let short = if !installed_version.is_empty() {
             format!("installed {installed_version}")
+        } else if foreign {
+            "installed outside Loadstone".to_string()
+        } else {
+            "not installed".to_string()
         };
         let dist_title = distribution_title(&distribution);
         let label = if game_dir.is_empty() {

@@ -480,6 +480,45 @@ pub fn find_installed(
     }
 }
 
+/// Best-effort probe for a copy Loadstone has no record of: do the mod's
+/// files already sit in this game directory (placed by hand, or by an
+/// older standalone installer)? Judged by the manifest's `expect` checks —
+/// the files an install is required to leave behind — so packages declare
+/// nothing extra. Every applicable check must pass; a manifest without
+/// expect checks, or one whose tokens don't resolve on this machine,
+/// answers false and the caller keeps its plain "not installed" wording.
+pub fn foreign_install_present(
+    game: &crate::types::GameManifest,
+    manifest: &crate::types::ProjectManifest,
+    game_dir: &Path,
+    distribution: &str,
+) -> bool {
+    let Ok(ctx) = InstallContext::build(
+        game,
+        game_dir.to_path_buf(),
+        None,
+        distribution.to_string(),
+    ) else {
+        return false;
+    };
+    let mut any = false;
+    for step in &manifest.install {
+        let crate::types::Step::Expect { checks, common } = step else { continue };
+        if let Some(cond) = &common.when {
+            if !ctx.condition_matches(cond).unwrap_or(false) {
+                continue;
+            }
+        }
+        for check in checks {
+            match ctx.glob_exists(&check.file_exists) {
+                Ok(Some(_)) => any = true,
+                _ => return false,
+            }
+        }
+    }
+    any
+}
+
 /// Uninstall an installed package, releasing its claims on any tool
 /// dependencies. Returns a one-line summary.
 pub fn uninstall(
@@ -506,4 +545,70 @@ pub fn uninstall(
         }
     }
     Ok(format!("{} {} uninstalled.", state.id, state.version))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{GameManifest, ProjectManifest};
+
+    fn game() -> GameManifest {
+        serde_json::from_value(serde_json::json!({
+            "manifestVersion": 1,
+            "kind": "game",
+            "id": "fake-game",
+            "name": "Fake Game",
+            "detect": { "markers": ["Fake.exe"] },
+            "userData": { crate::context::current_platform(): "${localAppData}/FakeGame" }
+        }))
+        .unwrap()
+    }
+
+    fn mod_with_expect() -> ProjectManifest {
+        serde_json::from_value(serde_json::json!({
+            "manifestVersion": 1,
+            "id": "fake-mod",
+            "name": "Fake Mod",
+            "description": "d",
+            "authors": ["a"],
+            "game": "fake-game",
+            "install": [
+                { "step": "extract-archive",
+                  "routes": [ { "from": "**", "to": "${gameDir}" } ] },
+                { "step": "expect",
+                  "checks": [ { "fileExists": "${gameDir}/mods/FakeMod.dll",
+                                "message": "missing" } ] },
+                // A check gated to a platform that never matches must not
+                // veto the probe.
+                { "step": "expect",
+                  "when": { "platform": "never-a-platform" },
+                  "checks": [ { "fileExists": "${gameDir}/not-there",
+                                "message": "gated" } ] }
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn foreign_install_detected_by_expect_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_dir = tmp.path().join("game");
+        std::fs::create_dir_all(game_dir.join("mods")).unwrap();
+        let game = game();
+        let manifest = mod_with_expect();
+
+        assert!(
+            !foreign_install_present(&game, &manifest, &game_dir, "steam"),
+            "payload absent must read as not installed"
+        );
+
+        std::fs::write(game_dir.join("mods").join("FakeMod.dll"), b"x").unwrap();
+        assert!(foreign_install_present(&game, &manifest, &game_dir, "steam"));
+
+        // Without any expect checks the probe stays silent: no evidence
+        // either way.
+        let mut no_expect = manifest.clone();
+        no_expect.install.retain(|s| s.name() != "expect");
+        assert!(!foreign_install_present(&game, &no_expect, &game_dir, "steam"));
+    }
 }

@@ -75,11 +75,15 @@ std::string ToStd(const wxString& s) {
 #if wxUSE_ACCESSIBILITY
 // Exposes a description through MSAA so screen readers announce it when
 // the control gains keyboard focus. Tooltips alone only surface on mouse
-// hover, which never happens for keyboard users.
-class DescribedAccessible : public wxWindowAccessible {
+// hover, which never happens for keyboard users. Derives from plain
+// wxAccessible, NOT wxWindowAccessible: every other method must return
+// NOT_IMPLEMENTED so name, role, and state fall through to the standard
+// MSAA proxy (wxWindowAccessible answers GetName with the wxWindow's
+// internal name, which turns a checkbox's spoken label into "check").
+class DescribedAccessible : public wxAccessible {
 public:
     DescribedAccessible(wxWindow* win, const wxString& description)
-        : wxWindowAccessible(win), description_(description) {}
+        : wxAccessible(win), description_(description) {}
     wxAccStatus GetDescription(int childId, wxString* description) override {
         if (childId == wxACC_SELF) {
             *description = description_;

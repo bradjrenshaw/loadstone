@@ -146,6 +146,19 @@ private:
 
     // The settings dialog writes changed values through the bridge on OK.
     void ShowSettingsDialog();
+
+    // Grey out the page for a running operation - except the control
+    // holding keyboard focus. Disabling the focused control shoves focus
+    // onto whatever Windows picks next, and each question dialog that
+    // closes then lands it somewhere new, so a screen reader narrates a
+    // tour of the page while the user is just waiting. Every launch
+    // handler no-ops while an operation is in flight, so the still-
+    // enabled button cannot start a second one.
+    void DisablePageControlsKeepFocus() {
+        wxWindow* focused = FindFocus();
+        for (auto* c : pageControls_)
+            if (c != focused) c->Enable(false);
+    }
     // Returns false (and shows the error) when the value was rejected.
     bool ApplySetting(const wxString& settingId, const wxString& rawValue);
 
@@ -518,6 +531,7 @@ void LoadstoneFrame::BuildModPage() {
         for (const auto& c : page.copies) copiesList_->Append(FromRust(c.label));
         copiesList_->SetSelection(static_cast<int>(currentCopy_));
         copiesList_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent& ev) {
+            if (opInFlight_ || fetchInFlight_) return;
             int sel = ev.GetSelection();
             if (sel < 0 || static_cast<size_t>(sel) >= pageModel_->copies.size())
                 return;
@@ -640,6 +654,7 @@ void LoadstoneFrame::BuildDetail() {
     auto* fromFile = new wxButton(detailPanel_, wxID_ANY, "Install from &file...");
     fromFile->Enable(copy.can_install || copy.can_update);
     fromFile->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        if (opInFlight_ || fetchInFlight_) return;
         wxFileDialog dlg(this, "Select the mod's loadstone-release.json", "", "",
                          "loadstone-release.json|loadstone-release.json|"
                          "JSON files (*.json)|*.json|All files (*.*)|*.*",
@@ -708,7 +723,7 @@ void LoadstoneFrame::SetOpProgress(unsigned percent) {
 void LoadstoneFrame::StartVersionPick(OpKind kind) {
     if (opInFlight_ || fetchInFlight_) return;
     fetchInFlight_ = true;
-    for (auto* c : pageControls_) c->Enable(false);
+    DisablePageControlsKeepFocus();
     SetStatusText("Fetching the release list...");
 
     auto alive = alive_;
@@ -777,7 +792,7 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
             return;
     }
     opInFlight_ = true;
-    for (auto* c : pageControls_) c->Enable(false);
+    DisablePageControlsKeepFocus();
     if (opLog_) opLog_->Clear();
     SetStatusText("Working...");
 
@@ -856,6 +871,7 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
 // discards. A value the bridge rejects shows its error and the rest still
 // apply.
 void LoadstoneFrame::ShowSettingsDialog() {
+    if (opInFlight_ || fetchInFlight_) return;
     if (!pageModel_ || currentCopy_ >= pageModel_->copies.size()) return;
     loadstone::CopyPage& copy = pageModel_->copies[currentCopy_];
 

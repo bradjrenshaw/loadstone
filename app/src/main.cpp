@@ -108,7 +108,8 @@ private:
                       const wxString& localRelease = wxString());
     void OnOpDone(const std::string& result, const std::string& error);
 
-    // The settings form writes through the bridge as controls change.
+    // The settings dialog writes changed values through the bridge on OK.
+    void ShowSettingsDialog();
     // Returns false (and shows the error) when the value was rejected.
     bool ApplySetting(const wxString& settingId, const wxString& rawValue);
 
@@ -571,84 +572,6 @@ void LoadstoneFrame::BuildDetail() {
         sizer->Add(desc, 0, wxEXPAND | wxALL, 8);
     }
 
-    if (!copy.settings.empty()) {
-        auto* box = new wxStaticBoxSizer(wxVERTICAL, detailPanel_, "Settings");
-        wxWindow* parent = box->GetStaticBox();
-        for (const auto& s : copy.settings) {
-            wxString kind = FromRust(s.kind);
-            wxString label = FromRust(s.label);
-            wxString value = FromRust(s.value);
-            wxString sid = FromRust(s.id);
-            wxString describe = FromRust(s.description);
-
-            if (kind == "boolean") {
-                auto* check = new wxCheckBox(parent, wxID_ANY, label);
-                check->SetValue(value == "true");
-                check->Enable(copy.settings_editable);
-                if (!describe.empty()) check->SetToolTip(describe);
-                check->Bind(wxEVT_CHECKBOX, [this, sid, check](wxCommandEvent& ev) {
-                    if (!ApplySetting(sid, ev.IsChecked() ? "true" : "false"))
-                        check->SetValue(!ev.IsChecked()); // rejected: revert
-                });
-                if (copy.settings_editable) pageControls_.push_back(check);
-                box->Add(check, 0, wxALL, 6);
-            } else if (kind == "choice") {
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(parent, wxID_ANY, label + ":"), 0,
-                         wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-                auto* choice = new wxChoice(parent, wxID_ANY);
-                int selected = 0;
-                std::vector<wxString> values;
-                for (const auto& o : s.options) {
-                    values.push_back(FromRust(o.value));
-                    choice->Append(FromRust(o.label));
-                    if (values.back() == value) selected = choice->GetCount() - 1;
-                }
-                if (!values.empty()) choice->SetSelection(selected);
-                choice->Enable(copy.settings_editable);
-                if (!describe.empty()) choice->SetToolTip(describe);
-                int previous = selected;
-                choice->Bind(wxEVT_CHOICE,
-                             [this, sid, choice, values, previous](wxCommandEvent& ev) mutable {
-                                 int idx = ev.GetSelection();
-                                 if (idx < 0 || idx >= static_cast<int>(values.size())) return;
-                                 if (ApplySetting(sid, values[idx]))
-                                     previous = idx;
-                                 else
-                                     choice->SetSelection(previous);
-                             });
-                if (copy.settings_editable) pageControls_.push_back(choice);
-                row->Add(choice, 0);
-                box->Add(row, 0, wxALL, 6);
-            } else { // string / number: edit, apply with Enter
-                auto* row = new wxBoxSizer(wxHORIZONTAL);
-                row->Add(new wxStaticText(parent, wxID_ANY, label + ":"), 0,
-                         wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-                auto* text = new wxTextCtrl(parent, wxID_ANY, value,
-                                            wxDefaultPosition, wxSize(180, -1),
-                                            wxTE_PROCESS_ENTER);
-                text->Enable(copy.settings_editable);
-                if (!describe.empty()) text->SetToolTip(describe);
-                wxString last = value;
-                text->Bind(wxEVT_TEXT_ENTER, [this, sid, text, last](wxCommandEvent&) mutable {
-                    if (ApplySetting(sid, text->GetValue()))
-                        last = text->GetValue();
-                    else
-                        text->SetValue(last); // rejected: restore
-                });
-                if (copy.settings_editable) pageControls_.push_back(text);
-                row->Add(text, 0);
-                row->Add(new wxStaticText(parent, wxID_ANY, "(press Enter to save)"), 0,
-                         wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
-                box->Add(row, 0, wxALL, 6);
-            }
-        }
-        wxString note = FromRust(copy.settings_note);
-        if (!note.empty())
-            box->Add(new wxStaticText(parent, wxID_ANY, note), 0, wxALL, 6);
-        sizer->Add(box, 0, wxEXPAND | wxALL, 8);
-    }
-
     for (const auto& n : page.notes) {
         auto* note = new wxStaticText(detailPanel_, wxID_ANY, FromRust(n));
         note->Wrap(640);
@@ -709,6 +632,19 @@ void LoadstoneFrame::BuildDetail() {
         });
         if (copy.actions_available) pageControls_.push_back(b);
         buttons->Add(b, 0, wxRIGHT, 8);
+    }
+
+    // Settings live behind a button and a dialog rather than inline
+    // controls, keeping the page itself short.
+    if (!copy.settings.empty()) {
+        auto* settingsBtn = new wxButton(detailPanel_, wxID_ANY, "&Settings...");
+        settingsBtn->Enable(copy.settings_editable);
+        if (!copy.settings_editable)
+            settingsBtn->SetToolTip("Settings become available after install.");
+        settingsBtn->Bind(wxEVT_BUTTON,
+                          [this](wxCommandEvent&) { ShowSettingsDialog(); });
+        if (copy.settings_editable) pageControls_.push_back(settingsBtn);
+        buttons->Add(settingsBtn, 0, wxRIGHT, 8);
     }
     sizer->Add(buttons, 0, wxALL, 8);
 
@@ -879,6 +815,116 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
 }
 
 // ---------------------------------------------------------------------------
+
+// The settings screen: every declared setting as a labeled control, the
+// schema's note, and OK/Cancel. Nothing is written until OK; Cancel
+// discards. A value the bridge rejects shows its error and the rest still
+// apply.
+void LoadstoneFrame::ShowSettingsDialog() {
+    if (!pageModel_ || currentCopy_ >= pageModel_->copies.size()) return;
+    loadstone::CopyPage& copy = pageModel_->copies[currentCopy_];
+
+    wxDialog dlg(this, wxID_ANY,
+                 wxString::Format("%s Settings", FromRust(pageModel_->name)),
+                 wxDefaultPosition, wxDefaultSize,
+                 wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+
+    struct Row {
+        wxString id;
+        wxString original;
+        wxCheckBox* check = nullptr;
+        wxChoice* choice = nullptr;
+        wxTextCtrl* text = nullptr;
+        std::vector<wxString> values; // choice: option values by index
+    };
+    std::vector<Row> rows;
+
+    for (const auto& s : copy.settings) {
+        Row row;
+        row.id = FromRust(s.id);
+        row.original = FromRust(s.value);
+        wxString kind = FromRust(s.kind);
+        wxString label = FromRust(s.label);
+        wxString describe = FromRust(s.description);
+
+        if (kind == "boolean") {
+            row.check = new wxCheckBox(&dlg, wxID_ANY, label);
+            row.check->SetValue(row.original == "true");
+            if (!describe.empty()) row.check->SetToolTip(describe);
+            sizer->Add(row.check, 0, wxLEFT | wxRIGHT | wxTOP, 8);
+        } else if (kind == "choice") {
+            auto* rowSizer = new wxBoxSizer(wxHORIZONTAL);
+            rowSizer->Add(new wxStaticText(&dlg, wxID_ANY, label + ":"), 0,
+                          wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            row.choice = new wxChoice(&dlg, wxID_ANY);
+            int selected = 0;
+            for (const auto& o : s.options) {
+                row.values.push_back(FromRust(o.value));
+                row.choice->Append(FromRust(o.label));
+                if (row.values.back() == row.original)
+                    selected = row.choice->GetCount() - 1;
+            }
+            if (!row.values.empty()) row.choice->SetSelection(selected);
+            if (!describe.empty()) row.choice->SetToolTip(describe);
+            rowSizer->Add(row.choice, 0);
+            sizer->Add(rowSizer, 0, wxLEFT | wxRIGHT | wxTOP, 8);
+        } else { // string / number
+            auto* rowSizer = new wxBoxSizer(wxHORIZONTAL);
+            rowSizer->Add(new wxStaticText(&dlg, wxID_ANY, label + ":"), 0,
+                          wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            row.text = new wxTextCtrl(&dlg, wxID_ANY, row.original,
+                                      wxDefaultPosition, wxSize(220, -1));
+            if (!describe.empty()) row.text->SetToolTip(describe);
+            rowSizer->Add(row.text, 1);
+            sizer->Add(rowSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
+        }
+        if (!describe.empty()) {
+            auto* desc = new wxStaticText(&dlg, wxID_ANY, describe);
+            desc->Wrap(440);
+            sizer->Add(desc, 0, wxLEFT | wxRIGHT, 24);
+        }
+        rows.push_back(row);
+    }
+
+    wxString note = FromRust(copy.settings_note);
+    if (!note.empty()) {
+        auto* noteText = new wxStaticText(&dlg, wxID_ANY, note);
+        noteText->Wrap(440);
+        sizer->Add(noteText, 0, wxALL, 8);
+    }
+
+    sizer->Add(dlg.CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0,
+               wxEXPAND | wxALL, 8);
+    dlg.SetSizerAndFit(sizer);
+    dlg.CentreOnParent();
+    if (dlg.ShowModal() != wxID_OK) return;
+
+    int applied = 0;
+    for (const auto& row : rows) {
+        wxString value;
+        if (row.check) {
+            value = row.check->GetValue() ? "true" : "false";
+        } else if (row.choice) {
+            int idx = row.choice->GetSelection();
+            if (idx < 0 || idx >= static_cast<int>(row.values.size())) continue;
+            value = row.values[idx];
+        } else if (row.text) {
+            value = row.text->GetValue();
+        } else {
+            continue;
+        }
+        if (value == row.original) continue;
+        if (ApplySetting(row.id, value)) {
+            ++applied;
+            // Keep the in-memory page model current so reopening the
+            // dialog shows what was saved, without a refetch.
+            for (auto& s : copy.settings)
+                if (FromRust(s.id) == row.id) s.value = rust::String(ToStd(value));
+        }
+    }
+    if (applied == 0) SetStatusText("No settings changed.");
+}
 
 bool LoadstoneFrame::ApplySetting(const wxString& settingId, const wxString& rawValue) {
     try {

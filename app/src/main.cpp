@@ -26,6 +26,7 @@
 // LOADSTONE_SMOKE_GAME_DIR / _STATE / _RELEASE overrides).
 
 #include <wx/wx.h>
+#include <wx/access.h>
 #include <wx/choicdlg.h>
 #include <wx/choice.h>
 #include <wx/dirdlg.h>
@@ -69,6 +70,37 @@ wxString FromRust(rust::Str s) {
 
 std::string ToStd(const wxString& s) {
     return std::string(s.utf8_str());
+}
+
+#if wxUSE_ACCESSIBILITY
+// Exposes a description through MSAA so screen readers announce it when
+// the control gains keyboard focus. Tooltips alone only surface on mouse
+// hover, which never happens for keyboard users.
+class DescribedAccessible : public wxWindowAccessible {
+public:
+    DescribedAccessible(wxWindow* win, const wxString& description)
+        : wxWindowAccessible(win), description_(description) {}
+    wxAccStatus GetDescription(int childId, wxString* description) override {
+        if (childId == wxACC_SELF) {
+            *description = description_;
+            return wxACC_OK;
+        }
+        return wxACC_NOT_IMPLEMENTED;
+    }
+
+private:
+    wxString description_;
+};
+#endif
+
+// Attach explanatory text to a control: accessible description (read on
+// focus by screen readers) plus a tooltip for mouse users.
+void AttachDescription(wxWindow* win, const wxString& description) {
+    if (description.empty()) return;
+    win->SetToolTip(description);
+#if wxUSE_ACCESSIBILITY
+    win->SetAccessible(new DescribedAccessible(win, description));
+#endif
 }
 
 } // namespace
@@ -624,8 +656,7 @@ void LoadstoneFrame::BuildDetail() {
     for (const auto& a : copy.actions) {
         auto* b = new wxButton(detailPanel_, wxID_ANY, FromRust(a.label));
         b->Enable(copy.actions_available);
-        wxString describe = FromRust(a.description);
-        if (!describe.empty()) b->SetToolTip(describe);
+        AttachDescription(b, FromRust(a.description));
         wxString actionId = FromRust(a.id);
         b->Bind(wxEVT_BUTTON, [this, actionId](wxCommandEvent&) {
             RunOperation(OpKind::Action, actionId);
@@ -640,7 +671,7 @@ void LoadstoneFrame::BuildDetail() {
         auto* settingsBtn = new wxButton(detailPanel_, wxID_ANY, "&Settings...");
         settingsBtn->Enable(copy.settings_editable);
         if (!copy.settings_editable)
-            settingsBtn->SetToolTip("Settings become available after install.");
+            AttachDescription(settingsBtn, "Settings become available after install.");
         settingsBtn->Bind(wxEVT_BUTTON,
                           [this](wxCommandEvent&) { ShowSettingsDialog(); });
         if (copy.settings_editable) pageControls_.push_back(settingsBtn);
@@ -851,7 +882,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
         if (kind == "boolean") {
             row.check = new wxCheckBox(&dlg, wxID_ANY, label);
             row.check->SetValue(row.original == "true");
-            if (!describe.empty()) row.check->SetToolTip(describe);
+            AttachDescription(row.check, describe);
             sizer->Add(row.check, 0, wxLEFT | wxRIGHT | wxTOP, 8);
         } else if (kind == "choice") {
             auto* rowSizer = new wxBoxSizer(wxHORIZONTAL);
@@ -866,7 +897,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
                     selected = row.choice->GetCount() - 1;
             }
             if (!row.values.empty()) row.choice->SetSelection(selected);
-            if (!describe.empty()) row.choice->SetToolTip(describe);
+            AttachDescription(row.choice, describe);
             rowSizer->Add(row.choice, 0);
             sizer->Add(rowSizer, 0, wxLEFT | wxRIGHT | wxTOP, 8);
         } else { // string / number
@@ -875,14 +906,9 @@ void LoadstoneFrame::ShowSettingsDialog() {
                           wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
             row.text = new wxTextCtrl(&dlg, wxID_ANY, row.original,
                                       wxDefaultPosition, wxSize(220, -1));
-            if (!describe.empty()) row.text->SetToolTip(describe);
+            AttachDescription(row.text, describe);
             rowSizer->Add(row.text, 1);
             sizer->Add(rowSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
-        }
-        if (!describe.empty()) {
-            auto* desc = new wxStaticText(&dlg, wxID_ANY, describe);
-            desc->Wrap(440);
-            sizer->Add(desc, 0, wxLEFT | wxRIGHT, 24);
         }
         rows.push_back(row);
     }

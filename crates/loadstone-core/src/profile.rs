@@ -44,6 +44,10 @@ pub struct Profile {
     pub lock_registries: bool,
 }
 
+/// The community registry a bare binary points at when no profile says
+/// otherwise, so a stock download works out of the box.
+pub const DEFAULT_REGISTRY: &str = "github:bradjrenshaw/loadstone-registry";
+
 impl Profile {
     /// Resolve the active profile. `embedded` is the compile-time profile
     /// text (if the binary was built with one); `exe_dir` is where to look
@@ -65,7 +69,13 @@ impl Profile {
                     .with_context(|| format!("{} does not parse", sidecar.display()));
             }
         }
-        Ok(Profile::default())
+        // No profile anywhere: the stock manager pointed at the community
+        // registry. An explicit profile that lists no registries keeps its
+        // empty list — curated builds may strip registries on purpose.
+        Ok(Profile {
+            registries: vec![DEFAULT_REGISTRY.to_string()],
+            ..Profile::default()
+        })
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -98,9 +108,14 @@ mod tests {
         let p = Profile::load(Some("null"), Some(tmp.path())).unwrap();
         assert_eq!(p.title.as_deref(), Some("Sidecar"));
 
+        // Nothing anywhere: the stock manager with the community registry.
         let empty = tempfile::tempdir().unwrap();
         let p = Profile::load(None, Some(empty.path())).unwrap();
         assert_eq!(p.mode, ProfileMode::Manager);
+        assert_eq!(p.registries, vec![DEFAULT_REGISTRY.to_string()]);
+
+        // An explicit profile without registries deliberately has none.
+        let p = Profile::load(Some(r#"{ "mode": "manager" }"#), None).unwrap();
         assert!(p.registries.is_empty());
     }
 

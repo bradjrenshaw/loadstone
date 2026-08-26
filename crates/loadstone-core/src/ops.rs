@@ -257,11 +257,16 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 }
             }
         }
-        ui.log(&format!(
-            "Installing {} from the tip of {branch} ({version}). Development installs \
-             are not hash-pinned; you are trusting the repository's current contents.",
+        // Branch installs are unpinned, so this is a question, not a log
+        // line: the user should knowingly accept the trust trade-off.
+        if !ui.confirm(&format!(
+            "Install {} from the tip of the {branch} branch ({version})?\n\n\
+             Development builds are not hash-pinned; you are trusting the \
+             repository's current contents.",
             manifest.name
-        ));
+        )) {
+            return Ok("Install cancelled.".to_string());
+        }
         let url = fetch::branch_zipball_url(&source, &branch)?;
         artifact = fetch::download(&url, |p| ui.progress(p))?;
         expected_sha = None;

@@ -141,7 +141,8 @@ private:
     void StartVersionPick(OpKind kind);
     void RunOperation(OpKind kind, const wxString& actionId = wxString(),
                       const wxString& tag = wxString(),
-                      const wxString& localRelease = wxString());
+                      const wxString& localRelease = wxString(),
+                      const wxString& channelOverride = wxString());
     void OnOpDone(const std::string& result, const std::string& error);
 
     // The settings dialog writes changed values through the bridge on OK.
@@ -752,13 +753,20 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
                     RunOperation(kind);
                 return;
             }
-            if (releases.empty()) {
+            wxArrayString labels;
+            for (const auto& r : releases) labels.Add(FromRust(r.label));
+            // Branch ("development") channels the mod declares come after
+            // the releases in the same picker.
+            size_t releaseCount = releases.size();
+            if (pageModel_) {
+                for (const auto& c : pageModel_->channels)
+                    labels.Add(FromRust(c.label));
+            }
+            if (labels.IsEmpty()) {
                 wxMessageBox("This mod's repository has no releases yet.",
                              "No releases", wxOK | wxICON_INFORMATION, this);
                 return;
             }
-            wxArrayString labels;
-            for (const auto& r : releases) labels.Add(FromRust(r.label));
             // Default to the newest stable release, like "latest" would.
             int defaultIdx = 0;
             for (size_t i = 0; i < releases.size(); ++i) {
@@ -772,7 +780,14 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
             dlg.SetSelection(defaultIdx);
             if (dlg.ShowModal() != wxID_OK) return;
             int sel = dlg.GetSelection();
-            if (sel < 0 || sel >= static_cast<int>(releases.size())) return;
+            if (sel < 0) return;
+            if (static_cast<size_t>(sel) >= releaseCount) {
+                size_t channelIdx = static_cast<size_t>(sel) - releaseCount;
+                if (!pageModel_ || channelIdx >= pageModel_->channels.size()) return;
+                RunOperation(kind, wxString(), wxString(), wxString(),
+                             FromRust(pageModel_->channels[channelIdx].id));
+                return;
+            }
             RunOperation(kind, wxString(), FromRust(releases[sel].tag));
         });
     }).detach();
@@ -780,7 +795,8 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
 
 void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
                                   const wxString& tag,
-                                  const wxString& localRelease) {
+                                  const wxString& localRelease,
+                                  const wxString& channelOverride) {
     if (opInFlight_ || fetchInFlight_) return;
     if (kind == OpKind::Uninstall) {
         wxString name = pageModel_ && !std::string(pageModel_->name).empty()
@@ -801,7 +817,14 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
     std::string modId = ToStd(pageModId_);
     std::string game = ToStd(pageGame_);
     const loadstone::CopyPage& copy = pageModel_->copies[currentCopy_];
-    std::string channel = std::string(copy.channel);
+    // Channel for updates: an explicit channel pick wins; an explicit
+    // TAG pick means the release channel (a dev copy's recorded channel
+    // would make the engine ignore the tag and reinstall the branch tip);
+    // otherwise stay on the channel the copy was installed from.
+    std::string channel = !channelOverride.empty() ? ToStd(channelOverride)
+                          : !tag.empty()           ? std::string()
+                                                   : std::string(copy.channel);
+    std::string installChannel = ToStd(channelOverride);
     // The copy's recorded folder addresses state-backed operations
     // (uninstall, actions) even when several copies exist.
     std::string copyDir = std::string(copy.game_dir);
@@ -815,15 +838,17 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
     currentCopyDir_ = (kind == OpKind::Install || kind == OpKind::Update)
                           ? wxString::FromUTF8(gameDir.c_str())
                           : wxString::FromUTF8(copyDir.c_str());
-    std::thread([alive, this, cb, kind, modId, game, channel, copyDir, action,
-                 tagStr, local, gameDir] {
+    std::thread([alive, this, cb, kind, modId, game, channel, installChannel,
+                 copyDir, action, tagStr, local, gameDir] {
         std::string result, error;
         try {
             switch (kind) {
                 case OpKind::Install:
+                    // Fresh installs default to stable; only an explicit
+                    // channel pick changes that (never the copy's old one).
                     result = std::string(loadstone::run_install(
-                        kEmbeddedProfile, "", modId, "", false, tagStr, gameDir,
-                        local, *cb));
+                        kEmbeddedProfile, "", modId, installChannel, false,
+                        tagStr, gameDir, local, *cb));
                     break;
                 case OpKind::Update:
                     result = std::string(loadstone::run_install(
@@ -1082,7 +1107,10 @@ bool LoadstoneApp::OnInit() {
                     for (const auto& c : page.copies)
                         out << "page-copy: " << std::string(c.label) << " | "
                             << std::string(c.status) << "\n";
-                    for (const auto& s : sel.settings)
+                    for (const auto& c : page.channels)
+                    out << "page-channel: " << std::string(c.id) << " | "
+                        << std::string(c.label) << "\n";
+                for (const auto& s : sel.settings)
                         out << "page-setting: " << std::string(s.id) << " ("
                             << std::string(s.kind) << ") = " << std::string(s.value)
                             << (sel.settings_editable ? "" : " [read-only]") << "\n";

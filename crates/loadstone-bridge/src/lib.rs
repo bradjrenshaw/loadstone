@@ -18,8 +18,8 @@ use loadstone_core::track::{InstalledState, StateStore};
 use loadstone_core::types::SettingType;
 
 use crate::ffi::{
-    ActionItem, Catalog, CatalogEntry, ChoiceItem, CopyPage, ModPage, ReleaseEntry, SettingItem,
-    UiProfile,
+    ActionItem, Catalog, CatalogEntry, ChannelEntry, ChoiceItem, CopyPage, ModPage, ReleaseEntry,
+    SettingItem, UiProfile,
 };
 
 #[cxx::bridge(namespace = "loadstone")]
@@ -113,6 +113,16 @@ mod ffi {
         actions: Vec<ActionItem>,
     }
 
+    /// A branch ("development") channel the mod declares, for the version
+    /// picker. Release channels need no entry: releases are listed
+    /// directly.
+    struct ChannelEntry {
+        id: String,
+        /// Ready-to-show picker line, e.g.
+        /// "dev channel (latest from the main branch)".
+        label: String,
+    }
+
     struct ModPage {
         id: String,
         name: String,
@@ -127,6 +137,8 @@ mod ffi {
         selected_copy: usize,
         /// Never empty: at least one (possibly empty-dir) copy.
         copies: Vec<CopyPage>,
+        /// Branch channels for the version picker (often empty).
+        channels: Vec<ChannelEntry>,
         /// Informational lines for the bottom of the page.
         notes: Vec<String>,
     }
@@ -777,11 +789,13 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
                       game_dir: String|
      -> CopyPage {
         let installed_version = state.map(|s| s.version.clone()).unwrap_or_default();
-        let is_dev = state.map(|s| s.channel == "dev").unwrap_or(false);
         let can_install = state.is_none() && resolved.is_some();
-        let can_update = state.is_some()
-            && resolved.is_some()
-            && (is_dev || (!latest_version.is_empty() && latest_version != installed_version));
+        // Installed copies keep an enabled Update button whenever the mod
+        // resolves: the version picker also serves reinstalls, downgrades,
+        // and channel switches, exactly like the old installers' always-on
+        // install button. The status line still says whether an update
+        // actually exists.
+        let can_update = state.is_some() && resolved.is_some();
 
         // A copy Loadstone never installed may still hold the mod's files
         // (placed by hand, or by the mod's old standalone installer). Say
@@ -972,6 +986,23 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
         });
     }
 
+    // Branch channels for the version picker (release channels are the
+    // release list itself).
+    let mut channels: Vec<ChannelEntry> = Vec::new();
+    if let Some(r) = &resolved {
+        for (cid, decl) in &r.manifest.channels {
+            if decl.source == loadstone_core::types::ChannelSource::Branch {
+                let label = match &decl.branch {
+                    Some(branch) => {
+                        format!("{cid} channel (latest from the {branch} branch)")
+                    }
+                    None => format!("{cid} channel (development build)"),
+                };
+                channels.push(ChannelEntry { id: cid.clone(), label });
+            }
+        }
+    }
+
     let notes = notes.borrow().clone();
     Ok(ModPage {
         id: mod_id.to_string(),
@@ -983,6 +1014,7 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
         latest_version,
         selected_copy,
         copies,
+        channels,
         notes,
     })
 }
@@ -1204,5 +1236,55 @@ mod tests {
 
         // Copy-addressed operations need the dir once there are two.
         assert!(apply_setting(&state_dir, "fake-game", "", "fake-mod", "x", "y").is_err());
+    }
+
+    /// Branch channels declared in the manifest surface on the page for
+    /// the GUI's version picker; release channels do not (releases are
+    /// listed directly).
+    #[test]
+    fn branch_channels_listed_on_mod_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let packages = tmp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(
+            packages.join("fake-game.json"),
+            serde_json::json!({
+                "manifestVersion": 1, "kind": "game", "id": "fake-game", "name": "Fake Game",
+                "detect": { "markers": ["Fake.exe"] },
+                "userData": { loadstone_core::context::current_platform(): "${localAppData}/FakeGame" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            packages.join("fake-mod.json"),
+            serde_json::json!({
+                "manifestVersion": 1, "id": "fake-mod", "name": "Fake Mod",
+                "description": "d", "authors": ["a"], "game": "fake-game",
+                "channels": {
+                    "stable": { "source": "release" },
+                    "dev": { "source": "branch", "branch": "main" }
+                },
+                "install": [ { "step": "extract-archive",
+                               "routes": [ { "from": "**", "to": "${gameDir}" } ] } ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let profile = serde_json::json!({
+            "mode": "manager",
+            "registries": [packages.to_string_lossy()]
+        })
+        .to_string();
+        let state_dir = tmp.path().join("state").to_string_lossy().into_owned();
+
+        let page = fetch_mod_page(&profile, &state_dir, "fake-mod").unwrap();
+        assert_eq!(page.channels.len(), 1, "only branch channels are listed");
+        assert_eq!(page.channels[0].id, "dev");
+        assert!(
+            page.channels[0].label.contains("main"),
+            "label names the branch: {}",
+            page.channels[0].label
+        );
     }
 }

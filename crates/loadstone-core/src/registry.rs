@@ -40,6 +40,30 @@ pub struct ResolvedPackage {
 /// Injectable so tests can map sources to fixture directories.
 pub trait RegistryFetcher {
     fn fetch(&mut self, source: &str) -> Result<PathBuf>;
+
+    /// Fetch just the named packages (and the files they reference) when
+    /// the source supports something cheaper than a full checkout.
+    /// Defaults to a full fetch.
+    fn fetch_packages(&mut self, source: &str, wanted: &[String]) -> Result<PathBuf> {
+        let _ = wanted;
+        self.fetch(source)
+    }
+}
+
+/// Package ids double as file names in raw-fetch URLs; only plain slugs
+/// may travel there, so a link file cannot steer the request elsewhere.
+fn is_plain_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// The static per-file URL: raw.githubusercontent.com serves the default
+/// branch under HEAD with no API involved and no rate limit.
+fn raw_package_url(owner: &str, repo: &str, id: &str) -> String {
+    format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/loadstone-packages/{id}.json")
 }
 
 /// The real fetcher: local paths pass through; `github:` sources download a
@@ -101,6 +125,86 @@ impl RegistryFetcher for HttpFetcher {
                 }
             }
         }
+    }
+
+    /// Allowlisted links skip the repo zipball: each named package file
+    /// sits at a static raw URL (`loadstone-packages/<id>.json` — file
+    /// named by id, the documented convention), so a few KB of JSON no
+    /// longer costs a whole-repo download. The mod's game package and any
+    /// dependency files hosted alongside come too; ones that 404 are
+    /// expected (hosted in an outer scope instead). Any required file
+    /// missing or unparsable falls back to the zipball path, so repos
+    /// that ignore the naming convention still resolve.
+    fn fetch_packages(&mut self, source: &str, wanted: &[String]) -> Result<PathBuf> {
+        if !source.starts_with("github:")
+            || wanted.is_empty()
+            || !wanted.iter().all(|id| is_plain_id(id))
+        {
+            return self.fetch(source);
+        }
+        let (owner, repo) = fetch::parse_github_source(source)?;
+
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        // (id, required): the allowlisted ids must resolve; referenced
+        // game/dependency files are best-effort.
+        let mut queue: Vec<(String, bool)> =
+            wanted.iter().map(|id| (id.clone(), true)).collect();
+        let mut complete = true;
+        while let Some((id, required)) = queue.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let url = raw_package_url(&owner, &repo, &id);
+            let bytes = match fetch::download(&url, |_| {}) {
+                Ok(b) => b,
+                Err(_) => {
+                    if required {
+                        complete = false;
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            let Ok(doc) =
+                serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}'))
+            else {
+                if required {
+                    complete = false;
+                    break;
+                }
+                continue;
+            };
+            if let Some(game) = doc.get("game").and_then(serde_json::Value::as_str) {
+                if is_plain_id(game) {
+                    queue.push((game.to_string(), false));
+                }
+            }
+            if let Some(deps) = doc.get("dependencies").and_then(serde_json::Value::as_array) {
+                for dep in deps {
+                    if let Some(dep_id) = dep.get("id").and_then(serde_json::Value::as_str) {
+                        if is_plain_id(dep_id) {
+                            queue.push((dep_id.to_string(), false));
+                        }
+                    }
+                }
+            }
+            files.push((format!("{id}.json"), bytes));
+        }
+        if !complete || files.is_empty() {
+            return self.fetch(source);
+        }
+
+        let cache = self.cache_root.join(format!("{owner}__{repo}"));
+        if cache.exists() {
+            std::fs::remove_dir_all(&cache)?;
+        }
+        std::fs::create_dir_all(&cache)?;
+        for (name, data) in files {
+            std::fs::write(cache.join(name), data)?;
+        }
+        Ok(cache)
     }
 }
 
@@ -234,7 +338,12 @@ impl<'a> Resolver<'a> {
         }
         candidates.sort_by_key(|(rank, _)| *rank);
         for (_, link) in candidates {
-            let dir = match self.fetcher.fetch(&link.source) {
+            let fetched = if link.packages.is_empty() {
+                self.fetcher.fetch(&link.source)
+            } else {
+                self.fetcher.fetch_packages(&link.source, &link.packages)
+            };
+            let dir = match fetched {
                 Ok(d) => d,
                 Err(_) => continue,
             };
@@ -305,7 +414,12 @@ impl<'a> Resolver<'a> {
             }
         }
         for link in links {
-            let Ok(dir) = self.fetcher.fetch(&link.source) else { continue };
+            let fetched = if link.packages.is_empty() {
+                self.fetcher.fetch(&link.source)
+            } else {
+                self.fetcher.fetch_packages(&link.source, &link.packages)
+            };
+            let Ok(dir) = fetched else { continue };
             for (_, doc) in read_docs(&dir)? {
                 if doc_kind(&doc) != "mod" || doc_id(&doc).is_empty() {
                     continue;
@@ -336,9 +450,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     /// Maps sources to fixture directories, recording fetch order.
+    #[derive(Default)]
     struct FakeFetcher {
         map: BTreeMap<String, PathBuf>,
         fetched: Vec<String>,
+        package_fetches: Vec<(String, Vec<String>)>,
     }
 
     impl RegistryFetcher for FakeFetcher {
@@ -351,6 +467,11 @@ mod tests {
                 .get(source)
                 .cloned()
                 .with_context(|| format!("unknown source {source}"))
+        }
+
+        fn fetch_packages(&mut self, source: &str, wanted: &[String]) -> Result<PathBuf> {
+            self.package_fetches.push((source.to_string(), wanted.to_vec()));
+            self.fetch(source)
         }
     }
 
@@ -395,7 +516,7 @@ mod tests {
 
         let mut fetcher = FakeFetcher {
             map: BTreeMap::from([("github:me/Blindfold".to_string(), repo.clone())]),
-            fetched: Vec::new(),
+            ..Default::default()
         };
         let mut resolver =
             Resolver::from_sources(&[registry.to_string_lossy().into_owned()], &mut fetcher)
@@ -425,6 +546,28 @@ mod tests {
 
         // Allowlists gate link following.
         assert!(resolver.resolve_project("not-listed").is_err());
+
+        // Allowlisted links went through the targeted fetch so an HTTP
+        // fetcher can pull single files instead of the repo zipball.
+        drop(resolver);
+        assert_eq!(
+            fetcher.package_fetches.first(),
+            Some(&("github:me/Blindfold".to_string(), vec!["blindfold".to_string()]))
+        );
+    }
+
+    #[test]
+    fn plain_ids_only_in_raw_urls() {
+        assert!(is_plain_id("say-the-spire-2"));
+        assert!(is_plain_id("lovely_injector.v2"));
+        assert!(!is_plain_id(""));
+        assert!(!is_plain_id("a/b"));
+        assert!(!is_plain_id("..") );
+        assert!(!is_plain_id("a..b"));
+        assert_eq!(
+            raw_package_url("me", "Repo", "blindfold"),
+            "https://raw.githubusercontent.com/me/Repo/HEAD/loadstone-packages/blindfold.json"
+        );
     }
 
     #[test]
@@ -440,7 +583,7 @@ mod tests {
         };
         write(&inner, "blindfold.json", moddoc("Inner"));
         write(&outer, "blindfold.json", moddoc("Outer"));
-        let mut fetcher = FakeFetcher { map: BTreeMap::new(), fetched: Vec::new() };
+        let mut fetcher = FakeFetcher::default();
         let mut resolver = Resolver::from_sources(
             &[
                 inner.to_string_lossy().into_owned(),

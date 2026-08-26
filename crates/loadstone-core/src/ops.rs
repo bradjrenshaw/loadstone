@@ -305,6 +305,24 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 ));
             }
         }
+        // The per-mod installers' "release notes ... proceed?" question:
+        // when the release carries notes, show them and ask before
+        // downloading anything. Releases without notes install directly.
+        if let Some(notes) = release
+            .release_notes
+            .as_deref()
+            .filter(|n| !n.trim().is_empty())
+        {
+            let message = format!(
+                "Release notes for {} {}:\n\n{}\n\nInstall now?",
+                manifest.name,
+                release.version,
+                notes.trim()
+            );
+            if !ui.confirm(&message) {
+                return Ok("Install cancelled.".to_string());
+            }
+        }
         let entry = pick_artifact(&ctx, &release.artifacts)?;
         match &opts.local_release {
             Some(release_path) => {

@@ -797,7 +797,10 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
                                   const wxString& localRelease) {
     if (opInFlight_ || fetchInFlight_) return;
     if (kind == OpKind::Uninstall) {
-        if (wxMessageBox(wxString::Format("Uninstall %s?", pageModId_),
+        wxString name = pageModel_ && !std::string(pageModel_->name).empty()
+                            ? FromRust(pageModel_->name)
+                            : pageModId_;
+        if (wxMessageBox(wxString::Format("Uninstall %s?", name),
                          "Confirm uninstall", wxYES_NO | wxICON_QUESTION,
                          this) != wxYES)
             return;

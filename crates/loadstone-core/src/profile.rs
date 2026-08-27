@@ -42,11 +42,21 @@ pub struct Profile {
     /// When true the user cannot add registries in the UI (a curated build).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lock_registries: bool,
+    /// Where this executable checks for newer builds of itself
+    /// (`github:owner/repo` whose releases carry an `installer` block in
+    /// loadstone-release.json). Defaults: manager builds use the Loadstone
+    /// repo; single-mod builds use their mod's release source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_source: Option<String>,
 }
 
 /// The community registry a bare binary points at when no profile says
 /// otherwise, so a stock download works out of the box.
 pub const DEFAULT_REGISTRY: &str = "github:bradjrenshaw/loadstone-registry";
+
+/// Where manager builds look for newer builds of themselves unless the
+/// profile says otherwise.
+pub const DEFAULT_UPDATE_SOURCE: &str = "github:bradjrenshaw/loadstone";
 
 impl Profile {
     /// Resolve the active profile. `embedded` is the compile-time profile

@@ -129,6 +129,10 @@ pub struct ReleaseManifest {
     pub actions: Vec<Action>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_policy: Option<String>,
+    /// The standalone installer exe attached to this release, when one is;
+    /// running installers use it to offer self-update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer: Option<InstallerInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +141,17 @@ pub struct ReleaseArtifact {
     pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Condition>,
+}
+
+/// A release's standalone installer/manager executable: asset name, the
+/// Loadstone build it was made from (what a running binary compares its
+/// own version against), and the hash the download must match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallerInfo {
+    pub file: String,
+    pub loadstone_version: String,
+    pub sha256: String,
 }
 
 /// A release pinned in the package file itself, for upstreams that publish no

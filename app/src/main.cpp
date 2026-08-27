@@ -137,6 +137,11 @@ private:
     void BuildDetail();
     void GoBack();
 
+    // Self-update: a quiet background check at launch; one question when
+    // a newer build exists.
+    void StartSelfUpdateCheck();
+    void OfferSelfUpdate(const loadstone::SelfUpdate& update);
+
     // Operations.
     void StartVersionPick(OpKind kind);
     void RunOperation(OpKind kind, const wxString& actionId = wxString(),
@@ -297,6 +302,11 @@ LoadstoneFrame::LoadstoneFrame(loadstone::UiProfile profile, wxString coreVersio
         }
         ev.Skip();
     });
+
+    // A previous self-update leaves the old exe beside us; tidy it, then
+    // quietly ask the update source whether a newer build exists.
+    loadstone::cleanup_self_update();
+    StartSelfUpdateCheck();
 
     if (singleMod_) {
         // The standalone-installer shape: straight to the one mod's page.
@@ -869,6 +879,62 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
         }
         wxTheApp->CallAfter([alive, this, result, error] {
             if (alive->load()) OnOpDone(result, error);
+        });
+    }).detach();
+}
+
+void LoadstoneFrame::StartSelfUpdateCheck() {
+    auto alive = alive_;
+    std::thread([alive, this] {
+        loadstone::SelfUpdate update;
+        bool ok = true;
+        try {
+            update = loadstone::check_self_update(kEmbeddedProfile);
+        } catch (...) {
+            ok = false; // launch checks never surface errors
+        }
+        wxTheApp->CallAfter([alive, this, update, ok] {
+            if (!alive->load() || !ok || !update.available) return;
+            OfferSelfUpdate(update);
+        });
+    }).detach();
+}
+
+void LoadstoneFrame::OfferSelfUpdate(const loadstone::SelfUpdate& update) {
+    // Never interrupt running work; the next launch will offer again.
+    if (opInFlight_ || fetchInFlight_) return;
+    wxString msg = wxString::Format(
+        "Version %s of %s is available (you have %s). Update and restart now?",
+        FromRust(update.version), FromRust(profile_.title), coreVersion_);
+    if (wxMessageBox(msg, "Update available", wxYES_NO | wxICON_QUESTION, this) != wxYES)
+        return;
+
+    opInFlight_ = true;
+    SetStatusText("Downloading the update...");
+    auto alive = alive_;
+    auto cb = std::make_shared<GuiUiCallbacks>(alive_, this);
+    loadstone::SelfUpdate chosen = update;
+    std::thread([alive, this, cb, chosen] {
+        std::string path, error;
+        try {
+            path = std::string(loadstone::apply_self_update(chosen, *cb));
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        wxTheApp->CallAfter([alive, this, path, error] {
+            if (!alive->load()) return;
+            opInFlight_ = false;
+            if (!error.empty()) {
+                SetStatusText("The update failed.");
+                wxMessageBox(wxString::FromUTF8(error.c_str()), "Update failed",
+                             wxOK | wxICON_ERROR, this);
+                return;
+            }
+            SetStatusText("Update installed.");
+            wxMessageBox("The update is installed. The app will now restart.",
+                         "Update installed", wxOK | wxICON_INFORMATION, this);
+            wxExecute("\"" + wxString::FromUTF8(path.c_str()) + "\"", wxEXEC_ASYNC);
+            Close(true);
         });
     }).detach();
 }

@@ -123,6 +123,18 @@ mod ffi {
         label: String,
     }
 
+    /// A newer build of this executable offered by its update source.
+    struct SelfUpdate {
+        available: bool,
+        /// Offered Loadstone version ("0.2.0"); empty when unavailable.
+        version: String,
+        /// Release asset name of the exe.
+        file: String,
+        sha256: String,
+        /// `github:owner/repo` the offer came from.
+        source: String,
+    }
+
     struct ModPage {
         id: String,
         name: String,
@@ -202,6 +214,25 @@ mod ffi {
             local_release: &str,
             ui: Pin<&mut UiCallbacks>,
         ) -> Result<String>;
+
+        /// Check the profile's update source for a newer build of this
+        /// executable. Blocking (network) — worker thread. Offline, no
+        /// releases, or no installer metadata all answer available =
+        /// false; launch must never nag or error.
+        fn check_self_update(embedded: &str) -> Result<SelfUpdate>;
+
+        /// Download the offered build, verify its hash, and swap it in
+        /// for the running exe (the running file is renamed aside).
+        /// Returns the executable path to relaunch. Blocking — worker
+        /// thread.
+        fn apply_self_update(
+            update: &SelfUpdate,
+            ui: Pin<&mut UiCallbacks>,
+        ) -> Result<String>;
+
+        /// Delete the ".old" file a previous self-update left beside the
+        /// exe. Call once at startup.
+        fn cleanup_self_update();
 
         /// List the mod's source repo's releases, newest first, for the
         /// version picker. Blocking (GitHub API) — worker thread only, and
@@ -353,6 +384,78 @@ pub fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntr
             ReleaseEntry { tag: r.tag, label, prerelease: r.prerelease }
         })
         .collect())
+}
+
+/// Where this build checks for newer versions of itself: the profile's
+/// explicit source, else the Loadstone repo (manager builds) or the
+/// pinned mod's release source (single-mod builds).
+fn update_source_for(profile: &Profile) -> Option<String> {
+    if let Some(source) = &profile.update_source {
+        return Some(source.clone());
+    }
+    match profile.mode {
+        ProfileMode::Manager => {
+            Some(loadstone_core::profile::DEFAULT_UPDATE_SOURCE.to_string())
+        }
+        ProfileMode::SingleMod => {
+            let id = profile.mod_id.clone()?;
+            if profile.registries.is_empty() {
+                return None;
+            }
+            let notes = Rc::new(RefCell::new(Vec::new()));
+            let (mut fetcher, sources) = build_resolver(&profile.registries, notes).ok()?;
+            let mut resolver = Resolver::from_sources(&sources, &mut fetcher).ok()?;
+            resolver.resolve_project(&id).ok()?.release_source
+        }
+    }
+}
+
+pub fn check_self_update(embedded: &str) -> Result<ffi::SelfUpdate> {
+    let none = ffi::SelfUpdate {
+        available: false,
+        version: String::new(),
+        file: String::new(),
+        sha256: String::new(),
+        source: String::new(),
+    };
+    let profile = load_profile(embedded)?;
+    let Some(source) = update_source_for(&profile) else {
+        return Ok(none);
+    };
+    match loadstone_core::selfupdate::check(&source, env!("CARGO_PKG_VERSION")) {
+        Some(info) => Ok(ffi::SelfUpdate {
+            available: true,
+            version: info.version,
+            file: info.file,
+            sha256: info.sha256,
+            source: info.source,
+        }),
+        None => Ok(none),
+    }
+}
+
+pub fn apply_self_update(
+    update: &ffi::SelfUpdate,
+    ui: std::pin::Pin<&mut ffi::UiCallbacks>,
+) -> Result<String> {
+    use loadstone_core::engine::EngineUi as _;
+    let info = loadstone_core::selfupdate::UpdateInfo {
+        version: update.version.clone(),
+        file: update.file.clone(),
+        sha256: update.sha256.clone(),
+        source: update.source.clone(),
+    };
+    let mut gui = GuiUi(ui);
+    gui.log(&format!("Downloading {}...", info.file));
+    let exe = loadstone_core::selfupdate::apply(&info, |p| gui.progress(p))?;
+    gui.log("Update verified and installed.");
+    Ok(exe.display().to_string())
+}
+
+pub fn cleanup_self_update() {
+    if let Ok(exe) = std::env::current_exe() {
+        loadstone_core::selfupdate::cleanup_leftover(&exe);
+    }
 }
 
 pub fn run_uninstall(

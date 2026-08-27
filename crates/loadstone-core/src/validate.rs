@@ -107,7 +107,7 @@ const GAME_KEYS: &[&str] =
 const RELEASE_KEYS: &[&str] = &[
     "manifestVersion", "id", "version", "game", "releaseNotes",
     "artifacts", "dependencies", "distributions", "install", "uninstall", "cleanupLegacy",
-    "userData", "settings", "actions", "conflictPolicy",
+    "userData", "settings", "actions", "conflictPolicy", "installer",
 ];
 
 const LINK_KEYS: &[&str] = &["kind", "source", "packages"];

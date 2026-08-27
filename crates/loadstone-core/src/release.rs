@@ -18,6 +18,10 @@ pub struct ReleaseOptions {
     pub version: String,
     pub artifacts: Vec<ArtifactInput>,
     pub release_notes: Option<String>,
+    /// The branded installer exe shipped with this release, if any. Its
+    /// hash and this tool's own Loadstone version are stamped into the
+    /// manifest so running installers can offer self-update.
+    pub installer: Option<PathBuf>,
 }
 
 /// Assemble the release manifest: hash the artifacts and freeze the project
@@ -32,6 +36,24 @@ pub fn build_release_manifest(
     if options.artifacts.is_empty() {
         bail!("no artifacts: pass --artifact or add a \"packaging\" block to the manifest");
     }
+
+    let installer = match &options.installer {
+        Some(path) => {
+            let file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .with_context(|| format!("bad installer path: {}", path.display()))?
+                .to_string();
+            let sha256 = sha256_file(path)
+                .with_context(|| format!("failed to hash {}", path.display()))?;
+            Some(InstallerInfo {
+                file,
+                loadstone_version: env!("CARGO_PKG_VERSION").to_string(),
+                sha256,
+            })
+        }
+        None => None,
+    };
 
     let mut artifacts = Vec::new();
     for input in &options.artifacts {
@@ -62,6 +84,7 @@ pub fn build_release_manifest(
         settings: project.settings.clone(),
         actions: project.actions.clone(),
         conflict_policy: project.conflict_policy.clone(),
+        installer,
     })
 }
 
@@ -125,6 +148,41 @@ mod tests {
         assert_eq!(normalize_version("v0.4.2").unwrap(), "0.4.2");
         assert_eq!(normalize_version("1.0.0").unwrap(), "1.0.0");
         assert!(normalize_version("not-a-version").is_err());
+    }
+
+    #[test]
+    fn installer_block_stamped_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("Mod.zip");
+        std::fs::write(&artifact, b"zip").unwrap();
+        let exe = dir.path().join("ModInstaller.exe");
+        std::fs::write(&exe, b"exe").unwrap();
+        let project: ProjectManifest = serde_json::from_value(serde_json::json!({
+            "manifestVersion": 1, "id": "m", "name": "M", "description": "d",
+            "authors": ["a"], "game": "g",
+            "install": [ { "step": "extract-archive",
+                           "routes": [ { "from": "**", "to": "${gameDir}" } ] } ]
+        }))
+        .unwrap();
+        let release = build_release_manifest(
+            &project,
+            &ReleaseOptions {
+                version: "v1.2.3".into(),
+                artifacts: vec![ArtifactInput { path: artifact, when: None }],
+                release_notes: None,
+                installer: Some(exe.clone()),
+            },
+        )
+        .unwrap();
+        let info = release.installer.clone().unwrap();
+        assert_eq!(info.file, "ModInstaller.exe");
+        assert_eq!(info.loadstone_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.sha256, sha256_file(&exe).unwrap());
+
+        let json = serde_json::to_string(&release).unwrap();
+        assert!(json.contains("\"loadstoneVersion\""), "camelCase key expected");
+        let back: ReleaseManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.installer.unwrap().file, "ModInstaller.exe");
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod ops;
 pub mod profile;
 pub mod registry;
 pub mod release;
+pub mod selfupdate;
 pub mod settings;
 pub mod tokens;
 pub mod track;

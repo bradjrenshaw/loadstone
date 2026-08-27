@@ -4,6 +4,17 @@ A unified, accessible mod manager for game accessibility mods: one signed
 manager application instead of one signed installer per mod, driven by
 declarative package manifests hosted on each mod's own GitHub releases.
 
+## Download
+
+Grab `Loadstone.exe` from the
+[latest release](https://github.com/bradjrenshaw/loadstone/releases/latest)
+and run it from anywhere — there is nothing to install. Windows SmartScreen
+may warn about an unrecognized app the first time; choose "More info", then
+"Run anyway" (code signing is planned). The app checks for newer builds of
+itself at launch and offers to update in place. It currently needs the
+Microsoft Visual C++ Redistributable (x64), which most machines with games
+installed already have.
+
 - **`SPEC.md`** — the package format specification (start here). Packages live
   in a `loadstone-packages/` directory; the format is open and any conforming
   client can consume it.

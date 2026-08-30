@@ -38,7 +38,23 @@ add_executable(loadstone-manager WIN32
 )
 add_dependencies(loadstone-manager bridge)
 
+# Compile-time distribution profile for branded installer builds. Point
+# LOADSTONE_EMBED_PROFILE at a profile JSON file to bake it into the exe;
+# unset, the generated header carries "null" and the profile resolves at
+# runtime (loadstone.json sidecar, else the default manager profile).
+# NOTE: file(READ) runs at configure time — re-run CMake configure after
+# editing the profile file.
+set(LOADSTONE_EMBED_PROFILE "" CACHE FILEPATH "Distribution profile JSON to embed into the executable")
+if(LOADSTONE_EMBED_PROFILE)
+    file(READ "${LOADSTONE_EMBED_PROFILE}" LOADSTONE_PROFILE_JSON)
+    message(STATUS "Embedding distribution profile: ${LOADSTONE_EMBED_PROFILE}")
+else()
+    set(LOADSTONE_PROFILE_JSON "null")
+endif()
+configure_file(src/embedded_profile.h.in "${CMAKE_BINARY_DIR}/generated/embedded_profile.h" @ONLY)
+
 target_include_directories(loadstone-manager PRIVATE
+    "${CMAKE_BINARY_DIR}/generated"
     "${CARGO_TARGET_DIR}/cxxbridge"
     # For loadstone-bridge/include/ui_callbacks.h (the callback interface
     # the app implements).

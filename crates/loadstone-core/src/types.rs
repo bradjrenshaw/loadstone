@@ -276,6 +276,11 @@ pub enum Step {
         #[serde(flatten)]
         common: StepCommon,
     },
+    Notice {
+        message: String,
+        #[serde(flatten)]
+        common: StepCommon,
+    },
 }
 
 impl Step {
@@ -288,6 +293,7 @@ impl Step {
             Step::DeleteFiles { .. } => "delete-files",
             Step::PickDirectory { .. } => "pick-directory",
             Step::Expect { .. } => "expect",
+            Step::Notice { .. } => "notice",
         }
     }
 
@@ -299,7 +305,8 @@ impl Step {
             | Step::EditJson { common, .. }
             | Step::DeleteFiles { common, .. }
             | Step::PickDirectory { common, .. }
-            | Step::Expect { common, .. } => common,
+            | Step::Expect { common, .. }
+            | Step::Notice { common, .. } => common,
         }
     }
 }

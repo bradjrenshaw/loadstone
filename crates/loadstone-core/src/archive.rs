@@ -1,5 +1,6 @@
-//! Routed archive extraction (SPEC §9.1). Zip today; tar.gz is a planned
-//! addition (upstream tools ship it for macOS/Linux).
+//! Routed archive extraction (SPEC §9.1): zip and tar.gz (upstream tools
+//! ship the latter for macOS/Linux). The format is sniffed from the bytes,
+//! not the file name, so a mislabelled asset still extracts.
 
 use std::io::{Cursor, Read};
 use std::path::{Component, PathBuf};
@@ -8,6 +9,97 @@ use anyhow::{bail, Context as _, Result};
 
 use crate::context::InstallContext;
 use crate::types::Route;
+
+/// One file pulled out of an archive, format-agnostic.
+struct Entry {
+    /// Entry name with `\` normalized to `/`; directories are never listed.
+    name: String,
+    contents: Vec<u8>,
+    /// Unix permission bits when the archive recorded them.
+    mode: Option<u32>,
+}
+
+#[derive(Debug, PartialEq)]
+enum Format {
+    Zip,
+    TarGz,
+}
+
+fn sniff_format(data: &[u8]) -> Result<Format> {
+    if data.starts_with(b"PK\x03\x04") || data.starts_with(b"PK\x05\x06") {
+        Ok(Format::Zip)
+    } else if data.starts_with(&[0x1f, 0x8b]) {
+        Ok(Format::TarGz)
+    } else {
+        bail!("unrecognized archive format (expected a .zip or .tar.gz)")
+    }
+}
+
+/// Read every regular file out of the archive. Entry names are sanitized;
+/// a traversal or absolute path anywhere in the archive is a hard error.
+fn read_entries(data: &[u8]) -> Result<Vec<Entry>> {
+    match sniff_format(data)? {
+        Format::Zip => {
+            let mut archive =
+                zip::ZipArchive::new(Cursor::new(data)).context("failed to open archive as zip")?;
+            let mut entries = Vec::with_capacity(archive.len());
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i)?;
+                let name = sanitize(entry.name())?;
+                if name.ends_with('/') || entry.is_dir() {
+                    continue;
+                }
+                let mut contents = Vec::new();
+                entry
+                    .read_to_end(&mut contents)
+                    .with_context(|| format!("failed to read {name} from archive"))?;
+                entries.push(Entry { name, contents, mode: entry.unix_mode() });
+            }
+            Ok(entries)
+        }
+        Format::TarGz => {
+            let gz = flate2::read::GzDecoder::new(Cursor::new(data));
+            let mut archive = tar::Archive::new(gz);
+            let mut entries = Vec::new();
+            for entry in archive.entries().context("failed to open archive as tar.gz")? {
+                let mut entry = entry.context("failed to read tar entry")?;
+                let raw = entry.path().context("tar entry has an unreadable path")?;
+                let name = sanitize(&raw.to_string_lossy())?;
+                let kind = entry.header().entry_type();
+                if !(kind.is_file() || kind == tar::EntryType::Continuous) {
+                    continue; // directories, symlinks, and metadata entries
+                }
+                let mut contents = Vec::new();
+                entry
+                    .read_to_end(&mut contents)
+                    .with_context(|| format!("failed to read {name} from archive"))?;
+                let mode = entry.header().mode().ok();
+                entries.push(Entry { name, contents, mode });
+            }
+            Ok(entries)
+        }
+    }
+}
+
+/// Zip entries written on Windows carry no unix mode, and tar entries carry
+/// whatever upstream set. Either way a launch wrapper or helper script has
+/// to end up executable, or Steam (and the user) cannot run it.
+#[cfg(unix)]
+fn apply_mode(dest: &std::path::Path, mode: Option<u32>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let recorded_exec = mode.is_some_and(|m| m & 0o111 != 0);
+    let is_script = dest.extension().is_some_and(|e| e == "sh");
+    if recorded_exec || is_script {
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to mark {} executable", dest.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn apply_mode(_dest: &std::path::Path, _mode: Option<u32>) -> Result<()> {
+    Ok(())
+}
 
 /// Where one archive entry goes, per the routing rules.
 enum Target {
@@ -104,41 +196,28 @@ pub fn extract_routed(
         }
     }
 
-    let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor).context("failed to open archive as zip")?;
+    let entries = read_entries(data)?;
 
-    let effective_name = |raw: &str| -> Result<Option<String>> {
-        let name = sanitize(raw)?;
+    let effective_name = |name: &str| -> Option<String> {
         if !strip_top_level {
-            return Ok(Some(name));
+            return Some(name.to_string());
         }
         // "<repo-ref>/rest..." -> "rest..."; entries at the root are dropped.
-        Ok(name.split_once('/').map(|(_, rest)| rest.to_string()).filter(|r| !r.is_empty()))
+        name.split_once('/').map(|(_, rest)| rest.to_string()).filter(|r| !r.is_empty())
     };
 
     // Preflight: the archive must contain at least one routed entry.
-    let mut any_match = false;
-    for i in 0..archive.len() {
-        let entry = archive.by_index(i)?;
-        let Some(name) = effective_name(entry.name())? else { continue };
-        if !name.ends_with('/') {
-            if let Target::File(_) = route_entry(ctx, &resolved, &name) {
-                any_match = true;
-                break;
-            }
-        }
-    }
+    let any_match = entries.iter().any(|e| {
+        effective_name(&e.name)
+            .is_some_and(|name| matches!(route_entry(ctx, &resolved, &name), Target::File(_)))
+    });
     if !any_match {
         bail!("this archive doesn't contain the expected payload (no entry matches any route)");
     }
 
     let mut outcome = ExtractOutcome { written: Vec::new(), kept_existing: Vec::new() };
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let Some(name) = effective_name(entry.name())? else { continue };
-        if name.ends_with('/') {
-            continue;
-        }
+    for entry in &entries {
+        let Some(name) = effective_name(&entry.name) else { continue };
         let dest = match route_entry(ctx, &resolved, &name) {
             Target::File(d) => d,
             Target::Skip => continue,
@@ -152,12 +231,9 @@ pub fn extract_routed(
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let mut contents = Vec::new();
-        entry
-            .read_to_end(&mut contents)
-            .with_context(|| format!("failed to read {name} from archive"))?;
-        std::fs::write(&dest, &contents)
+        std::fs::write(&dest, &entry.contents)
             .with_context(|| format!("failed to write {}", dest.display()))?;
+        apply_mode(&dest, entry.mode)?;
         outcome.written.push(dest);
     }
     Ok(outcome)
@@ -247,6 +323,78 @@ mod tests {
         assert!(out.written.is_empty());
         assert_eq!(out.kept_existing.len(), 1);
         assert_eq!(std::fs::read(tmp.path().join("game").join("version.dll")).unwrap(), b"newer");
+    }
+
+    fn make_tar_gz(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let gz = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
+            let mut builder = tar::Builder::new(gz);
+            for (name, data, mode) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(*mode);
+                header.set_cksum();
+                builder.append_data(&mut header, name, *data).unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn extracts_tar_gz_like_upstream_lovely() {
+        // Upstream Lovely's macOS asset: liblovely.dylib and a launch script
+        // at the tar root, the dylib routed into the game folder.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx(tmp.path());
+        let tgz = make_tar_gz(&[
+            ("liblovely.dylib", b"lovely", 0o644),
+            ("run_lovely_macos.sh", b"#!/bin/bash", 0o755),
+        ]);
+        let out = extract_routed(
+            &ctx,
+            &tgz,
+            &routes(serde_json::json!([
+                { "from": "liblovely.dylib", "to": "${gameDir}/liblovely.dylib" }
+            ])),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.written.len(), 1);
+        assert_eq!(std::fs::read(tmp.path().join("game").join("liblovely.dylib")).unwrap(), b"lovely");
+        assert!(!tmp.path().join("game").join("run_lovely_macos.sh").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scripts_and_recorded_exec_bits_come_out_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx(tmp.path());
+        // Zip from a Windows build: no unix mode at all, so the .sh name is
+        // the only signal. The tar entry carries an explicit exec bit.
+        let zip = make_zip(&[("Mod/steam_lovely_macos.sh", b"#!/bin/bash"), ("Mod/core.lua", b"--")]);
+        let tgz = make_tar_gz(&[("tool", b"\x7fELF", 0o755), ("notes.txt", b"hi", 0o644)]);
+        let r = routes(serde_json::json!([{ "from": "**", "to": "${game.mods}/X" }]));
+        extract_routed(&ctx, &zip, &r, false, false).unwrap();
+        extract_routed(&ctx, &tgz, &r, false, false).unwrap();
+        let x = tmp.path().join("ud").join("Mods").join("X");
+        let mode = |p: &str| std::fs::metadata(x.join(p)).unwrap().permissions().mode() & 0o111;
+        assert_ne!(mode("Mod/steam_lovely_macos.sh"), 0);
+        assert_eq!(mode("Mod/core.lua"), 0);
+        assert_ne!(mode("tool"), 0);
+        assert_eq!(mode("notes.txt"), 0);
+    }
+
+    #[test]
+    fn unknown_format_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx(tmp.path());
+        let r = routes(serde_json::json!([{ "from": "**", "to": "${game.mods}/X" }]));
+        let err = extract_routed(&ctx, b"<html>not an archive</html>", &r, false, false).unwrap_err();
+        assert!(err.to_string().contains("unrecognized archive format"), "{err}");
     }
 
     #[test]

@@ -439,6 +439,12 @@ fn run_steps_inner(
                     }
                 }
             }
+            Step::Notice { message, .. } => {
+                // Informational only: a follow-up the user has to do by hand
+                // (set Steam launch options, restart the game). It lands in
+                // the activity log, which every frontend reads out.
+                ui.log(&ctx.substitute(message)?);
+            }
         }
     }
     Ok(())

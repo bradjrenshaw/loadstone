@@ -295,6 +295,7 @@ pub fn resolve_steps(ctx: &InstallContext, steps: &[crate::types::Step]) -> Resu
                 *from = ctx.substitute(from)?;
                 *to = ctx.substitute(to)?;
             }
+            Step::Notice { message, .. } => *message = ctx.substitute(message)?,
             Step::ExtractArchive { .. } | Step::PickDirectory { .. } | Step::Expect { .. } => {}
         }
         out.push(s);

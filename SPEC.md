@@ -459,6 +459,21 @@ Post-conditions; failing any aborts (and rolls back) with the given message.
   ] }
 ```
 
+### 9.8 `notice`
+
+Writes a message to the activity log and continues. For the follow-up a
+package cannot do for the user — typically a per-platform launch instruction
+— so it is read out at the end of the install rather than buried in a README.
+Path tokens are substituted; `when` is the usual way to scope it.
+
+```json
+{ "step": "notice",
+  "when": { "platform": "macos" },
+  "message": "Steam does not load Lovely on macOS by itself. In Steam, open Balatro's Properties and set Launch Options to: \"${gameDir}/steam_lovely_macos.sh\" %command%" }
+```
+
+The step never fails and writes nothing to disk.
+
 ---
 
 ## 10. Uninstall, updates, and migration

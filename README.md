@@ -221,6 +221,5 @@ parallelism; building wx with `-- -j 4` and retrying gets past it.
 
 - `loadstone link` for development checkouts (the engine already refuses to
   write through them), and `repair`.
-- tar.gz artifact extraction (macOS/Linux tool artifacts).
 - `loadstone release` — creating/uploading the GitHub release itself (use
   `gh release create` for now).

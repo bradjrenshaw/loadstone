@@ -458,6 +458,13 @@ fn validate_steps(
         }
 
         match step {
+            Step::Notice { message, .. } => {
+                if message.trim().is_empty() {
+                    diags.push(Diagnostic::error(format!("{loc}/message"), "must not be empty"));
+                } else if let Err(e) = tokens::extract(message) {
+                    diags.push(Diagnostic::error(format!("{loc}/message"), e.to_string()));
+                }
+            }
             Step::ExtractArchive { routes, .. } => {
                 if routes.is_empty() {
                     diags.push(Diagnostic::error(format!("{loc}/routes"), "must not be empty"));

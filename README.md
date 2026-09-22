@@ -182,7 +182,20 @@ cmake --build build
 ```
 
 `build/loadstone-manager.exe` is a single statically linked binary (the VC
-runtime is currently dynamic; release builds will pin it). It resolves its
+runtime is currently dynamic; release builds will pin it).
+
+On macOS, install wxWidgets and CMake from Homebrew (`brew install cmake
+wxwidgets`), then configure without a prefix path; the stock FindwxWidgets
+module finds the Homebrew build through `wx-config`:
+
+```
+cmake -S app -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+That produces `build/Loadstone.app`, dynamically linked against Homebrew's
+wxWidgets for now (a static wx build for distribution is still to do, as is
+code signing). It resolves its
 distribution profile exactly like the CLI — embedded, then a `loadstone.json`
 sidecar, then the manager default. Manager mode shows the catalog (everything
 visible through the profile's registries, merged with installed state) and a

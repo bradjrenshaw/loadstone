@@ -523,11 +523,25 @@ program's folder), and `env` values take tokens.
 
 ### 9.10 `open-url`
 
-Hands a `steam://` URL to the OS (other schemes are rejected), e.g. to
-start the game through Steam with its overlay and playtime tracking:
+Hands a store launcher URL to the OS, so the game starts through the store
+that owns it (Steam's overlay and playtime tracking, Epic's and GOG's
+own launch paths). Accepted schemes are the launchers behind the known
+distributions; anything else (`https://`, `file://`, ...) is rejected:
+
+| Distribution | Scheme | Example |
+|---|---|---|
+| steam | `steam://` | `steam://rungameid/${steam.appId}` |
+| epic | `com.epicgames.launcher://` | `com.epicgames.launcher://apps/<appName>?action=launch&silent=true` |
+| gog | `goggalaxy://` | `goggalaxy://openGameView/<productId>` |
+| itch | `itch://` | `itch://games/<id>` |
+| gamepass | `ms-xbl-` | Xbox app deep link |
+
+Pair steps with `when: {"distribution": ...}` so each copy of the game
+launches through its own store:
 
 ```json
-{ "step": "open-url", "url": "steam://rungameid/${steam.appId}" }
+{ "step": "open-url", "when": { "distribution": "steam" },
+  "url": "steam://rungameid/${steam.appId}" }
 ```
 
 ### 9.11 `merge-universal-binary`

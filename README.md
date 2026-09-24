@@ -132,7 +132,9 @@ loadstone uninstall blindfold --game balatro
 - Declared actions run with `action` — pick-directory steps prompt, or take
   `--dir id=path` for automation.
 - `launch` starts the game with the mod loaded, from the `launch` steps the
-  manifest declares (frozen into state at install time, so it works offline).
+  manifest declares (frozen into state at install time, so it works offline):
+  `open-url` through the owning store's launcher (Steam, Epic, GOG Galaxy,
+  itch, Xbox), or `run` for a direct start with an injector inserted.
   The manager shows the same thing as a Launch button on the mod's page:
   install or update, then play, from one window.
 - Release artifacts can carry an `id`; every matching named artifact is

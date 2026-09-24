@@ -586,8 +586,11 @@ fn run_steps_inner(
             }
             Step::OpenUrl { url, .. } => {
                 let url = ctx.substitute(url)?;
-                if !url.starts_with("steam://") {
-                    bail!("open-url only accepts steam:// URLs (got {url})");
+                if !is_launcher_url(&url) {
+                    bail!(
+                        "open-url only accepts store launcher URLs ({}); got {url}",
+                        LAUNCH_URL_SCHEMES.join(", ")
+                    );
                 }
                 open_url(&url)?;
                 ui.log(&format!("Opened {url}."));
@@ -595,6 +598,21 @@ fn run_steps_inner(
         }
     }
     Ok(())
+}
+
+/// URL schemes an `open-url` step may hand to the OS: the store launchers
+/// Loadstone knows as distributions (SPEC 3), so a manifest can start the
+/// game through whichever store owns it and nothing else.
+pub const LAUNCH_URL_SCHEMES: &[&str] = &[
+    "steam://",                   // Steam: steam://rungameid/<appId>
+    "com.epicgames.launcher://",  // Epic: com.epicgames.launcher://apps/<name>?action=launch&silent=true
+    "goggalaxy://",               // GOG Galaxy: goggalaxy://openGameView/<productId>
+    "itch://",                    // itch app: itch://library or itch://games/<id>
+    "ms-xbl-",                    // Xbox app deep links (Game Pass)
+];
+
+pub fn is_launcher_url(url: &str) -> bool {
+    LAUNCH_URL_SCHEMES.iter().any(|scheme| url.starts_with(scheme))
 }
 
 /// Hand a URL to the OS's default handler without a console window.

@@ -124,7 +124,7 @@ fn run_step_refuses_programs_outside_the_game() {
 }
 
 #[test]
-fn open_url_only_accepts_steam_links() {
+fn open_url_only_accepts_store_launcher_links() {
     let tmp = tempfile::tempdir().unwrap();
     let mut ctx = ctx(tmp.path());
     let mut ui = QuietUi(Vec::new());
@@ -137,7 +137,18 @@ fn open_url_only_accepts_steam_links() {
         &mut ui,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("steam://"), "{err}");
+    assert!(err.to_string().contains("store launcher"), "{err}");
+    // Every store Loadstone knows as a distribution has a launcher scheme.
+    for url in [
+        "steam://rungameid/1",
+        "com.epicgames.launcher://apps/x?action=launch&silent=true",
+        "goggalaxy://openGameView/1",
+        "itch://games/1",
+        "ms-xbl-1234abcd://",
+    ] {
+        assert!(engine::is_launcher_url(url), "{url}");
+    }
+    assert!(!engine::is_launcher_url("file:///etc/passwd"));
 }
 
 #[cfg(unix)]

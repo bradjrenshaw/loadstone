@@ -505,10 +505,13 @@ fn validate_steps(
                 }
             }
             Step::OpenUrl { url, .. } => {
-                if !url.starts_with("steam://") {
+                if !crate::engine::is_launcher_url(url) {
                     diags.push(Diagnostic::error(
                         format!("{loc}/url"),
-                        "open-url only accepts steam:// URLs",
+                        format!(
+                            "open-url only accepts store launcher URLs ({})",
+                            crate::engine::LAUNCH_URL_SCHEMES.join(", ")
+                        ),
                     ));
                 }
                 check_path(url, &format!("{loc}/url"), &scope, diags);

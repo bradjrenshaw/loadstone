@@ -11,7 +11,7 @@ use anyhow::{bail, Context as _, Result};
 
 use crate::context::InstallContext;
 use crate::detect;
-use crate::engine::{self, EngineUi, InstallPlan};
+use crate::engine::{self, EngineUi, InstallPlan, NamedArtifact};
 use crate::fetch;
 use crate::profile::Profile;
 use crate::registry::{HttpFetcher, ResolvedPackage, Resolver};
@@ -219,7 +219,9 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     // Resolve the release: branch zipball (dev channels), a local
     // loadstone-release.json + artifact pair, or the source repo's latest release.
     let (version, install_steps, uninstall_steps, user_data_decl, artifact, expected_sha);
-    let (settings, actions, strip_top_level);
+    let (settings, actions, launch, strip_top_level);
+    let mut extra_artifacts: Vec<NamedArtifact> = Vec::new();
+    let mut artifact_id: Option<String> = None;
     let is_branch_channel = manifest
         .channels
         .get(&opts.channel)
@@ -275,6 +277,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         user_data_decl = manifest.user_data.clone();
         settings = manifest.settings.clone();
         actions = manifest.actions.clone();
+        launch = manifest.launch.clone();
         strip_top_level = true;
     } else {
         let release: ReleaseManifest = match &opts.local_release {
@@ -328,27 +331,40 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 return Ok("Install cancelled.".to_string());
             }
         }
-        let entry = pick_artifact(&ctx, &release.artifacts)?;
-        match &opts.local_release {
-            Some(release_path) => {
-                let artifact_path = match &opts.local_artifact {
-                    Some(p) => p.clone(),
-                    None => release_path.parent().unwrap_or(Path::new(".")).join(&entry.file),
-                };
-                ui.log(&format!("Using local artifact {}", artifact_path.display()));
-                artifact = std::fs::read(&artifact_path)
-                    .with_context(|| format!("failed to read {}", artifact_path.display()))?;
+        let (entry, extras) = pick_artifacts(&ctx, &release.artifacts)?;
+        // Assets come from the same release the manifest did; a local
+        // release resolves them next to its manifest (the primary may be
+        // pointed at explicitly with --local-artifact).
+        let mut fetch_asset = |file: &str, explicit: Option<&Path>| -> Result<Vec<u8>> {
+            match &opts.local_release {
+                Some(release_path) => {
+                    let artifact_path = match explicit {
+                        Some(p) => p.to_path_buf(),
+                        None => release_path.parent().unwrap_or(Path::new(".")).join(file),
+                    };
+                    ui.log(&format!("Using local artifact {}", artifact_path.display()));
+                    std::fs::read(&artifact_path)
+                        .with_context(|| format!("failed to read {}", artifact_path.display()))
+                }
+                None => {
+                    let source = release_source.clone().unwrap();
+                    let url = match &opts.tag {
+                        Some(tag) => fetch::tagged_asset_url(&source, tag, file)?,
+                        None => fetch::latest_asset_url(&source, file)?,
+                    };
+                    ui.log(&format!("Downloading {file}..."));
+                    fetch::download(&url, |p| ui.progress(p))
+                }
             }
-            None => {
-                let source = release_source.clone().unwrap();
-                // Assets come from the same release the manifest did.
-                let url = match &opts.tag {
-                    Some(tag) => fetch::tagged_asset_url(&source, tag, &entry.file)?,
-                    None => fetch::latest_asset_url(&source, &entry.file)?,
-                };
-                ui.log(&format!("Downloading {}...", entry.file));
-                artifact = fetch::download(&url, |p| ui.progress(p))?;
-            }
+        };
+        artifact = fetch_asset(&entry.file, opts.local_artifact.as_deref())?;
+        artifact_id = entry.id.clone();
+        for extra in extras {
+            extra_artifacts.push(NamedArtifact {
+                id: extra.id.clone().unwrap_or_default(),
+                data: fetch_asset(&extra.file, None)?,
+                expected_sha256: extra.sha256.clone(),
+            });
         }
         expected_sha = Some(entry.sha256.clone());
         version = release.version.clone();
@@ -357,6 +373,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         user_data_decl = release.user_data.clone();
         settings = release.settings.clone();
         actions = release.actions.clone();
+        launch = release.launch.clone();
         strip_top_level = false;
     }
 
@@ -383,32 +400,47 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         uninstall_steps: &uninstall_steps,
         user_data_decl: &user_data_decl,
         artifact: &artifact,
+        artifact_id: artifact_id.as_deref(),
         expected_sha256: expected_sha.as_deref(),
+        extra_artifacts: &extra_artifacts,
         keep_existing: false,
         dependent_of: None,
         settings: settings.as_ref(),
         actions: &actions,
+        launch: &launch,
         strip_top_level,
     };
     engine::install(&store, &mut ctx, &plan, ui)?;
     Ok(format!("{} {} installed.", manifest.name, version))
 }
 
-fn pick_artifact<'a>(
+/// Select this context's artifacts (SPEC 13): the primary is the first
+/// whose `when` matches (or has none); every later matching artifact with
+/// an `id` comes along as an extra that steps can name.
+fn pick_artifacts<'a>(
     ctx: &InstallContext,
     artifacts: &'a [crate::types::ReleaseArtifact],
-) -> Result<&'a crate::types::ReleaseArtifact> {
+) -> Result<(&'a crate::types::ReleaseArtifact, Vec<&'a crate::types::ReleaseArtifact>)> {
+    let mut primary = None;
+    let mut extras = Vec::new();
     for artifact in artifacts {
-        match &artifact.when {
-            Some(cond) => {
-                if ctx.condition_matches(cond)? {
-                    return Ok(artifact);
-                }
-            }
-            None => return Ok(artifact),
+        let matches = match &artifact.when {
+            Some(cond) => ctx.condition_matches(cond)?,
+            None => true,
+        };
+        if !matches {
+            continue;
+        }
+        if primary.is_none() {
+            primary = Some(artifact);
+        } else if artifact.id.is_some() {
+            extras.push(artifact);
         }
     }
-    bail!("no release artifact matches this platform/architecture/distribution")
+    match primary {
+        Some(p) => Ok((p, extras)),
+        None => bail!("no release artifact matches this platform/architecture/distribution"),
+    }
 }
 
 fn install_dependency(
@@ -442,7 +474,7 @@ fn install_dependency(
         .as_ref()
         .with_context(|| format!("dependency \"{dep_id}\" has no source repo"))?;
 
-    let entry = pick_artifact(ctx, &pinned.artifacts)?;
+    let (entry, extras) = pick_artifacts(ctx, &pinned.artifacts)?;
     let tag = pinned
         .tag
         .clone()
@@ -450,6 +482,16 @@ fn install_dependency(
     let url = fetch::tagged_asset_url(source, &tag, &entry.file)?;
     ui.log(&format!("Installing dependency {} {} ({})...", tool.name, pinned.version, entry.file));
     let artifact = fetch::download(&url, |p| ui.progress(p))?;
+    let mut extra_artifacts = Vec::new();
+    for extra in extras {
+        let url = fetch::tagged_asset_url(source, &tag, &extra.file)?;
+        ui.log(&format!("Downloading {}...", extra.file));
+        extra_artifacts.push(NamedArtifact {
+            id: extra.id.clone().unwrap_or_default(),
+            data: fetch::download(&url, |p| ui.progress(p))?,
+            expected_sha256: extra.sha256.clone(),
+        });
+    }
 
     let keep_existing = tool.conflict_policy.as_deref() == Some("keep-newer");
     let plan = InstallPlan {
@@ -461,15 +503,32 @@ fn install_dependency(
         uninstall_steps: &tool.uninstall,
         user_data_decl: &tool.user_data,
         artifact: &artifact,
+        artifact_id: entry.id.as_deref(),
         expected_sha256: Some(&entry.sha256),
+        extra_artifacts: &extra_artifacts,
         keep_existing,
         dependent_of: Some(dependent.to_string()),
         settings: tool.settings.as_ref(),
         actions: &tool.actions,
+        launch: &tool.launch,
         strip_top_level: false,
     };
     engine::install(store, ctx, &plan, ui)?;
     Ok(())
+}
+
+/// Start the game with `id` loaded, from recorded state (offline).
+pub fn launch(
+    id: &str,
+    game: &str,
+    game_dir: Option<&Path>,
+    state_dir: Option<PathBuf>,
+    ui: &mut dyn EngineUi,
+) -> Result<String> {
+    let store = StateStore::open(state_dir)?;
+    let state = find_installed(&store, game, id, game_dir)?;
+    engine::launch(&store, &state, ui)?;
+    Ok(format!("{} launched.", state.id))
 }
 
 /// The install of `id` for `game`, addressed by copy: an explicit game

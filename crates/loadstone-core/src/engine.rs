@@ -5,6 +5,7 @@
 //! through [`EngineUi`], which the CLI implements over stdin/stdout and the
 //! GUI will implement over wx dialogs (marshalled across the cxx bridge).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context as _, Result};
@@ -46,8 +47,13 @@ pub struct InstallPlan<'a> {
     pub uninstall_steps: &'a [Step],
     pub user_data_decl: &'a [String],
     pub artifact: &'a [u8],
+    /// The primary artifact's `id`, when it has one, so steps can name it.
+    pub artifact_id: Option<&'a str>,
     /// SHA-256 the artifact must match; None only for local/dev sources.
     pub expected_sha256: Option<&'a str>,
+    /// Further release artifacts that matched this context and carry an
+    /// `id`, for `extract-archive` steps naming them (SPEC 13).
+    pub extra_artifacts: &'a [NamedArtifact],
     /// Tool semantics: keep existing untracked destination files (keep-newer).
     pub keep_existing: bool,
     /// When this is a dependency install, the id of the package needing it.
@@ -56,9 +62,39 @@ pub struct InstallPlan<'a> {
     pub settings: Option<&'a crate::types::Settings>,
     /// Actions to freeze into state.
     pub actions: &'a [crate::types::Action],
+    /// Launch steps to freeze into state.
+    pub launch: &'a [Step],
     /// Branch-zipball installs: strip the archive's single top-level folder
     /// before route matching (SPEC §8).
     pub strip_top_level: bool,
+}
+
+/// A downloaded, hash-checked secondary artifact addressed by id.
+pub struct NamedArtifact {
+    pub id: String,
+    pub data: Vec<u8>,
+    pub expected_sha256: String,
+}
+
+/// The artifacts one step list can extract from: the primary (unnamed
+/// `extract-archive`) plus any named extras.
+#[derive(Default)]
+pub struct Artifacts<'a> {
+    pub primary: Option<&'a [u8]>,
+    pub named: BTreeMap<&'a str, &'a [u8]>,
+}
+
+impl<'a> Artifacts<'a> {
+    fn get(&self, id: Option<&str>) -> Result<&'a [u8]> {
+        match id {
+            None => self.primary.context("extract-archive step but no artifact available"),
+            Some(id) => self
+                .named
+                .get(id)
+                .copied()
+                .with_context(|| format!("extract-archive names artifact \"{id}\", which this release did not provide for this platform")),
+        }
+    }
 }
 
 pub fn install(
@@ -80,6 +116,23 @@ pub fn install(
         ui.log("Artifact hash verified.");
     } else {
         ui.log("No hash to verify for this source (local or development install).");
+    }
+    for extra in plan.extra_artifacts {
+        let actual = sha256_bytes(&extra.data);
+        if !actual.eq_ignore_ascii_case(&extra.expected_sha256) {
+            bail!(
+                "artifact hash mismatch for {} ({}): expected {}, got {actual}. \
+                 Refusing to install.",
+                plan.manifest.id, extra.id, extra.expected_sha256
+            );
+        }
+    }
+    let mut artifacts = Artifacts {
+        primary: Some(plan.artifact),
+        named: plan.extra_artifacts.iter().map(|a| (a.id.as_str(), a.data.as_slice())).collect(),
+    };
+    if let Some(id) = plan.artifact_id {
+        artifacts.named.insert(id, plan.artifact);
     }
 
     // 2. An older version's tracked files go first, so updates never leave
@@ -105,7 +158,7 @@ pub fn install(
     let run = run_steps_inner(
         ctx,
         plan.install_steps,
-        Some(plan.artifact),
+        &artifacts,
         plan.keep_existing,
         plan.strip_top_level,
         &mut written,
@@ -170,6 +223,8 @@ pub fn install(
         settings: plan.settings.cloned(),
         settings_file,
         actions: plan.actions.to_vec(),
+        launch: plan.launch.to_vec(),
+        steam_app_id: ctx.steam_app_id.clone(),
     };
     store.save(&state)?;
     Ok(state)
@@ -226,6 +281,7 @@ pub fn context_from_state(state: &InstalledState) -> InstallContext {
         user_data: state.user_data.clone(),
         game_paths: state.game_paths.clone(),
         vars: Default::default(),
+        steam_app_id: state.steam_app_id.clone(),
     }
 }
 
@@ -259,7 +315,7 @@ pub fn run_action(
     }
     ui.log(&format!("Running \"{}\"...", action.label));
     let mut written = Vec::new();
-    let result = run_steps(&mut ctx, &action.steps, None, false, &mut written, ui);
+    let result = run_steps(&mut ctx, &action.steps, &Artifacts::default(), false, &mut written, ui);
     if !written.is_empty() {
         let mut updated = state.clone();
         updated.files.extend(written);
@@ -268,6 +324,24 @@ pub fn run_action(
     result?;
     ui.log(&format!("\"{}\" finished.", action.label));
     Ok(())
+}
+
+/// Start the game with this package loaded, using the launch steps frozen
+/// at install time (SPEC 5). Launch steps write nothing; anything they do
+/// write is still tracked so uninstall stays complete.
+pub fn launch(store: &StateStore, state: &InstalledState, ui: &mut dyn EngineUi) -> Result<()> {
+    if state.launch.is_empty() {
+        bail!("{} declares no launch steps for this platform", state.id);
+    }
+    let mut ctx = context_from_state(state);
+    let mut written = Vec::new();
+    let result = run_steps(&mut ctx, &state.launch, &Artifacts::default(), false, &mut written, ui);
+    if !written.is_empty() {
+        let mut updated = state.clone();
+        updated.files.extend(written);
+        store.save(&updated)?;
+    }
+    result
 }
 
 /// Refuse to delete tracked files that now sit behind a symlink or junction:
@@ -301,18 +375,18 @@ fn roots_of(ctx: &InstallContext) -> Vec<PathBuf> {
 pub fn run_steps(
     ctx: &mut InstallContext,
     steps: &[Step],
-    artifact: Option<&[u8]>,
+    artifacts: &Artifacts,
     keep_existing: bool,
     written: &mut Vec<PathBuf>,
     ui: &mut dyn EngineUi,
 ) -> Result<()> {
-    run_steps_inner(ctx, steps, artifact, keep_existing, false, written, ui)
+    run_steps_inner(ctx, steps, artifacts, keep_existing, false, written, ui)
 }
 
 fn run_steps_inner(
     ctx: &mut InstallContext,
     steps: &[Step],
-    artifact: Option<&[u8]>,
+    artifacts: &Artifacts,
     keep_existing: bool,
     strip_top_level: bool,
     written: &mut Vec<PathBuf>,
@@ -350,8 +424,8 @@ fn run_steps_inner(
         }
 
         match step {
-            Step::ExtractArchive { routes, .. } => {
-                let data = artifact.context("extract-archive step but no artifact available")?;
+            Step::ExtractArchive { routes, artifact, .. } => {
+                let data = artifacts.get(artifact.as_deref())?;
                 ui.log("Extracting files...");
                 let outcome =
                     archive::extract_routed(ctx, data, routes, keep_existing, strip_top_level)?;
@@ -445,8 +519,108 @@ fn run_steps_inner(
                 // the activity log, which every frontend reads out.
                 ui.log(&ctx.substitute(message)?);
             }
+            Step::MergeUniversalBinary { inputs, output, .. } => {
+                let mut blobs = Vec::with_capacity(inputs.len());
+                let mut input_paths = Vec::with_capacity(inputs.len());
+                for raw in inputs {
+                    let path = ctx.resolve_path(raw)?;
+                    blobs.push(std::fs::read(&path).with_context(|| {
+                        format!("merge-universal-binary: cannot read {}", path.display())
+                    })?);
+                    input_paths.push(path);
+                }
+                let dest = ctx.resolve_path(output)?;
+                ctx.check_write_allowed(&dest)?;
+                let fat = crate::macho::merge(&blobs)?;
+                // The thin inputs were only ever intermediates: drop them
+                // and their tracking either way.
+                for p in &input_paths {
+                    let _ = std::fs::remove_file(p);
+                    written.retain(|w| w != p);
+                }
+                // A tool's keep-newer policy applies to the merged output
+                // exactly as it does to an extracted file: an untracked
+                // copy already in place (another manager's, or newer) is
+                // left alone.
+                if keep_existing && dest.exists() && !written.contains(&dest) {
+                    ui.log(&format!(
+                        "Kept existing {} (not overwritten; it may be newer).",
+                        dest.display()
+                    ));
+                } else {
+                    std::fs::write(&dest, &fat)
+                        .with_context(|| format!("failed to write {}", dest.display()))?;
+                    written.push(dest.clone());
+                    ui.log(&format!(
+                        "Combined {} architectures into {}.",
+                        inputs.len(),
+                        dest.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                }
+            }
+            Step::Run { program, args, cwd, env, .. } => {
+                let exe = ctx.resolve_path(program)?;
+                ctx.check_run_allowed(&exe)?;
+                if !exe.is_file() {
+                    bail!("cannot launch: {} is missing", exe.display());
+                }
+                let mut cmd = std::process::Command::new(&exe);
+                for a in args {
+                    cmd.arg(ctx.substitute(a)?);
+                }
+                cmd.current_dir(match cwd {
+                    Some(c) => ctx.resolve_path(c)?,
+                    None => exe.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
+                });
+                for (k, v) in env {
+                    cmd.env(k, ctx.substitute(v)?);
+                }
+                // Detached: the game outlives this process, and a manager
+                // window must not hang on it.
+                cmd.stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                cmd.spawn()
+                    .with_context(|| format!("failed to start {}", exe.display()))?;
+                ui.log(&format!("Started {}.", exe.display()));
+            }
+            Step::OpenUrl { url, .. } => {
+                let url = ctx.substitute(url)?;
+                if !url.starts_with("steam://") {
+                    bail!("open-url only accepts steam:// URLs (got {url})");
+                }
+                open_url(&url)?;
+                ui.log(&format!("Opened {url}."));
+            }
         }
     }
+    Ok(())
+}
+
+/// Hand a URL to the OS's default handler without a console window.
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd.spawn().with_context(|| format!("failed to open {url}"))?;
     Ok(())
 }
 
@@ -477,7 +651,7 @@ pub fn uninstall(
         // Steps were pre-resolved at install time.
         let mut ctx = context_from_state(state);
         let mut scratch = Vec::new();
-        run_steps(&mut ctx, &state.uninstall_steps, None, false, &mut scratch, ui)?;
+        run_steps(&mut ctx, &state.uninstall_steps, &Artifacts::default(), false, &mut scratch, ui)?;
     }
 
     if !state.user_data_paths.is_empty() {

@@ -19,6 +19,9 @@ pub struct InstallContext {
     pub game_paths: BTreeMap<String, PathBuf>,
     /// Values bound by pick-directory steps (`${var.<id>}`).
     pub vars: BTreeMap<String, PathBuf>,
+    /// The game's Steam app id (game package `detect.steam.appId`), for
+    /// `${steam.appId}` in launch steps.
+    pub steam_app_id: Option<String>,
 }
 
 pub fn current_platform() -> &'static str {
@@ -71,6 +74,7 @@ impl InstallContext {
             user_data: PathBuf::new(),
             game_paths: BTreeMap::new(),
             vars: BTreeMap::new(),
+            steam_app_id: steam_app_id_of(game),
         };
 
         ctx.user_data = match user_data_override {
@@ -178,6 +182,12 @@ impl InstallContext {
                 None => bail!("\"{raw}\": ${{var.{var}}} is not bound"),
             };
         }
+        if name == "steam.appId" {
+            return match &self.steam_app_id {
+                Some(id) => Ok(id.clone()),
+                None => bail!("\"{raw}\": the game package declares no detect.steam.appId"),
+            };
+        }
         bail!("\"{raw}\": unknown token ${{{name}}}")
     }
 
@@ -238,10 +248,7 @@ impl InstallContext {
 
     /// A resolved destination must live under one of the allowed roots.
     pub fn check_write_allowed(&self, path: &Path) -> Result<()> {
-        let mut roots: Vec<&PathBuf> = vec![&self.game_dir, &self.user_data];
-        roots.extend(self.game_paths.values());
-        roots.extend(self.vars.values());
-        if roots.iter().any(|r| path.starts_with(r)) {
+        if self.is_under_allowed_root(path) {
             Ok(())
         } else {
             bail!(
@@ -249,6 +256,36 @@ impl InstallContext {
                 path.display()
             )
         }
+    }
+
+    /// A program a `run` step starts must live under the same roots: a
+    /// manifest can launch the game it manages, never an arbitrary binary.
+    pub fn check_run_allowed(&self, path: &Path) -> Result<()> {
+        if self.is_under_allowed_root(path) {
+            Ok(())
+        } else {
+            bail!(
+                "refusing to run a program outside the game's folders: {}",
+                path.display()
+            )
+        }
+    }
+
+    fn is_under_allowed_root(&self, path: &Path) -> bool {
+        let mut roots: Vec<&PathBuf> = vec![&self.game_dir, &self.user_data];
+        roots.extend(self.game_paths.values());
+        roots.extend(self.vars.values());
+        roots.iter().any(|r| path.starts_with(r))
+    }
+}
+
+/// `detect.steam.appId` from a game package, accepting a number or a string.
+pub fn steam_app_id_of(game: &GameManifest) -> Option<String> {
+    let steam = game.detect.distributions.get("steam")?;
+    match steam.get("appId")? {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }
 
@@ -296,6 +333,25 @@ pub fn resolve_steps(ctx: &InstallContext, steps: &[crate::types::Step]) -> Resu
                 *to = ctx.substitute(to)?;
             }
             Step::Notice { message, .. } => *message = ctx.substitute(message)?,
+            Step::MergeUniversalBinary { inputs, output, .. } => {
+                for p in inputs.iter_mut() {
+                    *p = ctx.substitute(p)?;
+                }
+                *output = ctx.substitute(output)?;
+            }
+            Step::Run { program, args, cwd, env, .. } => {
+                *program = ctx.substitute(program)?;
+                for a in args.iter_mut() {
+                    *a = ctx.substitute(a)?;
+                }
+                if let Some(c) = cwd {
+                    *c = ctx.substitute(c)?;
+                }
+                for v in env.values_mut() {
+                    *v = ctx.substitute(v)?;
+                }
+            }
+            Step::OpenUrl { url, .. } => *url = ctx.substitute(url)?,
             Step::ExtractArchive { .. } | Step::PickDirectory { .. } | Step::Expect { .. } => {}
         }
         out.push(s);

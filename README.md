@@ -109,6 +109,7 @@ loadstone update blindfold --registry github:bradjrenshaw/loadstone-registry
 loadstone settings say-the-spire-2 --game slay-the-spire-2 --set screen_reader=false
 loadstone action say-the-spire-2 install-jaws-config --game slay-the-spire-2
 loadstone list
+loadstone launch blindfold --game balatro
 loadstone uninstall blindfold --game balatro
 ```
 
@@ -130,6 +131,15 @@ loadstone uninstall blindfold --game balatro
   `settings` command, and stored where the mod reads them.
 - Declared actions run with `action` — pick-directory steps prompt, or take
   `--dir id=path` for automation.
+- `launch` starts the game with the mod loaded, from the `launch` steps the
+  manifest declares (frozen into state at install time, so it works offline).
+  The manager shows the same thing as a Launch button on the mod's page:
+  install or update, then play, from one window.
+- Release artifacts can carry an `id`; every matching named artifact is
+  downloaded and an `extract-archive` step can pick it with `artifact`. The
+  registry's Lovely package uses this on macOS to fetch both upstream slices
+  and combine them (`merge-universal-binary`) into one universal injector,
+  so the game loads it whether Steam runs it natively or under Rosetta.
 - `--user-data`, `--state-dir`, `--yes`, and `--dir` support
   sandboxed/automated runs.
 

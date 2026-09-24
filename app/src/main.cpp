@@ -112,7 +112,7 @@ void AttachDescription(wxWindow* win, const wxString& description) {
 
 // ---------------------------------------------------------------------------
 
-enum class OpKind { Install, Update, Uninstall, Action };
+enum class OpKind { Install, Update, Uninstall, Action, Launch };
 
 class LoadstoneFrame : public wxFrame {
 public:
@@ -173,6 +173,7 @@ private:
 
     loadstone::UiProfile profile_;
     wxString coreVersion_;
+    OpKind lastOpKind_ = OpKind::Install;
     bool singleMod_;
 
     wxPanel* catalogPanel_ = nullptr;
@@ -684,6 +685,18 @@ void LoadstoneFrame::BuildDetail() {
     if (copy.can_uninstall) pageControls_.push_back(uninstall);
     buttons->Add(uninstall, 0, wxRIGHT, 8);
 
+    // Launch: the point of the whole exercise. Install or update, then
+    // start the game with the mod loaded, from one window.
+    auto* launch = new wxButton(detailPanel_, wxID_ANY, "&Launch game");
+    launch->Enable(copy.can_launch);
+    AttachDescription(launch, copy.can_launch
+                                  ? "Starts the game with the mod loaded."
+                                  : "Available once the mod is installed here.");
+    launch->Bind(wxEVT_BUTTON,
+                 [this](wxCommandEvent&) { RunOperation(OpKind::Launch); });
+    if (copy.can_launch) pageControls_.push_back(launch);
+    buttons->Add(launch, 0, wxRIGHT, 8);
+
     for (const auto& a : copy.actions) {
         auto* b = new wxButton(detailPanel_, wxID_ANY, FromRust(a.label));
         b->Enable(copy.actions_available);
@@ -819,6 +832,7 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
             return;
     }
     opInFlight_ = true;
+    lastOpKind_ = kind;
     DisablePageControlsKeepFocus();
     if (opLog_) opLog_->Clear();
     SetStatusText("Working...");
@@ -873,6 +887,10 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
                 case OpKind::Action:
                     result = std::string(loadstone::run_mod_action(
                         "", game, copyDir, modId, action, *cb));
+                    break;
+                case OpKind::Launch:
+                    result = std::string(
+                        loadstone::run_launch("", game, copyDir, modId, *cb));
                     break;
             }
         } catch (const std::exception& e) {
@@ -947,6 +965,11 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
         AppendOpLog(wxString::FromUTF8(error.c_str()));
         wxMessageBox(wxString::FromUTF8(error.c_str()), "Operation failed",
                      wxOK | wxICON_ERROR, this);
+    } else if (lastOpKind_ == OpKind::Launch) {
+        // The game is starting and about to take focus; a modal "Done" box
+        // here would fight it for the screen reader's attention.
+        SetStatusText(wxString::FromUTF8(result.c_str()));
+        AppendOpLog(wxString::FromUTF8(result.c_str()));
     } else {
         SetStatusText(wxString::FromUTF8(result.c_str()));
         wxMessageBox(wxString::FromUTF8(result.c_str()), "Done",
@@ -1183,6 +1206,7 @@ bool LoadstoneApp::OnInit() {
                             << (sel.settings_editable ? "" : " [read-only]") << "\n";
                     for (const auto& a : sel.actions)
                         out << "page-action: " << std::string(a.id) << "\n";
+                    out << "page-launch: " << sel.can_launch << "\n";
                     for (const auto& n : page.notes)
                         out << "page-note: " << std::string(n) << "\n";
                 }

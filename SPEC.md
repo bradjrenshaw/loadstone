@@ -196,6 +196,7 @@ against the game's `markers` and infers the distribution from disk evidence
 | `${var.<id>}`    | A value bound by an earlier step (e.g. `pick-directory`)         |
 | `${appData}` `${localAppData}` `${localLow}` `${documents}` `${home}` | OS folders |
 | `${distribution}` `${platform}` `${arch}` | Context strings, usable in paths and conditions |
+| `${steam.appId}` | The game's Steam app id from its game package (`detect.steam.appId`) |
 
 All writes MUST resolve inside `${gameDir}`, `${userData}`, a game-defined path, or
 a user-picked directory. Zip entries with absolute paths or `..` components MUST be
@@ -232,7 +233,10 @@ mods that omit their own copy resolve to it through the scope chain (§2.1).
 
 - `detect.<distribution>` — per-distribution detection data. A distribution
   absent here means the game is not known to exist there. `markers` validate any
-  candidate folder (auto-detected or hand-picked): at least one marker must exist.
+  candidate folder (auto-detected or hand-picked): at least one marker must exist,
+  so list each platform's (`Balatro.exe`, `Balatro.app`).
+- `detect.steam.appId` — the Steam app id, exposed as `${steam.appId}` so a
+  mod's `launch` list can open `steam://rungameid/${steam.appId}` (§5).
 - `userData` — per-platform user-data root, resolved into `${userData}`.
 - `paths` — named locations resolved into `${game.<name>}` tokens. Entries may
   themselves use tokens and may be overridden per platform or distribution with an
@@ -274,6 +278,30 @@ Top-level fields:
 | `userData`        | no  | Paths holding user settings, offered for purge (§10)     |
 | `settings`        | no  | Settings schema; the manager generates the UI (§11)      |
 | `actions`         | no  | Optional named operations with buttons (§12)             |
+
+### 5.1 `launch`
+
+Why users install a mod at all is to play with it, so a manifest can say
+how to start the game with the mod loaded. `launch` is an ordered step
+list restricted to `run`, `open-url`, and `notice` (§9.9–§9.10); it is
+frozen into `loadstone-release.json` and into the install record, so the
+manager's **Launch** button (and `loadstone launch`) works offline from
+state alone. Steps carry `when` like any other, so one list covers every
+platform:
+
+```json
+"launch": [
+  { "step": "open-url", "when": { "platform": "windows", "distribution": "steam" },
+    "url": "steam://rungameid/${steam.appId}" },
+  { "step": "run", "when": { "platform": "macos" },
+    "program": "${gameDir}/Balatro.app/Contents/MacOS/love",
+    "cwd": "${gameDir}",
+    "env": { "DYLD_INSERT_LIBRARIES": "${gameDir}/liblovely.dylib" } }
+]
+```
+
+A launch list is offered only while the mod is installed by the manager;
+a copy installed some other way has no frozen steps to run.
 
 ---
 
@@ -381,7 +409,11 @@ Extracts the current artifact (or source tree) through routing rules.
 ```
 
 - Supported archive formats: `.zip` and `.tar.gz` (upstream tools commonly
-  ship the latter).
+  ship the latter); the format is sniffed from the bytes, not the name.
+- `artifact` — the `id` of the release artifact to extract (§13). Absent,
+  the step extracts the primary artifact.
+- Files whose archive entry carries an executable bit, or whose name ends
+  in `.sh`, are written executable (zips built on Windows record no mode).
 - `from` — a prefix glob over archive entry paths (`\` normalized to `/`).
   If it contains no wildcard, it names a single file and `to` is the destination
   *file* path; otherwise `to` is a destination *directory* and the path suffix
@@ -473,6 +505,51 @@ Path tokens are substituted; `when` is the usual way to scope it.
 ```
 
 The step never fails and writes nothing to disk.
+
+### 9.9 `run`
+
+Starts a program and returns without waiting for it. Meant for `launch`
+lists (§5.1). `program` must resolve inside `${gameDir}`, `${userData}`,
+a game-defined path, or a user-picked directory: a manifest may start the
+game it manages, never an arbitrary binary. `args`, `cwd` (defaults to the
+program's folder), and `env` values take tokens.
+
+```json
+{ "step": "run",
+  "program": "${gameDir}/Balatro.app/Contents/MacOS/love",
+  "cwd": "${gameDir}",
+  "env": { "DYLD_INSERT_LIBRARIES": "${gameDir}/liblovely.dylib" } }
+```
+
+### 9.10 `open-url`
+
+Hands a `steam://` URL to the OS (other schemes are rejected), e.g. to
+start the game through Steam with its overlay and playtime tracking:
+
+```json
+{ "step": "open-url", "url": "steam://rungameid/${steam.appId}" }
+```
+
+### 9.11 `merge-universal-binary`
+
+Combines thin Mach-O files, one per CPU architecture, into one universal
+binary at `output`, then deletes the inputs (and stops tracking them; the
+output is tracked instead). The engine does this itself — end users' Macs
+have no `lipo` — and each slice is copied byte for byte, so upstream code
+signatures survive.
+
+```json
+{ "step": "merge-universal-binary", "when": { "platform": "macos" },
+  "inputs": ["${gameDir}/liblovely-arm64.dylib", "${gameDir}/liblovely-x86_64.dylib"],
+  "output": "${gameDir}/liblovely.dylib" }
+```
+
+This exists for injectors loaded through `DYLD_INSERT_LIBRARIES`: dyld
+aborts the game when the inserted library has no slice for the process's
+architecture, and whether Steam starts the game natively or under Rosetta
+depends on the Steam client, not the machine. Under a tool's `keep-newer`
+policy an untracked file already at `output` is kept, like any extracted
+file.
 
 ---
 
@@ -587,9 +664,14 @@ Generated by the dev CLI / CI; attached to every release next to the artifacts.
 
 - `artifacts` — the downloadable files. Each may carry `when` constraints
   (`platform`, `arch`, `distribution`); the manager picks the **first** artifact
-  whose constraints match the install context. An unconstrained artifact matches
-  everything — most mods list exactly one. Combinatorial variants exist only when
-  binaries genuinely differ per platform or distribution.
+  whose constraints match the install context as the primary. An unconstrained
+  artifact matches everything — most mods list exactly one. Combinatorial
+  variants exist only when binaries genuinely differ per platform or distribution.
+- An artifact may also carry an `id`. Every matching artifact with an id is
+  downloaded (and hash-checked) alongside the primary, and an
+  `extract-archive` step names it with `artifact` (§9.1). This is how one
+  install can combine several upstream downloads — for example both macOS
+  slices of an injector into one universal binary (§9.11).
 - `sha256` is REQUIRED; the manager verifies before installing.
 - The embedded blocks are copies of the project manifest's, frozen at build
   time, so a release never depends on the repo's current state. Game packages

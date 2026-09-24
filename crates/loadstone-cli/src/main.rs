@@ -185,6 +185,20 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Start the game with an installed mod loaded (its declared launch steps).
+    Launch {
+        /// Package id.
+        id: String,
+        /// Game id the package is installed for.
+        #[arg(long)]
+        game: String,
+        /// Which copy of the game (needed when the mod is installed for
+        /// more than one).
+        #[arg(long)]
+        game_dir: Option<PathBuf>,
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
     /// Uninstall a previously installed package.
     Uninstall {
         /// Package id.
@@ -277,6 +291,9 @@ fn main() -> ExitCode {
         }
         Command::Action { id, action, game, game_dir, state_dir, dirs, yes } => {
             manage::cmd_action(&id, &action, &game, game_dir, state_dir, &dirs, yes).map(|()| true)
+        }
+        Command::Launch { id, game, game_dir, state_dir } => {
+            manage::cmd_launch(&id, &game, game_dir, state_dir).map(|()| true)
         }
         Command::Uninstall { id, game, game_dir, state_dir, purge, keep_settings, yes } => {
             let purge_choice = if purge {

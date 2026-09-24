@@ -63,6 +63,10 @@ pub struct ProjectManifest {
     pub settings: Option<Settings>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<Action>,
+    /// How to start the game with this mod loaded (SPEC 5): a step list of
+    /// `run` / `open-url` / `notice` steps, usually one per platform.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch: Vec<Step>,
     /// Tools only: how an existing copy installed outside the manager is treated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_policy: Option<String>,
@@ -127,6 +131,8 @@ pub struct ReleaseManifest {
     pub settings: Option<Settings>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<Action>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch: Vec<Step>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_policy: Option<String>,
     /// The standalone installer exe attached to this release, when one is;
@@ -139,6 +145,11 @@ pub struct ReleaseManifest {
 pub struct ReleaseArtifact {
     pub file: String,
     pub sha256: String,
+    /// Names this artifact so an `extract-archive` step can ask for it by
+    /// `artifact`. The first matching artifact is always the primary one;
+    /// every other matching artifact WITH an id is downloaded too (SPEC 13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Condition>,
 }
@@ -236,6 +247,10 @@ pub enum ChannelSource {
 pub enum Step {
     ExtractArchive {
         routes: Vec<Route>,
+        /// Which release artifact to extract, by its `id`; the primary
+        /// artifact when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
         #[serde(flatten)]
         common: StepCommon,
     },
@@ -281,6 +296,33 @@ pub enum Step {
         #[serde(flatten)]
         common: StepCommon,
     },
+    /// Combine thin Mach-O files (one per CPU architecture) into one
+    /// universal binary, then delete the inputs. macOS only in practice.
+    MergeUniversalBinary {
+        inputs: Vec<String>,
+        output: String,
+        #[serde(flatten)]
+        common: StepCommon,
+    },
+    /// Start a program (inside the game folder or another allowed root)
+    /// and return without waiting for it. For `launch` step lists.
+    Run {
+        program: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+        #[serde(flatten)]
+        common: StepCommon,
+    },
+    /// Hand a `steam://` URL to the OS, e.g. `steam://rungameid/${steam.appId}`.
+    OpenUrl {
+        url: String,
+        #[serde(flatten)]
+        common: StepCommon,
+    },
 }
 
 impl Step {
@@ -294,6 +336,9 @@ impl Step {
             Step::PickDirectory { .. } => "pick-directory",
             Step::Expect { .. } => "expect",
             Step::Notice { .. } => "notice",
+            Step::MergeUniversalBinary { .. } => "merge-universal-binary",
+            Step::Run { .. } => "run",
+            Step::OpenUrl { .. } => "open-url",
         }
     }
 
@@ -306,7 +351,10 @@ impl Step {
             | Step::DeleteFiles { common, .. }
             | Step::PickDirectory { common, .. }
             | Step::Expect { common, .. }
-            | Step::Notice { common, .. } => common,
+            | Step::Notice { common, .. }
+            | Step::MergeUniversalBinary { common, .. }
+            | Step::Run { common, .. }
+            | Step::OpenUrl { common, .. } => common,
         }
     }
 }

@@ -12,6 +12,7 @@ pub const BUILTIN_TOKENS: &[&str] = &[
     "distribution",
     "platform",
     "arch",
+    "steam.appId",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

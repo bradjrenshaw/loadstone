@@ -111,6 +111,9 @@ mod ffi {
         /// Actions run only when installed.
         actions_available: bool,
         actions: Vec<ActionItem>,
+        /// The mod is installed here and declares launch steps for this
+        /// platform: the page shows a Launch button.
+        can_launch: bool,
     }
 
     /// A branch ("development") channel the mod declares, for the version
@@ -259,6 +262,17 @@ mod ffi {
             game_dir: &str,
             mod_id: &str,
             action_id: &str,
+            ui: Pin<&mut UiCallbacks>,
+        ) -> Result<String>;
+
+        /// Start the game with an installed mod loaded, via the launch
+        /// steps frozen at install time. Returns once the game process has
+        /// been started (it is not waited for).
+        fn run_launch(
+            state_dir: &str,
+            game: &str,
+            game_dir: &str,
+            mod_id: &str,
             ui: Pin<&mut UiCallbacks>,
         ) -> Result<String>;
     }
@@ -494,6 +508,22 @@ pub fn run_mod_action(
         .unwrap_or_else(|| action_id.to_string());
     loadstone_core::engine::run_action(&store, &state, action_id, &mut GuiUi(ui))?;
     Ok(format!("{label} completed."))
+}
+
+pub fn run_launch(
+    state_dir: &str,
+    game: &str,
+    game_dir: &str,
+    mod_id: &str,
+    ui: std::pin::Pin<&mut ffi::UiCallbacks>,
+) -> Result<String> {
+    loadstone_core::ops::launch(
+        mod_id,
+        game,
+        opt_path(game_dir).as_deref(),
+        opt_path(state_dir),
+        &mut GuiUi(ui),
+    )
 }
 
 pub fn core_version() -> String {
@@ -1002,6 +1032,7 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
             settings,
             actions_available: state.is_some(),
             actions,
+            can_launch: state.is_some_and(|s| !s.launch.is_empty()),
         }
     };
 
@@ -1191,6 +1222,8 @@ mod tests {
                     { "id": "repair", "label": "Repair", "steps": [] }
                 ]))
                 .unwrap(),
+                launch: Vec::new(),
+                steam_app_id: None,
             })
             .unwrap();
         let state_dir = state_dir.to_string_lossy().into_owned();
@@ -1251,6 +1284,8 @@ mod tests {
             settings: None,
             settings_file: None,
             actions: Vec::new(),
+            launch: Vec::new(),
+            steam_app_id: None,
         };
         store
             .save(&InstalledState {
@@ -1312,6 +1347,8 @@ mod tests {
             settings: None,
             settings_file: None,
             actions: Vec::new(),
+            launch: Vec::new(),
+            steam_app_id: None,
         };
         store.save(&base).unwrap();
         store

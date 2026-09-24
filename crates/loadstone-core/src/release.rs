@@ -65,7 +65,7 @@ pub fn build_release_manifest(
             .to_string();
         let sha256 = sha256_file(&input.path)
             .with_context(|| format!("failed to hash {}", input.path.display()))?;
-        artifacts.push(ReleaseArtifact { file: file_name, sha256, when: input.when.clone() });
+        artifacts.push(ReleaseArtifact { file: file_name, sha256, id: None, when: input.when.clone() });
     }
 
     Ok(ReleaseManifest {
@@ -83,6 +83,7 @@ pub fn build_release_manifest(
         user_data: project.user_data.clone(),
         settings: project.settings.clone(),
         actions: project.actions.clone(),
+        launch: project.launch.clone(),
         conflict_policy: project.conflict_policy.clone(),
         installer,
     })

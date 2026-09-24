@@ -98,7 +98,7 @@ const PROJECT_KEYS: &[&str] = &[
     "manifestVersion", "kind", "id", "name", "description", "authors", "license",
     "game", "source", "pinnedRelease", "distributions", "dependencies", "channels", "install",
     "sourceInstall", "uninstall", "cleanupLegacy", "userData", "settings",
-    "actions", "conflictPolicy", "packaging",
+    "actions", "launch", "conflictPolicy", "packaging",
 ];
 
 const GAME_KEYS: &[&str] =
@@ -107,7 +107,7 @@ const GAME_KEYS: &[&str] =
 const RELEASE_KEYS: &[&str] = &[
     "manifestVersion", "id", "version", "game", "releaseNotes",
     "artifacts", "dependencies", "distributions", "install", "uninstall", "cleanupLegacy",
-    "userData", "settings", "actions", "conflictPolicy", "installer",
+    "userData", "settings", "actions", "launch", "conflictPolicy", "installer",
 ];
 
 const LINK_KEYS: &[&str] = &["kind", "source", "packages"];
@@ -368,6 +368,12 @@ fn validate_project(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
     validate_steps(&manifest.install, "install", game_paths_ref, diags);
     validate_steps(&manifest.source_install, "sourceInstall", game_paths_ref, diags);
     validate_steps(&manifest.uninstall, "uninstall", game_paths_ref, diags);
+    validate_launch(&manifest.launch, "launch", game_paths_ref, diags);
+    // A step can only name an artifact the release actually lists; a
+    // project manifest knows its artifacts only when the release is pinned.
+    if let Some(pinned) = &manifest.pinned_release {
+        check_artifact_refs(&manifest.install, "install", &pinned.artifacts, diags);
+    }
 
     // Plain path lists.
     let scope = TokenScope {
@@ -461,9 +467,51 @@ fn validate_steps(
             Step::Notice { message, .. } => {
                 if message.trim().is_empty() {
                     diags.push(Diagnostic::error(format!("{loc}/message"), "must not be empty"));
-                } else if let Err(e) = tokens::extract(message) {
-                    diags.push(Diagnostic::error(format!("{loc}/message"), e.to_string()));
+                } else {
+                    check_path(message, &format!("{loc}/message"), &scope, diags);
                 }
+            }
+            Step::MergeUniversalBinary { inputs, output, .. } => {
+                if inputs.len() < 2 {
+                    diags.push(Diagnostic::error(
+                        format!("{loc}/inputs"),
+                        "a universal binary needs at least two inputs",
+                    ));
+                }
+                for (n, input) in inputs.iter().enumerate() {
+                    check_path(input, &format!("{loc}/inputs/{n}"), &scope, diags);
+                }
+                check_path(output, &format!("{loc}/output"), &scope, diags);
+                if step.common().when.as_ref().and_then(|w| w.platform.as_ref()).is_none() {
+                    diags.push(Diagnostic::warning(
+                        &loc,
+                        "merge-universal-binary is a macOS concept; scope it with \"when\": {\"platform\": \"macos\"}",
+                    ));
+                }
+            }
+            Step::Run { program, args, cwd, env, .. } => {
+                check_path(program, &format!("{loc}/program"), &scope, diags);
+                for (n, a) in args.iter().enumerate() {
+                    check_path(a, &format!("{loc}/args/{n}"), &scope, diags);
+                }
+                if let Some(c) = cwd {
+                    check_path(c, &format!("{loc}/cwd"), &scope, diags);
+                }
+                for (k, v) in env {
+                    if k.trim().is_empty() || k.contains('=') {
+                        diags.push(Diagnostic::error(format!("{loc}/env"), format!("bad variable name \"{k}\"")));
+                    }
+                    check_path(v, &format!("{loc}/env/{k}"), &scope, diags);
+                }
+            }
+            Step::OpenUrl { url, .. } => {
+                if !url.starts_with("steam://") {
+                    diags.push(Diagnostic::error(
+                        format!("{loc}/url"),
+                        "open-url only accepts steam:// URLs",
+                    ));
+                }
+                check_path(url, &format!("{loc}/url"), &scope, diags);
             }
             Step::ExtractArchive { routes, .. } => {
                 if routes.is_empty() {
@@ -685,6 +733,7 @@ fn validate_artifacts(
     if artifacts.is_empty() {
         diags.push(Diagnostic::error(location, "must list at least one artifact"));
     }
+    let mut ids: BTreeSet<String> = BTreeSet::new();
     for (i, artifact) in artifacts.iter().enumerate() {
         let loc = format!("{location}/{i}");
         if artifact.file.trim().is_empty() {
@@ -700,6 +749,12 @@ fn validate_artifacts(
         }
         if let Some(cond) = &artifact.when {
             validate_condition(cond, &format!("{loc}/when"), None, diags);
+        }
+        if let Some(id) = &artifact.id {
+            check_id(id, &format!("{loc}/id"), diags);
+            if !ids.insert(id.clone()) {
+                diags.push(Diagnostic::error(format!("{loc}/id"), format!("duplicate artifact id \"{id}\"")));
+            }
         }
     }
 }
@@ -834,6 +889,50 @@ fn validate_release(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
     }
     for (i, action) in release.actions.iter().enumerate() {
         validate_steps(&action.steps, &format!("actions/{i}/steps"), game_paths_ref, diags);
+    }
+    validate_launch(&release.launch, "launch", game_paths_ref, diags);
+    check_artifact_refs(&release.install, "install", &release.artifacts, diags);
+}
+
+/// Launch lists start the game; they must not carry install-type steps.
+fn validate_launch(
+    steps: &[Step],
+    location: &str,
+    game_paths: Option<&BTreeSet<String>>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    validate_steps(steps, location, game_paths, diags);
+    for (i, step) in steps.iter().enumerate() {
+        if !matches!(step, Step::Run { .. } | Step::OpenUrl { .. } | Step::Notice { .. }) {
+            diags.push(Diagnostic::error(
+                format!("{location}/{i}"),
+                format!("\"{}\" is not a launch step (use run, open-url, or notice)", step.name()),
+            ));
+        }
+    }
+    let starts_something = steps.iter().any(|s| matches!(s, Step::Run { .. } | Step::OpenUrl { .. }));
+    if !steps.is_empty() && !starts_something {
+        diags.push(Diagnostic::error(location, "launch must contain a run or open-url step"));
+    }
+}
+
+/// `extract-archive` steps may only name artifacts the release lists.
+fn check_artifact_refs(
+    steps: &[Step],
+    location: &str,
+    artifacts: &[ReleaseArtifact],
+    diags: &mut Vec<Diagnostic>,
+) {
+    let ids: BTreeSet<&str> = artifacts.iter().filter_map(|a| a.id.as_deref()).collect();
+    for (i, step) in steps.iter().enumerate() {
+        if let Step::ExtractArchive { artifact: Some(id), .. } = step {
+            if !ids.contains(id.as_str()) {
+                diags.push(Diagnostic::error(
+                    format!("{location}/{i}/artifact"),
+                    format!("no artifact has id \"{id}\""),
+                ));
+            }
+        }
     }
 }
 

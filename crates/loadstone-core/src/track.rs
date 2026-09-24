@@ -52,6 +52,12 @@ pub struct InstalledState {
     /// Actions frozen at install time (paths unresolved; run with context).
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// Launch steps frozen at install time (paths unresolved; run with context).
+    #[serde(default)]
+    pub launch: Vec<Step>,
+    /// The game's Steam app id from its game package, for `${steam.appId}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_app_id: Option<String>,
 }
 
 /// Stable identity of one game copy: hash of its canonical directory.
@@ -279,6 +285,8 @@ mod tests {
             settings: None,
             settings_file: None,
             actions: Vec::new(),
+            launch: Vec::new(),
+            steam_app_id: None,
         };
         store.save(&state).unwrap();
         let game_dir = state.game_dir.clone();

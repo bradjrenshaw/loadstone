@@ -213,6 +213,18 @@ pub fn cmd_action(
     engine::run_action(&store, &state, action_id, &mut ui)
 }
 
+pub fn cmd_launch(
+    id: &str,
+    game: &str,
+    game_dir: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
+) -> Result<()> {
+    let mut ui = TerminalUi::new(true);
+    let summary = ops::launch(id, game, game_dir.as_deref(), state_dir, &mut ui)?;
+    println!("{summary}");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // uninstall / list
 

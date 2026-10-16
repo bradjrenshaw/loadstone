@@ -29,12 +29,15 @@
 #include <wx/access.h>
 #include <wx/choicdlg.h>
 #include <wx/choice.h>
+#include <wx/clipbrd.h>
 #include <wx/dirdlg.h>
 #include <wx/filedlg.h>
 #include <wx/listbox.h>
 #include <wx/scrolwin.h>
+#include <wx/textdlg.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <future>
@@ -149,10 +152,20 @@ private:
                       const wxString& tag = wxString(),
                       const wxString& localRelease = wxString(),
                       const wxString& channelOverride = wxString());
-    void OnOpDone(const std::string& result, const std::string& error);
+    void OnOpDone(const std::string& result, const std::string& error, bool needsSignIn);
 
-    // The settings dialog writes changed values through the bridge on OK.
+    // The mod's settings dialog: the mod's own options (when it declares
+    // any) and Loadstone's settings for this mod. Writes on OK.
     void ShowSettingsDialog();
+
+    // Loadstone's own settings: accounts, account rules, global options.
+    // Changes save immediately.
+    void ShowLoadstoneSettings();
+    // Browser sign-in (device code). True when an account was saved.
+    bool RunSignIn();
+    // After a failure that signing in might fix: explain and offer to
+    // sign in. True when the user signed in (the caller then retries).
+    bool OfferSignIn(const wxString& error);
 
     // Grey out the page for a running operation - except the control
     // holding keyboard focus. Disabling the focused control shoves focus
@@ -292,6 +305,20 @@ LoadstoneFrame::LoadstoneFrame(loadstone::UiProfile profile, wxString coreVersio
       singleMod_(std::string(profile_.mode) == "single-mod") {
     CreateStatusBar();
     Bind(wxEVT_CHAR_HOOK, &LoadstoneFrame::OnCharHook, this);
+
+    // Loadstone settings stay reachable from a menu even when no page
+    // loaded (a standalone installer whose mod lives in a private
+    // repository shows nothing until the user signs in).
+    auto* tools = new wxMenu;
+    tools->Append(wxID_PREFERENCES, "&Loadstone settings...\tCtrl+,",
+                  "Accounts for private repositories, and Loadstone options");
+    tools->AppendSeparator();
+    tools->Append(wxID_EXIT, "E&xit");
+    auto* menuBar = new wxMenuBar;
+    menuBar->Append(tools, "&Tools");
+    SetMenuBar(menuBar);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { ShowLoadstoneSettings(); }, wxID_PREFERENCES);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, wxID_EXIT);
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& ev) {
         if (opInFlight_ && ev.CanVeto()) {
             if (wxMessageBox("An operation is still running. Closing now may leave "
@@ -351,8 +378,11 @@ void LoadstoneFrame::BuildCatalogPanel() {
     });
     refreshBtn_ = new wxButton(catalogPanel_, wxID_ANY, "&Refresh");
     refreshBtn_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { StartCatalogFetch(); });
+    auto* loadstoneBtn = new wxButton(catalogPanel_, wxID_ANY, "Loadstone settin&gs...");
+    loadstoneBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowLoadstoneSettings(); });
     buttons->Add(detailsBtn_, 0, wxRIGHT, 8);
-    buttons->Add(refreshBtn_, 0);
+    buttons->Add(refreshBtn_, 0, wxRIGHT, 8);
+    buttons->Add(loadstoneBtn, 0);
     sizer->Add(buttons, 0, wxALL, 8);
 
     catalogNotes_ = new wxStaticText(catalogPanel_, wxID_ANY, "");
@@ -382,15 +412,20 @@ void LoadstoneFrame::StartCatalogFetch() {
             });
         } catch (const std::exception& e) {
             std::string msg = e.what();
-            wxTheApp->CallAfter([alive, this, msg] {
+            bool needsSignIn = loadstone::last_error_needs_sign_in();
+            wxTheApp->CallAfter([alive, this, msg, needsSignIn] {
                 if (!alive->load()) return;
                 fetchInFlight_ = false;
                 refreshBtn_->Enable(true);
                 modList_->Clear();
                 modList_->Append("Could not load the mod list. Press Refresh to retry.");
                 SetStatusText("Catalog fetch failed.");
-                wxMessageBox(wxString::FromUTF8(msg.c_str()),
-                             "Could not load the mod catalog", wxOK | wxICON_ERROR, this);
+                wxString text = wxString::FromUTF8(msg.c_str());
+                if (needsSignIn) {
+                    if (OfferSignIn(text)) StartCatalogFetch();
+                    return;
+                }
+                wxMessageBox(text, "Could not load the mod catalog", wxOK | wxICON_ERROR, this);
             });
         }
     }).detach();
@@ -451,12 +486,18 @@ void LoadstoneFrame::OpenMod(const wxString& id) {
             });
         } catch (const std::exception& e) {
             std::string msg = e.what();
-            wxTheApp->CallAfter([alive, this, msg] {
+            bool needsSignIn = loadstone::last_error_needs_sign_in();
+            wxString retryId = wxString::FromUTF8(modId.c_str());
+            wxTheApp->CallAfter([alive, this, msg, needsSignIn, retryId] {
                 if (!alive->load()) return;
                 fetchInFlight_ = false;
                 SetStatusText("Could not load the mod page.");
-                wxMessageBox(wxString::FromUTF8(msg.c_str()), "Could not load mod",
-                             wxOK | wxICON_ERROR, this);
+                wxString text = wxString::FromUTF8(msg.c_str());
+                if (needsSignIn) {
+                    if (OfferSignIn(text)) OpenMod(retryId);
+                    return;
+                }
+                wxMessageBox(text, "Could not load mod", wxOK | wxICON_ERROR, this);
             });
         }
     }).detach();
@@ -710,16 +751,21 @@ void LoadstoneFrame::BuildDetail() {
     }
 
     // Settings live behind a button and a dialog rather than inline
-    // controls, keeping the page itself short.
-    if (!copy.settings.empty()) {
-        auto* settingsBtn = new wxButton(detailPanel_, wxID_ANY, "&Settings...");
-        settingsBtn->Enable(copy.settings_editable);
-        if (!copy.settings_editable)
-            AttachDescription(settingsBtn, "Settings become available after install.");
-        settingsBtn->Bind(wxEVT_BUTTON,
-                          [this](wxCommandEvent&) { ShowSettingsDialog(); });
-        if (copy.settings_editable) pageControls_.push_back(settingsBtn);
-        buttons->Add(settingsBtn, 0, wxRIGHT, 8);
+    // controls, keeping the page itself short. Always present: besides
+    // the mod's own options it holds Loadstone's settings for this mod
+    // (its download account), which apply before install too.
+    auto* settingsBtn = new wxButton(detailPanel_, wxID_ANY, "&Settings...");
+    settingsBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowSettingsDialog(); });
+    pageControls_.push_back(settingsBtn);
+    buttons->Add(settingsBtn, 0, wxRIGHT, 8);
+
+    // A standalone installer has no mod list to host this; the Tools menu
+    // has it too.
+    if (singleMod_) {
+        auto* loadstoneBtn = new wxButton(detailPanel_, wxID_ANY, "Loadstone settin&gs...");
+        loadstoneBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowLoadstoneSettings(); });
+        pageControls_.push_back(loadstoneBtn);
+        buttons->Add(loadstoneBtn, 0, wxRIGHT, 8);
     }
     sizer->Add(buttons, 0, wxALL, 8);
 
@@ -756,17 +802,23 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
     std::thread([alive, this, kind, modId] {
         std::vector<loadstone::ReleaseEntry> releases;
         std::string error;
+        bool needsSignIn = false;
         try {
             auto fetched = loadstone::list_mod_releases(kEmbeddedProfile, modId);
             releases.assign(fetched.begin(), fetched.end());
         } catch (const std::exception& e) {
             error = e.what();
+            needsSignIn = loadstone::last_error_needs_sign_in();
         }
-        wxTheApp->CallAfter([alive, this, kind, releases, error] {
+        wxTheApp->CallAfter([alive, this, kind, releases, error, needsSignIn] {
             if (!alive->load()) return;
             fetchInFlight_ = false;
             for (auto* c : pageControls_) c->Enable(true);
             SetStatusText("");
+            if (!error.empty() && needsSignIn) {
+                if (OfferSignIn(wxString::FromUTF8(error.c_str()))) StartVersionPick(kind);
+                return;
+            }
             if (!error.empty()) {
                 wxString msg = wxString::Format(
                     "Could not fetch the release list: %s\n\n"
@@ -866,6 +918,7 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
     std::thread([alive, this, cb, kind, modId, game, channel, installChannel,
                  copyDir, action, tagStr, local, gameDir] {
         std::string result, error;
+        bool needsSignIn = false;
         try {
             switch (kind) {
                 case OpKind::Install:
@@ -895,9 +948,10 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
             }
         } catch (const std::exception& e) {
             error = e.what();
+            needsSignIn = loadstone::last_error_needs_sign_in();
         }
-        wxTheApp->CallAfter([alive, this, result, error] {
-            if (alive->load()) OnOpDone(result, error);
+        wxTheApp->CallAfter([alive, this, result, error, needsSignIn] {
+            if (alive->load()) OnOpDone(result, error, needsSignIn);
         });
     }).detach();
 }
@@ -958,13 +1012,20 @@ void LoadstoneFrame::OfferSelfUpdate(const loadstone::SelfUpdate& update) {
     }).detach();
 }
 
-void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& error) {
+void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& error,
+                              bool needsSignIn) {
     opInFlight_ = false;
     if (!error.empty()) {
         SetStatusText("The operation failed.");
         AppendOpLog(wxString::FromUTF8(error.c_str()));
-        wxMessageBox(wxString::FromUTF8(error.c_str()), "Operation failed",
-                     wxOK | wxICON_ERROR, this);
+        // A private-repository failure offers sign-in instead of a bare
+        // error; either way the page reloads below and the user starts the
+        // operation again from it.
+        if (needsSignIn)
+            OfferSignIn(wxString::FromUTF8(error.c_str()));
+        else
+            wxMessageBox(wxString::FromUTF8(error.c_str()), "Operation failed",
+                         wxOK | wxICON_ERROR, this);
     } else if (lastOpKind_ == OpKind::Launch) {
         // The game is starting and about to take focus; a modal "Done" box
         // here would fight it for the screen reader's attention.
@@ -990,6 +1051,16 @@ void LoadstoneFrame::ShowSettingsDialog() {
     if (!pageModel_ || currentCopy_ >= pageModel_->copies.size()) return;
     loadstone::CopyPage& copy = pageModel_->copies[currentCopy_];
 
+    // Loadstone's own settings for this mod (its download account).
+    std::vector<loadstone::SettingItem> loadstoneItems;
+    try {
+        auto items = loadstone::mod_prefs(kEmbeddedProfile, ToStd(pageModId_));
+        loadstoneItems.assign(items.begin(), items.end());
+    } catch (const std::exception& e) {
+        SetStatusText(wxString::Format("Loadstone settings unavailable: %s",
+                                       wxString::FromUTF8(e.what())));
+    }
+
     wxDialog dlg(this, wxID_ANY,
                  wxString::Format("%s Settings", FromRust(pageModel_->name)),
                  wxDefaultPosition, wxDefaultSize,
@@ -999,6 +1070,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
     struct Row {
         wxString id;
         wxString original;
+        bool loadstone = false; // a Loadstone setting, not the mod's own
         wxCheckBox* check = nullptr;
         wxChoice* choice = nullptr;
         wxTextCtrl* text = nullptr;
@@ -1006,24 +1078,27 @@ void LoadstoneFrame::ShowSettingsDialog() {
     };
     std::vector<Row> rows;
 
-    for (const auto& s : copy.settings) {
+    // One labeled control per setting, inside a section's group box.
+    auto addRow = [&rows](wxWindow* parent, wxSizer* into, const loadstone::SettingItem& s,
+                          bool isLoadstone) {
         Row row;
         row.id = FromRust(s.id);
         row.original = FromRust(s.value);
+        row.loadstone = isLoadstone;
         wxString kind = FromRust(s.kind);
         wxString label = FromRust(s.label);
         wxString describe = FromRust(s.description);
 
         if (kind == "boolean") {
-            row.check = new wxCheckBox(&dlg, wxID_ANY, label);
+            row.check = new wxCheckBox(parent, wxID_ANY, label);
             row.check->SetValue(row.original == "true");
             AttachDescription(row.check, describe);
-            sizer->Add(row.check, 0, wxLEFT | wxRIGHT | wxTOP, 8);
+            into->Add(row.check, 0, wxALL, 6);
         } else if (kind == "choice") {
             auto* rowSizer = new wxBoxSizer(wxHORIZONTAL);
-            rowSizer->Add(new wxStaticText(&dlg, wxID_ANY, label + ":"), 0,
+            rowSizer->Add(new wxStaticText(parent, wxID_ANY, label + ":"), 0,
                           wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-            row.choice = new wxChoice(&dlg, wxID_ANY);
+            row.choice = new wxChoice(parent, wxID_ANY);
             int selected = 0;
             for (const auto& o : s.options) {
                 row.values.push_back(FromRust(o.value));
@@ -1034,25 +1109,45 @@ void LoadstoneFrame::ShowSettingsDialog() {
             if (!row.values.empty()) row.choice->SetSelection(selected);
             AttachDescription(row.choice, describe);
             rowSizer->Add(row.choice, 0);
-            sizer->Add(rowSizer, 0, wxLEFT | wxRIGHT | wxTOP, 8);
+            into->Add(rowSizer, 0, wxALL, 6);
         } else { // string / number
             auto* rowSizer = new wxBoxSizer(wxHORIZONTAL);
-            rowSizer->Add(new wxStaticText(&dlg, wxID_ANY, label + ":"), 0,
+            rowSizer->Add(new wxStaticText(parent, wxID_ANY, label + ":"), 0,
                           wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-            row.text = new wxTextCtrl(&dlg, wxID_ANY, row.original,
+            row.text = new wxTextCtrl(parent, wxID_ANY, row.original,
                                       wxDefaultPosition, wxSize(220, -1));
             AttachDescription(row.text, describe);
             rowSizer->Add(row.text, 1);
-            sizer->Add(rowSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
+            into->Add(rowSizer, 0, wxEXPAND | wxALL, 6);
         }
         rows.push_back(row);
+    };
+
+    // Section 1: the mod's own declared options.
+    if (!copy.settings.empty()) {
+        auto* box = new wxStaticBoxSizer(wxVERTICAL, &dlg, "Mod options");
+        wxWindow* parent = box->GetStaticBox();
+        if (copy.settings_editable) {
+            for (const auto& s : copy.settings) addRow(parent, box, s, false);
+            wxString note = FromRust(copy.settings_note);
+            if (!note.empty()) {
+                auto* noteText = new wxStaticText(parent, wxID_ANY, note);
+                noteText->Wrap(440);
+                box->Add(noteText, 0, wxALL, 6);
+            }
+        } else {
+            box->Add(new wxStaticText(parent, wxID_ANY,
+                                      "The mod's options become available after it is installed."),
+                     0, wxALL, 6);
+        }
+        sizer->Add(box, 0, wxEXPAND | wxALL, 8);
     }
 
-    wxString note = FromRust(copy.settings_note);
-    if (!note.empty()) {
-        auto* noteText = new wxStaticText(&dlg, wxID_ANY, note);
-        noteText->Wrap(440);
-        sizer->Add(noteText, 0, wxALL, 8);
+    // Section 2: Loadstone's settings for this mod.
+    if (!loadstoneItems.empty()) {
+        auto* box = new wxStaticBoxSizer(wxVERTICAL, &dlg, "Loadstone");
+        for (const auto& s : loadstoneItems) addRow(box->GetStaticBox(), box, s, true);
+        sizer->Add(box, 0, wxEXPAND | wxALL, 8);
     }
 
     sizer->Add(dlg.CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0,
@@ -1076,6 +1171,18 @@ void LoadstoneFrame::ShowSettingsDialog() {
             continue;
         }
         if (value == row.original) continue;
+        if (row.loadstone) {
+            try {
+                loadstone::set_mod_pref(kEmbeddedProfile, ToStd(pageModId_), ToStd(row.id),
+                                        ToStd(value));
+                ++applied;
+                SetStatusText("Setting saved.");
+            } catch (const std::exception& e) {
+                wxMessageBox(wxString::FromUTF8(e.what()), "Setting not changed",
+                             wxOK | wxICON_ERROR, this);
+            }
+            continue;
+        }
         if (ApplySetting(row.id, value)) {
             ++applied;
             // Keep the in-memory page model current so reopening the
@@ -1085,6 +1192,382 @@ void LoadstoneFrame::ShowSettingsDialog() {
         }
     }
     if (applied == 0) SetStatusText("No settings changed.");
+}
+
+// ---------------------------------------------------------------------------
+// Loadstone settings: accounts, account rules, and global options. Every
+// change saves immediately (accounts can't wait for an OK button: signing
+// in already stored a token).
+
+void LoadstoneFrame::ShowLoadstoneSettings() {
+    if (opInFlight_) return;
+
+    wxDialog dlg(this, wxID_ANY, "Loadstone settings", wxDefaultPosition, wxDefaultSize,
+                 wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+
+    // Accounts.
+    sizer->Add(new wxStaticText(&dlg, wxID_ANY, "&Accounts:"), 0, wxLEFT | wxRIGHT | wxTOP, 8);
+    auto* accountList = new wxListBox(&dlg, wxID_ANY, wxDefaultPosition, wxSize(480, 100));
+    AttachDescription(accountList,
+                      "Sign-ins used to download mods from private repositories.");
+    sizer->Add(accountList, 0, wxEXPAND | wxALL, 8);
+    auto* accountButtons = new wxBoxSizer(wxHORIZONTAL);
+    auto* signInBtn = new wxButton(&dlg, wxID_ANY, "Sign &in...");
+    auto* tokenBtn = new wxButton(&dlg, wxID_ANY, "Add &token...");
+    auto* removeBtn = new wxButton(&dlg, wxID_ANY, "&Remove account");
+    auto* defaultBtn = new wxButton(&dlg, wxID_ANY, "Set as &default");
+    AttachDescription(tokenBtn, "Add an account from a token you already have, for example "
+                                "from the GitHub CLI's gh auth token command.");
+    for (auto* b : {signInBtn, tokenBtn, removeBtn, defaultBtn}) accountButtons->Add(b, 0, wxRIGHT, 8);
+    sizer->Add(accountButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+
+    // Account rules.
+    sizer->Add(new wxStaticText(&dlg, wxID_ANY, "Account r&ules:"), 0, wxLEFT | wxRIGHT, 8);
+    auto* ruleList = new wxListBox(&dlg, wxID_ANY, wxDefaultPosition, wxSize(480, 80));
+    AttachDescription(ruleList, "Which account to use for a repository or for all of an "
+                                "owner's repositories. Without a rule, the default account is used.");
+    sizer->Add(ruleList, 0, wxEXPAND | wxALL, 8);
+    auto* ruleButtons = new wxBoxSizer(wxHORIZONTAL);
+    auto* addRuleBtn = new wxButton(&dlg, wxID_ANY, "Add rul&e...");
+    auto* removeRuleBtn = new wxButton(&dlg, wxID_ANY, "Remo&ve rule");
+    ruleButtons->Add(addRuleBtn, 0, wxRIGHT, 8);
+    ruleButtons->Add(removeRuleBtn, 0);
+    sizer->Add(ruleButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+
+    // Global options: generic controls, saved as they change.
+    std::vector<loadstone::SettingItem> globals;
+    try {
+        auto items = loadstone::global_prefs(kEmbeddedProfile);
+        globals.assign(items.begin(), items.end());
+    } catch (const std::exception&) {
+    }
+    auto saveGlobal = [this](const wxString& key, const wxString& value) {
+        try {
+            loadstone::set_global_pref(kEmbeddedProfile, ToStd(key), ToStd(value));
+            return true;
+        } catch (const std::exception& e) {
+            wxMessageBox(wxString::FromUTF8(e.what()), "Setting not changed",
+                         wxOK | wxICON_ERROR, this);
+            return false;
+        }
+    };
+    for (const auto& g : globals) {
+        if (FromRust(g.kind) != "boolean") continue; // the only global kind so far
+        auto* check = new wxCheckBox(&dlg, wxID_ANY, FromRust(g.label));
+        check->SetValue(FromRust(g.value) == "true");
+        AttachDescription(check, FromRust(g.description));
+        wxString key = FromRust(g.id);
+        check->Bind(wxEVT_CHECKBOX, [check, key, saveGlobal](wxCommandEvent&) {
+            if (!saveGlobal(key, check->GetValue() ? "true" : "false"))
+                check->SetValue(!check->GetValue());
+        });
+        sizer->Add(check, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+    }
+
+    auto* closeRow = new wxBoxSizer(wxHORIZONTAL);
+    closeRow->AddStretchSpacer();
+    auto* closeBtn = new wxButton(&dlg, wxID_CLOSE, "&Close");
+    closeRow->Add(closeBtn, 0);
+    sizer->Add(closeRow, 0, wxEXPAND | wxALL, 8);
+    dlg.SetEscapeId(wxID_CLOSE);
+    closeBtn->Bind(wxEVT_BUTTON, [&dlg](wxCommandEvent&) { dlg.EndModal(wxID_CLOSE); });
+
+    // List models; the lists show a placeholder line when empty, so
+    // selection indexes are only meaningful when the model is non-empty.
+    std::vector<loadstone::AccountItem> accounts;
+    std::vector<loadstone::RuleItem> rules;
+    auto reload = [&] {
+        accounts.clear();
+        rules.clear();
+        try {
+            auto a = loadstone::account_list(kEmbeddedProfile);
+            accounts.assign(a.begin(), a.end());
+            auto r = loadstone::account_rules(kEmbeddedProfile);
+            rules.assign(r.begin(), r.end());
+        } catch (const std::exception& e) {
+            wxMessageBox(wxString::FromUTF8(e.what()), "Accounts unavailable",
+                         wxOK | wxICON_ERROR, &dlg);
+        }
+        accountList->Clear();
+        for (const auto& a : accounts) {
+            wxString line = wxString::Format("%s, %s on %s", FromRust(a.label),
+                                             FromRust(a.username), FromRust(a.provider_name));
+            if (a.is_default) line += ", default";
+            if (!a.has_token) line += ", token missing (sign in again)";
+            accountList->Append(line);
+        }
+        if (accounts.empty()) accountList->Append("No accounts. Use Sign in to add one.");
+        accountList->SetSelection(0);
+        ruleList->Clear();
+        for (const auto& r : rules) {
+            wxString who = FromRust(r.account_label);
+            if (who.empty()) who = FromRust(r.account);
+            ruleList->Append(wxString::Format("%s uses %s", FromRust(r.pattern), who));
+        }
+        if (rules.empty()) ruleList->Append("No rules.");
+        ruleList->SetSelection(0);
+        removeBtn->Enable(!accounts.empty());
+        defaultBtn->Enable(accounts.size() > 1);
+        addRuleBtn->Enable(!accounts.empty());
+        removeRuleBtn->Enable(!rules.empty());
+    };
+    auto selectedAccount = [&]() -> const loadstone::AccountItem* {
+        int i = accountList->GetSelection();
+        if (accounts.empty() || i < 0 || i >= static_cast<int>(accounts.size())) return nullptr;
+        return &accounts[i];
+    };
+
+    signInBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        if (RunSignIn()) reload();
+        accountList->SetFocus();
+    });
+    tokenBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        auto providers = loadstone::sign_in_providers();
+        if (providers.empty()) return;
+        wxPasswordEntryDialog ask(&dlg,
+                                  wxString::Format("Paste a %s token. It is checked with %s, "
+                                                   "then stored in the Windows Credential Manager.",
+                                                   FromRust(providers[0].label),
+                                                   FromRust(providers[0].label)),
+                                  "Add token");
+        if (ask.ShowModal() != wxID_OK || ask.GetValue().Trim().empty()) return;
+        try {
+            wxBusyCursor busy;
+            rust::String label = loadstone::add_token_account(
+                kEmbeddedProfile, std::string(providers[0].value), "", ToStd(ask.GetValue()));
+            SetStatusText(wxString::Format("Added account %s.", FromRust(label)));
+        } catch (const std::exception& e) {
+            wxMessageBox(wxString::FromUTF8(e.what()), "Token not added",
+                         wxOK | wxICON_ERROR, &dlg);
+        }
+        reload();
+        accountList->SetFocus();
+    });
+    removeBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        const auto* a = selectedAccount();
+        if (!a) return;
+        wxString msg = wxString::Format(
+            "Remove the account %s? Loadstone forgets its token and any rules that use it. "
+            "To also revoke Loadstone's access, use Applications in your %s settings.",
+            FromRust(a->label), FromRust(a->provider_name));
+        if (wxMessageBox(msg, "Remove account", wxYES_NO | wxICON_QUESTION, &dlg) != wxYES)
+            return;
+        try {
+            loadstone::remove_account(kEmbeddedProfile, std::string(a->id));
+        } catch (const std::exception& e) {
+            wxMessageBox(wxString::FromUTF8(e.what()), "Account not removed",
+                         wxOK | wxICON_ERROR, &dlg);
+        }
+        reload();
+        accountList->SetFocus();
+    });
+    defaultBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        const auto* a = selectedAccount();
+        if (!a) return;
+        int keep = accountList->GetSelection();
+        try {
+            loadstone::set_default_account(kEmbeddedProfile, std::string(a->id));
+        } catch (const std::exception& e) {
+            wxMessageBox(wxString::FromUTF8(e.what()), "Default not changed",
+                         wxOK | wxICON_ERROR, &dlg);
+        }
+        reload();
+        accountList->SetSelection(keep);
+        accountList->SetFocus();
+    });
+    addRuleBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        if (accounts.empty()) return;
+        wxTextEntryDialog askPattern(
+            &dlg,
+            "Repository (github:owner/repo) or every repository of an owner (github:owner/*):",
+            "Add account rule", "github:");
+        if (askPattern.ShowModal() != wxID_OK) return;
+        wxArrayString labels;
+        for (const auto& a : accounts)
+            labels.Add(wxString::Format("%s (%s)", FromRust(a.label), FromRust(a.username)));
+        wxSingleChoiceDialog askAccount(&dlg, "Use which account?", "Add account rule", labels);
+        if (askAccount.ShowModal() != wxID_OK || askAccount.GetSelection() < 0) return;
+        try {
+            loadstone::set_account_rule(kEmbeddedProfile, ToStd(askPattern.GetValue()),
+                                        std::string(accounts[askAccount.GetSelection()].id));
+        } catch (const std::exception& e) {
+            wxMessageBox(wxString::FromUTF8(e.what()), "Rule not added",
+                         wxOK | wxICON_ERROR, &dlg);
+        }
+        reload();
+        ruleList->SetFocus();
+    });
+    removeRuleBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        int i = ruleList->GetSelection();
+        if (rules.empty() || i < 0 || i >= static_cast<int>(rules.size())) return;
+        try {
+            loadstone::remove_account_rule(kEmbeddedProfile, std::string(rules[i].pattern));
+        } catch (const std::exception& e) {
+            wxMessageBox(wxString::FromUTF8(e.what()), "Rule not removed",
+                         wxOK | wxICON_ERROR, &dlg);
+        }
+        reload();
+        ruleList->SetFocus();
+    });
+
+    reload();
+    dlg.SetSizerAndFit(sizer);
+    dlg.CentreOnParent();
+    accountList->SetFocus();
+    dlg.ShowModal();
+}
+
+// ---------------------------------------------------------------------------
+// Browser sign-in. The dialog shows the code in a read-only text field
+// (focused, so a screen reader reads it) with Copy and Open buttons; a
+// worker thread requests the code and polls until the user approves on the
+// site, then the dialog closes itself. The shared state's `open` flag is
+// only touched on the GUI thread, so late callbacks after the dialog has
+// gone are ignored safely.
+
+bool LoadstoneFrame::RunSignIn() {
+    auto providers = loadstone::sign_in_providers();
+    if (providers.empty()) {
+        wxMessageBox("No site supports signing in.", "Sign in", wxOK | wxICON_ERROR, this);
+        return false;
+    }
+    size_t which = 0;
+    if (providers.size() > 1) {
+        wxArrayString names;
+        for (const auto& p : providers) names.Add(FromRust(p.label));
+        wxSingleChoiceDialog ask(this, "Sign in to which site?", "Sign in", names);
+        if (ask.ShowModal() != wxID_OK || ask.GetSelection() < 0) return false;
+        which = static_cast<size_t>(ask.GetSelection());
+    }
+    std::string provider = std::string(providers[which].value);
+    wxString site = FromRust(providers[which].label);
+
+    struct State {
+        std::atomic<bool> stop{false};
+        bool open = true;          // GUI thread only
+        bool success = false;      // GUI thread only
+        wxString result;           // GUI thread only: account label or error
+    };
+    auto state = std::make_shared<State>();
+
+    wxDialog dlg(this, wxID_ANY, wxString::Format("Sign in to %s", site));
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+    auto* status = new wxStaticText(&dlg, wxID_ANY,
+                                    wxString::Format("Requesting a sign-in code from %s...", site));
+    status->Wrap(440);
+    sizer->Add(status, 0, wxALL, 8);
+    auto* codeRow = new wxBoxSizer(wxHORIZONTAL);
+    codeRow->Add(new wxStaticText(&dlg, wxID_ANY, "Sign-in &code:"), 0,
+                 wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+    auto* code = new wxTextCtrl(&dlg, wxID_ANY, "", wxDefaultPosition, wxSize(160, -1),
+                                wxTE_READONLY);
+    codeRow->Add(code, 0);
+    sizer->Add(codeRow, 0, wxLEFT | wxRIGHT, 8);
+    auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+    auto* copyBtn = new wxButton(&dlg, wxID_ANY, "Co&py code");
+    auto* openBtn = new wxButton(&dlg, wxID_ANY, wxString::Format("&Open %s sign-in page", site));
+    auto* cancelBtn = new wxButton(&dlg, wxID_CANCEL, "Cancel");
+    copyBtn->Enable(false);
+    openBtn->Enable(false);
+    buttons->Add(copyBtn, 0, wxRIGHT, 8);
+    buttons->Add(openBtn, 0, wxRIGHT, 8);
+    buttons->Add(cancelBtn, 0);
+    sizer->Add(buttons, 0, wxALL, 8);
+    dlg.SetSizerAndFit(sizer);
+    dlg.CentreOnParent();
+
+    auto uri = std::make_shared<wxString>();
+    copyBtn->Bind(wxEVT_BUTTON, [code, status](wxCommandEvent&) {
+        if (wxTheClipboard->Open()) {
+            wxTheClipboard->SetData(new wxTextDataObject(code->GetValue()));
+            wxTheClipboard->Close();
+            status->SetLabel("Code copied. Open the sign-in page and paste it there.");
+        }
+    });
+    openBtn->Bind(wxEVT_BUTTON, [uri](wxCommandEvent&) {
+        if (!uri->empty()) wxLaunchDefaultBrowser(*uri);
+    });
+
+    auto alive = alive_;
+    std::thread([alive, state, provider, site, status, code, copyBtn, openBtn, uri, &dlg] {
+        // Hop to the GUI thread; drop the call if the dialog has closed.
+        auto gui = [alive, state](auto fn) {
+            wxTheApp->CallAfter([alive, state, fn] {
+                if (alive->load() && state->open) fn();
+            });
+        };
+        try {
+            auto start = loadstone::start_sign_in(kEmbeddedProfile, provider);
+            wxString userCode = FromRust(start.user_code);
+            wxString page = FromRust(start.verification_uri);
+            gui([=] {
+                *uri = page;
+                code->SetValue(userCode);
+                copyBtn->Enable(true);
+                openBtn->Enable(true);
+                status->SetLabel(wxString::Format(
+                    "Open %s, enter the code below, and approve Loadstone. This window "
+                    "closes by itself when you're done.",
+                    page));
+                status->Wrap(440);
+                code->SetFocus();
+            });
+            std::uint64_t interval = start.interval_secs > 0 ? start.interval_secs : 5;
+            auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::seconds(start.expires_in_secs > 0 ? start.expires_in_secs : 900);
+            std::string deviceCode = std::string(start.device_code);
+            while (!state->stop.load()) {
+                for (std::uint64_t ms = 0; ms < interval * 1000 && !state->stop.load(); ms += 200)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                if (state->stop.load()) return;
+                if (std::chrono::steady_clock::now() > deadline)
+                    throw std::runtime_error(
+                        "The sign-in code expired before it was entered. Please start again.");
+                auto poll = loadstone::poll_sign_in(kEmbeddedProfile, provider, "", deviceCode,
+                                                    interval);
+                std::string s = std::string(poll.state);
+                if (s == "slow_down") {
+                    interval = poll.interval_secs;
+                } else if (s == "done") {
+                    wxString label = FromRust(poll.account_label);
+                    gui([state, label, &dlg] {
+                        state->success = true;
+                        state->result = label;
+                        dlg.EndModal(wxID_OK);
+                    });
+                    return;
+                }
+            }
+        } catch (const std::exception& e) {
+            wxString msg = wxString::FromUTF8(e.what());
+            gui([state, msg, &dlg] {
+                state->result = msg;
+                dlg.EndModal(wxID_CANCEL);
+            });
+        }
+    }).detach();
+
+    dlg.ShowModal();
+    state->open = false;
+    state->stop.store(true);
+
+    if (state->success) {
+        SetStatusText(wxString::Format("Signed in as %s.", state->result));
+        wxMessageBox(wxString::Format("Signed in to %s as %s.", site, state->result),
+                     "Signed in", wxOK | wxICON_INFORMATION, this);
+        return true;
+    }
+    if (!state->result.empty())
+        wxMessageBox(state->result, "Sign-in failed", wxOK | wxICON_ERROR, this);
+    return false;
+}
+
+bool LoadstoneFrame::OfferSignIn(const wxString& error) {
+    wxString msg = error + "\n\nSign in now with an account that can see it?";
+    if (wxMessageBox(msg, "Sign in to continue", wxYES_NO | wxICON_QUESTION, this) != wxYES)
+        return false;
+    return RunSignIn();
 }
 
 bool LoadstoneFrame::ApplySetting(const wxString& settingId, const wxString& rawValue) {

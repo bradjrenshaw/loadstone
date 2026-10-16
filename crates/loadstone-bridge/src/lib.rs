@@ -7,6 +7,9 @@
 //! their message text.
 
 use anyhow::{Context as _, Result};
+
+mod accounts;
+pub use accounts::*;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -158,9 +161,98 @@ mod ffi {
         notes: Vec<String>,
     }
 
+    /// One stored sign-in, for the Loadstone settings dialog.
+    struct AccountItem {
+        id: String,
+        label: String,
+        username: String,
+        host: String,
+        /// Scheme ("github").
+        provider: String,
+        /// Site display name ("GitHub").
+        provider_name: String,
+        is_default: bool,
+        /// False when the token is missing from the credential store.
+        has_token: bool,
+    }
+
+    /// "Use this account for this repository or owner."
+    struct RuleItem {
+        pattern: String,
+        account: String,
+        /// The account's label ("" when the account no longer exists).
+        account_label: String,
+    }
+
+    /// A started browser sign-in: show `user_code`, open `verification_uri`.
+    struct SignInStart {
+        user_code: String,
+        verification_uri: String,
+        interval_secs: u64,
+        expires_in_secs: u64,
+        /// Opaque handle passed back to `poll_sign_in`.
+        device_code: String,
+    }
+
+    /// One poll of a sign-in.
+    struct SignInStatus {
+        /// "pending" (poll again), "slow_down" (use `interval_secs` from
+        /// now on), or "done" (the account is saved).
+        state: String,
+        interval_secs: u64,
+        /// done: the saved account's label.
+        account_label: String,
+    }
+
     extern "Rust" {
         /// Core library version (for the about line and smoke tests).
         fn core_version() -> String;
+
+        // ── Accounts and Loadstone settings ───────────────────────────
+        // All take the embedded profile: it picks the scope (the manager,
+        // or this standalone installer's own).
+
+        /// Stored accounts.
+        fn account_list(embedded: &str) -> Result<Vec<AccountItem>>;
+        /// Account rules.
+        fn account_rules(embedded: &str) -> Result<Vec<RuleItem>>;
+        /// Sites that support signing in, as (scheme, display name).
+        fn sign_in_providers() -> Vec<ChoiceItem>;
+        /// Begin a browser sign-in. Blocking (network) — worker thread.
+        fn start_sign_in(embedded: &str, provider: &str) -> Result<SignInStart>;
+        /// Check once whether the user finished; on "done" the account is
+        /// saved. Blocking (network) — worker thread.
+        fn poll_sign_in(
+            embedded: &str,
+            provider: &str,
+            label: &str,
+            device_code: &str,
+            interval_secs: u64,
+        ) -> Result<SignInStatus>;
+        /// Add an account from an existing token (checked with the site
+        /// first). Returns the account's label. Blocking (network).
+        fn add_token_account(
+            embedded: &str,
+            provider: &str,
+            label: &str,
+            token: &str,
+        ) -> Result<String>;
+        fn remove_account(embedded: &str, account_id: &str) -> Result<()>;
+        fn set_default_account(embedded: &str, account_id: &str) -> Result<()>;
+        fn set_account_rule(embedded: &str, pattern: &str, account_id: &str) -> Result<()>;
+        fn remove_account_rule(embedded: &str, pattern: &str) -> Result<()>;
+        /// Loadstone-wide settings shown as a generic form (structured
+        /// ones like the account list are excluded).
+        fn global_prefs(embedded: &str) -> Result<Vec<SettingItem>>;
+        fn set_global_pref(embedded: &str, key: &str, raw_value: &str) -> Result<()>;
+        /// Loadstone's settings for one mod (e.g. its download account).
+        fn mod_prefs(embedded: &str, mod_id: &str) -> Result<Vec<SettingItem>>;
+        fn set_mod_pref(embedded: &str, mod_id: &str, key: &str, raw_value: &str) -> Result<()>;
+        /// True when the most recent catalog / page / release-list /
+        /// install call failed in a way signing in might fix (an anonymous
+        /// "not found" from a site that supports accounts). Read it on the
+        /// worker thread right after the failing call.
+        fn last_error_needs_sign_in() -> bool;
 
         /// Resolved profile as JSON (smoke tests); `embedded` is the
         /// compile-time profile JSON or "null".
@@ -369,10 +461,14 @@ pub fn run_install(
         update_mode: update,
         ..Default::default()
     };
-    loadstone_core::ops::install(&opts, &mut GuiUi(ui))
+    accounts::track(loadstone_core::ops::install(&opts, &mut GuiUi(ui)))
 }
 
 pub fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntry>> {
+    accounts::track(list_mod_releases_inner(embedded, mod_id))
+}
+
+fn list_mod_releases_inner(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntry>> {
     let profile = load_profile(embedded)?;
     if profile.registries.is_empty() {
         anyhow::bail!("no registries are configured");
@@ -539,6 +635,7 @@ fn exe_dir() -> Option<std::path::PathBuf> {
 fn load_profile(embedded: &str) -> Result<Profile> {
     let profile = Profile::load(Some(embedded), exe_dir().as_deref())?;
     profile.validate()?;
+    accounts::ensure_auth(&profile);
     Ok(profile)
 }
 
@@ -671,6 +768,10 @@ fn build_resolver(
 }
 
 pub fn fetch_catalog(embedded: &str, state_dir: &str) -> Result<Catalog> {
+    accounts::track(fetch_catalog_inner(embedded, state_dir))
+}
+
+fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
     let profile = load_profile(embedded)?;
     let store = open_store(state_dir)?;
     let installed = all_installed(&store)?;
@@ -828,6 +929,10 @@ fn action_items(actions: &[loadstone_core::types::Action]) -> Vec<ActionItem> {
 }
 
 pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<ModPage> {
+    accounts::track(fetch_mod_page_inner(embedded, state_dir, mod_id))
+}
+
+fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result<ModPage> {
     let profile = load_profile(embedded)?;
     let store = open_store(state_dir)?;
     let installed = all_installed(&store)?;

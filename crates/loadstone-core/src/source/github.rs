@@ -14,11 +14,11 @@
 //! branch-tip lookups always use the API (60 requests/hour anonymously,
 //! 5,000 signed in).
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 
-use super::{ArchiveRef, Provider, ReleaseInfo, Repo};
+use super::{ArchiveRef, Provider, ReleaseInfo, Repo, SignInChallenge, SignInPoll};
 use crate::auth::Credential;
-use crate::fetch::get;
+use crate::fetch::{get, post_form};
 use crate::types::ReleaseManifest;
 
 pub struct GitHub;
@@ -241,6 +241,100 @@ impl Provider for GitHub {
             None => get(&raw_url(repo, path), &[], &mut |_| {}),
         }
     }
+
+    fn display_name(&self) -> &'static str {
+        "GitHub"
+    }
+
+    fn host(&self) -> &'static str {
+        "github.com"
+    }
+
+    fn start_sign_in(&self) -> Result<SignInChallenge> {
+        let client_id = client_id();
+        let body = post_form(
+            "https://github.com/login/device/code",
+            &[("Accept", "application/json")],
+            &[("client_id", &client_id), ("scope", SIGN_IN_SCOPE)],
+        )?;
+        let doc = oauth_json(&body)?;
+        let text = |key: &str| doc.get(key).and_then(serde_json::Value::as_str).map(str::to_string);
+        let num = |key: &str, fallback: u64| {
+            doc.get(key).and_then(serde_json::Value::as_u64).unwrap_or(fallback)
+        };
+        Ok(SignInChallenge {
+            user_code: text("user_code").context("GitHub sent no sign-in code")?,
+            verification_uri: text("verification_uri")
+                .unwrap_or_else(|| "https://github.com/login/device".to_string()),
+            interval_secs: num("interval", 5),
+            expires_in_secs: num("expires_in", 900),
+            device_code: text("device_code").context("GitHub sent no device code")?,
+        })
+    }
+
+    fn poll_sign_in(&self, challenge: &SignInChallenge) -> Result<SignInPoll> {
+        let client_id = client_id();
+        let body = post_form(
+            "https://github.com/login/oauth/access_token",
+            &[("Accept", "application/json")],
+            &[
+                ("client_id", &client_id),
+                ("device_code", &challenge.device_code),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ],
+        )?;
+        let doc = oauth_json(&body)?;
+        if let Some(token) = doc.get("access_token").and_then(serde_json::Value::as_str) {
+            return Ok(SignInPoll::Done(token.to_string()));
+        }
+        let error = doc.get("error").and_then(serde_json::Value::as_str).unwrap_or("");
+        match error {
+            "authorization_pending" => Ok(SignInPoll::Pending),
+            "slow_down" => Ok(SignInPoll::SlowDown(
+                doc.get("interval")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(challenge.interval_secs + 5),
+            )),
+            "expired_token" => bail!("The sign-in code expired before it was entered. Please start again."),
+            "access_denied" => bail!("Sign-in was cancelled on GitHub."),
+            _ => bail!(
+                "GitHub refused the sign-in: {}",
+                doc.get("error_description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(if error.is_empty() { "no details given" } else { error })
+            ),
+        }
+    }
+
+    fn account_name(&self, token: &str) -> Result<String> {
+        let cred = Credential { token: token.to_string(), origin: String::new(), explicit: true };
+        let doc = api_json(&format!("{API}/user"), Some(&cred))
+            .context("GitHub didn't accept the token")?;
+        doc.get("login")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .context("GitHub's account details had no login name")
+    }
+}
+
+/// Loadstone's registered OAuth App. Not a secret (device flow uses no
+/// client secret); `LOADSTONE_GITHUB_CLIENT_ID` overrides it for testing a
+/// different app registration.
+const CLIENT_ID: &str = "Ov23li8u3zYIFI4L3hEs";
+
+/// `repo` is the only OAuth App scope that can read private repositories.
+/// Loadstone only ever reads with it.
+const SIGN_IN_SCOPE: &str = "repo";
+
+fn client_id() -> String {
+    std::env::var("LOADSTONE_GITHUB_CLIENT_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| CLIENT_ID.to_string())
+}
+
+fn oauth_json(body: &[u8]) -> Result<serde_json::Value> {
+    serde_json::from_slice(body).context("GitHub's sign-in response wasn't JSON")
 }
 
 #[cfg(test)]

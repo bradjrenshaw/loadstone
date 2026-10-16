@@ -149,6 +149,96 @@ pub fn add_account(ctx: &AuthContext, mut account: Account, token: &str) -> Resu
     Ok(account)
 }
 
+/// Store a signed-in token for `provider`: looks up who it belongs to,
+/// then either refreshes the existing account for that user or adds a new
+/// one (labelled `label`, or the user name when empty).
+pub fn save_signed_in(ctx: &AuthContext, provider: &str, label: &str, token: &str) -> Result<Account> {
+    let p = crate::source::provider(provider)
+        .with_context(|| format!("\"{provider}\" is not a known site"))?;
+    let username = p.account_name(token)?;
+    let existing = accounts(&ctx.prefs)?.into_iter().find(|a| {
+        a.provider == provider && a.host == p.host() && a.username.eq_ignore_ascii_case(&username)
+    });
+    if let Some(account) = existing {
+        ctx.secrets.set(&account.id, token)?;
+        return Ok(account);
+    }
+    let taken: Vec<String> = accounts(&ctx.prefs)?.into_iter().map(|a| a.id).collect();
+    let base = format!("{provider}-{}", username.to_ascii_lowercase());
+    let id = std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base}-{n}")))
+        .find(|id| !taken.contains(id))
+        .expect("an unused id exists");
+    let label = if label.trim().is_empty() { username.clone() } else { label.trim().to_string() };
+    add_account(
+        ctx,
+        Account { id, provider: provider.to_string(), host: p.host().to_string(), label, username, default: false },
+        token,
+    )
+}
+
+/// Add an account from a token the user already has (a personal access
+/// token, or `gh auth token`). The token is checked with the provider first.
+pub fn add_token_account(ctx: &AuthContext, provider: &str, label: &str, token: &str) -> Result<Account> {
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("no token given");
+    }
+    save_signed_in(ctx, provider, label, token)
+}
+
+/// Run a full browser sign-in: start it, hand the challenge to
+/// `show_challenge` (to display the code and open the page), then poll
+/// until the user finishes, the code expires, or `cancelled()` returns
+/// true. Blocking — run it on a worker thread.
+pub fn sign_in(
+    ctx: &AuthContext,
+    provider: &str,
+    label: &str,
+    show_challenge: impl FnOnce(&crate::source::SignInChallenge),
+    cancelled: impl Fn() -> bool,
+) -> Result<Account> {
+    use crate::source::SignInPoll;
+    let p = crate::source::provider(provider)
+        .with_context(|| format!("\"{provider}\" is not a known site"))?;
+    let challenge = p.start_sign_in()?;
+    show_challenge(&challenge);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(challenge.expires_in_secs);
+    let mut interval = challenge.interval_secs.max(1);
+    loop {
+        // Sleep in short steps so cancelling is prompt.
+        let wake = std::time::Instant::now() + std::time::Duration::from_secs(interval);
+        while std::time::Instant::now() < wake {
+            if cancelled() {
+                bail!("Sign-in cancelled.");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("The sign-in code expired before it was entered. Please start again.");
+        }
+        match p.poll_sign_in(&challenge)? {
+            SignInPoll::Pending => {}
+            SignInPoll::SlowDown(secs) => interval = secs.max(interval + 1),
+            SignInPoll::Done(token) => return save_signed_in(ctx, provider, label, &token),
+        }
+    }
+}
+
+/// Set a mod's download account (`None` = automatic).
+pub fn set_mod_account(ctx: &AuthContext, mod_id: &str, account_id: Option<&str>) -> Result<()> {
+    let scope = Scope::Mod(mod_id.to_string());
+    match account_id {
+        Some(id) => {
+            if !accounts(&ctx.prefs)?.iter().any(|a| a.id == id) {
+                bail!("no account with id \"{id}\"");
+            }
+            ctx.prefs.set(&scope, PREF_MOD_ACCOUNT, Value::from(id))
+        }
+        None => ctx.prefs.unset(&scope, PREF_MOD_ACCOUNT),
+    }
+}
+
 /// Forget an account: its token, any rules using it, and its default
 /// status (the provider's next account becomes the default).
 pub fn remove_account(ctx: &AuthContext, id: &str) -> Result<()> {

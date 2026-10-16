@@ -39,6 +39,23 @@ fn client() -> Result<reqwest::blocking::Client> {
         .context("failed to create HTTP client")
 }
 
+/// POST a URL-encoded form and return the response body. Unlike [`get`],
+/// a non-success status still returns the body when there is one, because
+/// OAuth endpoints report errors as JSON (`{"error": ...}`).
+pub fn post_form(url: &str, headers: &[(&str, &str)], form: &[(&str, &str)]) -> Result<Vec<u8>> {
+    let mut request = client()?.post(url).form(form);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let resp = request.send().with_context(|| format!("request failed: {url}"))?;
+    let status = resp.status();
+    let body = resp.bytes().context("read error")?.to_vec();
+    if !status.is_success() && body.is_empty() {
+        return Err(HttpError { url: url.to_string(), status: status.as_u16() }.into());
+    }
+    Ok(body)
+}
+
 /// Download a URL into memory, reporting percentage progress when the size
 /// is known.
 pub fn download(url: &str, progress: impl FnMut(u32)) -> Result<Vec<u8>> {

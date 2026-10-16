@@ -90,9 +90,74 @@ pub trait Provider: Sync {
         cred: Option<&Credential>,
         path: &str,
     ) -> Result<Vec<u8>>;
+
+    // ── Signing in ────────────────────────────────────────────────────
+    // Providers that don't support accounts keep these defaults.
+
+    /// Display name of the site, for sign-in UI ("GitHub").
+    fn display_name(&self) -> &'static str {
+        self.scheme()
+    }
+    /// The host accounts belong to ("github.com").
+    fn host(&self) -> &'static str {
+        ""
+    }
+    /// Begin a browser sign-in: the user visits `verification_uri` and
+    /// enters `user_code`.
+    fn start_sign_in(&self) -> Result<SignInChallenge> {
+        anyhow::bail!("{} doesn't support signing in", self.display_name())
+    }
+    /// Check once whether the user has finished signing in.
+    fn poll_sign_in(&self, _challenge: &SignInChallenge) -> Result<SignInPoll> {
+        anyhow::bail!("{} doesn't support signing in", self.display_name())
+    }
+    /// The account name a token belongs to; fails if the token is refused.
+    fn account_name(&self, _token: &str) -> Result<String> {
+        anyhow::bail!("{} doesn't support signing in", self.display_name())
+    }
+}
+
+/// An in-progress browser sign-in (OAuth device flow).
+#[derive(Debug, Clone)]
+pub struct SignInChallenge {
+    /// The short code the user types on the sign-in page.
+    pub user_code: String,
+    /// The page to open.
+    pub verification_uri: String,
+    /// Seconds to wait between polls.
+    pub interval_secs: u64,
+    /// Seconds until the code expires.
+    pub expires_in_secs: u64,
+    /// The provider's opaque handle for polling.
+    pub device_code: String,
+}
+
+/// One poll of an in-progress sign-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignInPoll {
+    /// Not finished yet; poll again after the interval.
+    Pending,
+    /// Polling too fast: wait this many seconds between polls from now on.
+    SlowDown(u64),
+    /// Finished: the access token.
+    Done(String),
 }
 
 static PROVIDERS: &[&dyn Provider] = &[&github::GitHub];
+
+/// The provider for a scheme ("github").
+pub fn provider(scheme: &str) -> Option<&'static dyn Provider> {
+    PROVIDERS.iter().copied().find(|p| p.scheme() == scheme)
+}
+
+/// Every provider that supports signing in, as (scheme, display name).
+pub fn sign_in_providers() -> Vec<(&'static str, &'static str)> {
+    PROVIDERS
+        .iter()
+        .filter(|p| !p.host().is_empty())
+        .map(|p| (p.scheme(), p.display_name()))
+        .collect()
+}
 
 fn provider_for(source: &str) -> Option<(&'static dyn Provider, &str)> {
     let (scheme, location) = source.split_once(':')?;

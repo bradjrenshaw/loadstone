@@ -19,6 +19,7 @@ pub mod prefs;
 pub mod profile;
 pub mod registry;
 pub mod release;
+pub mod secrets;
 pub mod selfupdate;
 pub mod settings;
 pub mod source;

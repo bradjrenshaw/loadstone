@@ -17,6 +17,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 reqwest = { version = "0.12", features = ["blocking"] }
+# OS credential store for account tokens (Windows Credential Manager, macOS Keychain).
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
 
 [dev-dependencies]
 tempfile.workspace = true

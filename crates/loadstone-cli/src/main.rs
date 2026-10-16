@@ -14,6 +14,7 @@ use loadstone_core::release::{build_release_manifest, resolve_artifacts, Release
 use loadstone_core::types::{GameManifest, ProjectManifest};
 use loadstone_core::validate::{validate_value, Severity, ValidationContext};
 
+mod auth_cmd;
 mod manage;
 
 /// Compile-time distribution profile ("null" unless the binary was built
@@ -27,6 +28,10 @@ fn load_profile() -> Result<loadstone_core::profile::Profile> {
     let profile =
         loadstone_core::profile::Profile::load(Some(EMBEDDED_PROFILE), exe_dir.as_deref())?;
     profile.validate()?;
+    // Accounts and their tokens, so downloads can reach private
+    // repositories. Best effort: without it only GH_TOKEN-style
+    // environment tokens apply.
+    let _ = loadstone_core::secrets::init_for_profile(&profile);
     Ok(profile)
 }
 
@@ -223,6 +228,11 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Manage accounts used to download from private repositories.
+    Auth {
+        #[command(subcommand)]
+        command: auth_cmd::AuthCommand,
+    },
     /// List installed packages per game.
     List {
         /// Override the installed-state directory (mainly for testing).
@@ -306,6 +316,7 @@ fn main() -> ExitCode {
             manage::cmd_uninstall(&id, &game, game_dir, state_dir, purge_choice, yes).map(|()| true)
         }
         Command::List { state_dir } => manage::cmd_list(state_dir).map(|()| true),
+        Command::Auth { command } => auth_cmd::run(command).map(|()| true),
     };
     match result {
         Ok(ok) => {

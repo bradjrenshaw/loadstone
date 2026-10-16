@@ -142,7 +142,8 @@ release's own layout. Clients installing from the release channel use
 `github:owner/repo` is fetched from
 `https://github.com/{owner}/{repo}/releases/latest/download/loadstone-release.json` — a
 plain HTTP redirect, no API token, no rate limit. Older versions and branch
-tips use the GitHub API.
+tips use the GitHub API. Private repositories need an account (§15); with
+one, every request for that source goes through the API instead.
 
 **Identity binding.** A package's id is bound to its source repo by the link
 (or by the `source` field of a registry-hosted package file). Clients MUST
@@ -750,7 +751,87 @@ Clients SHOULD render each mod as one page derived entirely from manifest data:
 
 ---
 
-## 15. Security model
+## 15. Accounts and private repositories
+
+Sources whose host supports it (today: `github:`) can be reached with an
+**account**: a stored sign-in whose token is presented on requests. This is
+what makes a mod in a private repository installable — by anyone the
+repository's owner has given access.
+
+### 15.1 Sources and providers
+
+A source string is `<scheme>:<location>`. Each scheme has a provider in the
+client that knows how to fetch release manifests and assets, release lists,
+branch archives, and single files from the default branch, with or without a
+credential. Anything without a known scheme (including Windows paths such as
+`C:\mods`) is a local directory. Only `github:owner/repo` exists today.
+
+GitHub specifics: anonymous requests keep the plain, unrate-limited endpoints
+(§2.2). With a token, requests use the REST API on `api.github.com` (release
+lookup by tag or latest, then the asset download with `Accept:
+application/octet-stream`; `/zipball` for archives; `/contents` for single
+files). The token is sent only to `api.github.com`; it is never forwarded
+when an asset download redirects to storage.
+
+### 15.2 Loadstone settings
+
+Loadstone keeps its own preferences, separate from a mod's settings form
+(§11), in two scopes:
+
+- **Global** — Loadstone-wide. In a standalone single-mod installer, "global"
+  means that installer: its settings and accounts are its own.
+- **Per mod** — Loadstone's preferences about one mod, keyed by package id.
+
+Each preference is declared once (type, default, label, and whether it is
+global, per mod, or global with a per-mod override). A value for a mod is
+looked up mod, then global, then default. Storage is under the local data
+directory: `Loadstone/settings.json` and `Loadstone/mods/<id>/settings.json`
+for the manager, the same layout under `Loadstone/installers/<mod-id>/` for a
+standalone installer. Unknown keys are preserved; a value of the wrong type
+is ignored.
+
+Current preferences: `accounts` and `accountRules` (global, edited through
+the accounts UI), `tryOtherAccounts` (global, default on), and
+`downloadAccount` (per mod, default automatic).
+
+### 15.3 Accounts
+
+An account records its provider, host, a user-chosen label, the user name
+the token belongs to, and whether it is that provider's default. Tokens are
+never written to settings files: they live in the OS credential store
+(Windows Credential Manager, macOS Keychain) under the service `Loadstone`,
+user `manager/<account-id>` or `installer/<mod-id>/<account-id>`.
+
+Accounts are added by browser sign-in (OAuth device flow: Loadstone shows a
+short code, the user enters it on the site and approves) or from an existing
+token, which is checked with the site first. Signing in again as the same
+user refreshes that account's token. On GitHub, Loadstone's OAuth App asks
+for the `repo` scope, the only OAuth scope that can read private
+repositories. It grants read **and write** access to the user's
+repositories; Loadstone only ever reads with it. Removing an account deletes
+its token locally; revoking the app's access is done in the site's own
+settings.
+
+An **account rule** pairs a pattern (a source such as `github:owner/repo`, or
+an owner wildcard such as `github:owner/*`) with an account.
+
+### 15.4 Choosing credentials for a request
+
+For each request, the client tries credentials in this order:
+
+1. A token from the environment (`LOADSTONE_GITHUB_TOKEN`, `GH_TOKEN`,
+   `GITHUB_TOKEN`), for CI and scripts. Explicit: nothing else is tried.
+2. The mod's `downloadAccount`, when set. Explicit.
+3. The most specific matching account rule (a repository beats an owner).
+4. The provider's default account.
+5. No credentials.
+
+When a choice from steps 3–5 is refused (HTTP 401, 403, or 404) and
+`tryOtherAccounts` is on, the provider's other accounts are tried next. An
+anonymous "not found" is reported as possibly private, with a hint to sign
+in; the GUI offers to.
+
+## 16. Security model
 
 - **No package code executes.** The step vocabulary is the entire capability
   surface. New capabilities require a manager release, which is code-signed once
@@ -764,8 +845,11 @@ Clients SHOULD render each mod as one page derived entirely from manifest data:
   anyone can add another registry by URL and owns that trust decision. References
   resolve only through the discovery chain (§2.1), never across unrelated
   registries.
+- **Tokens stay in the OS credential store** and are sent only to the API
+  host of the provider they belong to (§15). They never appear in settings
+  files, logs, or release manifests.
 
-## 16. Versioning of this spec
+## 17. Versioning of this spec
 
 `manifestVersion` is a single integer. Clients MUST refuse manifests with a higher
 version than they understand (prompting for a manager update) and SHOULD accept all

@@ -145,6 +145,34 @@ loadstone uninstall blindfold --game balatro
 - `--user-data`, `--state-dir`, `--yes`, and `--dir` support
   sandboxed/automated runs.
 
+### Private repositories (accounts)
+
+Mods in private repositories install with an account that can see them
+(SPEC §15). Accounts are global in the manager and separate per standalone
+installer; tokens live in the Windows Credential Manager.
+
+```
+loadstone auth login                       # browser sign-in: shows a code to enter on GitHub
+gh auth token | loadstone auth add-token   # or reuse an existing token
+loadstone auth list
+loadstone auth rule-set "github:someone/*" github-myname   # use this account for an owner
+loadstone auth use some-mod github-myname  # this mod always downloads with this account
+loadstone auth which github:someone/private-mod --mod some-mod   # what would be tried
+loadstone auth remove github-myname
+```
+
+For CI or one-off runs, `GH_TOKEN` (or `LOADSTONE_GITHUB_TOKEN` /
+`GITHUB_TOKEN`) is used ahead of stored accounts. In the GUI, the same is
+under Tools > Loadstone settings (Ctrl+,): accounts, account rules, and a
+"try my other accounts" option; a mod's Settings dialog has its download
+account. Anything that fails because a repository looks private offers to
+sign in and retry.
+
+Signing in uses Loadstone's GitHub OAuth App with the `repo` scope, the only
+scope that can read private repositories (it also permits writes, which
+Loadstone never does). Revoke it any time in GitHub's Settings >
+Applications.
+
 ## Distribution profiles: one binary, manager or standalone installer
 
 Some users want a mod manager; some want a per-mod standalone installer. The

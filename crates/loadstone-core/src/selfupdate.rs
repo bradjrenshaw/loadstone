@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::fetch;
 use crate::release::{normalize_version, sha256_bytes};
 
 /// A newer build offered by the update source.
@@ -28,7 +27,7 @@ pub struct UpdateInfo {
 /// no releases, no manifest, no `installer` block, unparsable versions —
 /// answers `None`: a launch-time check must never nag or error.
 pub fn check(source: &str, current_version: &str) -> Option<UpdateInfo> {
-    let manifest = fetch::fetch_latest_release_manifest(source).ok()?;
+    let manifest = crate::source::release_manifest(source, None, None).ok()?;
     let installer = manifest.installer?;
     let offered = normalize_version(&installer.loadstone_version).ok()?;
     let current = normalize_version(current_version).ok()?;
@@ -49,8 +48,7 @@ pub fn check(source: &str, current_version: &str) -> Option<UpdateInfo> {
 /// running executable. Returns the executable's path for the caller to
 /// relaunch. A failed swap restores the original.
 pub fn apply(info: &UpdateInfo, progress: impl FnMut(u32)) -> Result<PathBuf> {
-    let url = fetch::latest_asset_url(&info.source, &info.file)?;
-    let bytes = fetch::download(&url, progress)?;
+    let bytes = crate::source::release_asset(&info.source, None, None, &info.file, progress)?;
     let actual = sha256_bytes(&bytes);
     if !actual.eq_ignore_ascii_case(&info.sha256) {
         bail!(

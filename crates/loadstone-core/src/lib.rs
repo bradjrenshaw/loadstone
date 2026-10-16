@@ -7,6 +7,7 @@
 //! handling (parsing, extraction, verification) belongs here, not in the GUI.
 
 pub mod archive;
+pub mod auth;
 pub mod context;
 pub mod detect;
 pub mod engine;
@@ -14,11 +15,13 @@ pub mod fetch;
 pub mod jsonedit;
 pub mod macho;
 pub mod ops;
+pub mod prefs;
 pub mod profile;
 pub mod registry;
 pub mod release;
 pub mod selfupdate;
 pub mod settings;
+pub mod source;
 pub mod tokens;
 pub mod track;
 pub mod types;

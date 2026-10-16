@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 
-use crate::fetch;
+use crate::source;
 use crate::types::{GameManifest, Kind, LinkEntry, ProjectManifest};
 
 /// One directory of package files plus where it came from.
@@ -60,10 +60,10 @@ fn is_plain_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
-/// The static per-file URL: raw.githubusercontent.com serves the default
-/// branch under HEAD with no API involved and no rate limit.
-fn raw_package_url(owner: &str, repo: &str, id: &str) -> String {
-    format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/loadstone-packages/{id}.json")
+/// Repo-relative path of a package file named by id (the documented
+/// convention), fetched from the default branch on the allowlist fast path.
+fn package_path(id: &str) -> String {
+    format!("loadstone-packages/{id}.json")
 }
 
 /// The real fetcher: local paths pass through; `github:` sources download a
@@ -89,16 +89,19 @@ impl HttpFetcher {
 impl RegistryFetcher for HttpFetcher {
     fn fetch(&mut self, source: &str) -> Result<PathBuf> {
         // Local directory registries: use as-is.
-        if !source.starts_with("github:") {
+        if !source::is_remote(source) {
             let dir = PathBuf::from(source);
             if dir.is_dir() {
                 return Ok(dir);
             }
-            bail!("registry \"{source}\" is neither github:owner/repo nor an existing directory");
+            bail!(
+                "registry \"{source}\" is neither {} nor an existing directory",
+                source::formats()
+            );
         }
 
-        let (owner, repo) = fetch::parse_github_source(source)?;
-        let cache = self.cache_root.join(format!("{owner}__{repo}"));
+        let (provider, repo) = source::parse(source)?;
+        let cache = self.cache_root.join(provider.cache_key(&repo));
 
         match fetch_packages_zipball(source) {
             Ok(files) => {
@@ -136,13 +139,13 @@ impl RegistryFetcher for HttpFetcher {
     /// missing or unparsable falls back to the zipball path, so repos
     /// that ignore the naming convention still resolve.
     fn fetch_packages(&mut self, source: &str, wanted: &[String]) -> Result<PathBuf> {
-        if !source.starts_with("github:")
+        if !source::is_remote(source)
             || wanted.is_empty()
             || !wanted.iter().all(|id| is_plain_id(id))
         {
             return self.fetch(source);
         }
-        let (owner, repo) = fetch::parse_github_source(source)?;
+        let (provider, repo) = source::parse(source)?;
 
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = Default::default();
@@ -155,8 +158,7 @@ impl RegistryFetcher for HttpFetcher {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            let url = raw_package_url(&owner, &repo, &id);
-            let bytes = match fetch::download(&url, |_| {}) {
+            let bytes = match source::default_branch_file(source, &package_path(&id)) {
                 Ok(b) => b,
                 Err(_) => {
                     if required {
@@ -196,7 +198,7 @@ impl RegistryFetcher for HttpFetcher {
             return self.fetch(source);
         }
 
-        let cache = self.cache_root.join(format!("{owner}__{repo}"));
+        let cache = self.cache_root.join(provider.cache_key(&repo));
         if cache.exists() {
             std::fs::remove_dir_all(&cache)?;
         }
@@ -208,17 +210,18 @@ impl RegistryFetcher for HttpFetcher {
     }
 }
 
-/// Download the repo zipball and pull out `<top>/loadstone-packages/*.json`.
-/// Tries HEAD (default branch), then main, then master — the plain archive
-/// endpoints are not rate-limited, unlike the API's zipball endpoint.
-fn fetch_packages_zipball(source: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    let (owner, repo) = fetch::parse_github_source(source)?;
+/// Download a repo archive and pull out `<top>/loadstone-packages/*.json`.
+/// Tries the default branch, then main, then master.
+fn fetch_packages_zipball(src: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let mut last_err = None;
-    for git_ref in ["HEAD", "refs/heads/main", "refs/heads/master"] {
-        let url = format!("https://github.com/{owner}/{repo}/archive/{git_ref}.zip");
+    for rev in [
+        source::ArchiveRef::DefaultBranch,
+        source::ArchiveRef::Branch("main"),
+        source::ArchiveRef::Branch("master"),
+    ] {
         // GitHub sometimes answers a bad ref with an HTML page and HTTP 200
         // instead of a 404, so a non-zip payload also advances the fallback.
-        match fetch::download(&url, |_| {}).and_then(|bytes| extract_packages(&bytes)) {
+        match source::archive(src, None, rev, |_| {}).and_then(|bytes| extract_packages(&bytes)) {
             Ok(files) => return Ok(files),
             Err(e) => last_err = Some(e),
         }
@@ -298,7 +301,7 @@ impl<'a> Resolver<'a> {
         let mut resolver = Resolver { scopes: Vec::new(), fetcher };
         for source in sources {
             let dir = resolver.fetcher.fetch(source)?;
-            let src = source.starts_with("github:").then(|| source.clone());
+            let src = source::is_remote(source).then(|| source.clone());
             scopes.push(Scope { dir, source: src });
         }
         resolver.scopes = scopes;
@@ -564,10 +567,7 @@ mod tests {
         assert!(!is_plain_id("a/b"));
         assert!(!is_plain_id("..") );
         assert!(!is_plain_id("a..b"));
-        assert_eq!(
-            raw_package_url("me", "Repo", "blindfold"),
-            "https://raw.githubusercontent.com/me/Repo/HEAD/loadstone-packages/blindfold.json"
-        );
+        assert_eq!(package_path("blindfold"), "loadstone-packages/blindfold.json");
     }
 
     #[test]

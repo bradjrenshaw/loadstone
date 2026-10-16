@@ -383,7 +383,7 @@ pub fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntr
     let source = resolved
         .release_source
         .with_context(|| format!("no source repo is known for \"{mod_id}\""))?;
-    let releases = loadstone_core::fetch::list_releases(&source)?;
+    let releases = loadstone_core::source::list_releases(&source, Some(mod_id))?;
     Ok(releases
         .into_iter()
         .map(|r| {
@@ -894,7 +894,7 @@ pub fn fetch_mod_page(embedded: &str, state_dir: &str, mod_id: &str) -> Result<M
     if let Some(r) = &resolved {
         if !all_dev {
             if let Some(source) = &r.release_source {
-                match loadstone_core::fetch::fetch_latest_release_manifest(source) {
+                match loadstone_core::source::release_manifest(source, Some(mod_id), None) {
                     Ok(release) => {
                         latest_version =
                             loadstone_core::release::normalize_version(&release.version)

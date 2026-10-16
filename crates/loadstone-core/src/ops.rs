@@ -12,9 +12,9 @@ use anyhow::{bail, Context as _, Result};
 use crate::context::InstallContext;
 use crate::detect;
 use crate::engine::{self, EngineUi, InstallPlan, NamedArtifact};
-use crate::fetch;
 use crate::profile::Profile;
 use crate::registry::{HttpFetcher, ResolvedPackage, Resolver};
+use crate::source;
 use crate::track::StateStore;
 use crate::types::{Kind, ReleaseManifest};
 
@@ -247,7 +247,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         if manifest.source_install.is_empty() {
             bail!("\"{}\" has no sourceInstall steps; the {} channel cannot install", id, opts.channel);
         }
-        let sha = match fetch::branch_tip_sha(&source, &branch) {
+        let sha = match source::branch_tip(&source, Some(id.as_str()), &branch) {
             Ok(sha) => sha,
             Err(_) => "unknown".to_string(),
         };
@@ -269,8 +269,9 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         )) {
             return Ok("Install cancelled.".to_string());
         }
-        let url = fetch::branch_zipball_url(&source, &branch)?;
-        artifact = fetch::download(&url, |p| ui.progress(p))?;
+        artifact = source::archive(&source, Some(id.as_str()), source::ArchiveRef::Branch(&branch), |p| {
+            ui.progress(p)
+        })?;
         expected_sha = None;
         install_steps = manifest.source_install.clone();
         uninstall_steps = manifest.uninstall.clone();
@@ -290,11 +291,11 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 match &opts.tag {
                     Some(tag) => {
                         ui.log(&format!("Fetching release {tag} information from {source}..."));
-                        fetch::fetch_release_manifest_for_tag(&source, tag)?
+                        source::release_manifest(&source, Some(id.as_str()), Some(tag))?
                     }
                     None => {
                         ui.log(&format!("Fetching latest release information from {source}..."));
-                        fetch::fetch_latest_release_manifest(&source)?
+                        source::release_manifest(&source, Some(id.as_str()), None)?
                     }
                 }
             }
@@ -348,12 +349,10 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 }
                 None => {
                     let source = release_source.clone().unwrap();
-                    let url = match &opts.tag {
-                        Some(tag) => fetch::tagged_asset_url(&source, tag, file)?,
-                        None => fetch::latest_asset_url(&source, file)?,
-                    };
                     ui.log(&format!("Downloading {file}..."));
-                    fetch::download(&url, |p| ui.progress(p))
+                    source::release_asset(&source, Some(id.as_str()), opts.tag.as_deref(), file, |p| {
+                        ui.progress(p)
+                    })
                 }
             }
         };
@@ -479,16 +478,18 @@ fn install_dependency(
         .tag
         .clone()
         .unwrap_or_else(|| format!("v{}", pinned.version));
-    let url = fetch::tagged_asset_url(source, &tag, &entry.file)?;
     ui.log(&format!("Installing dependency {} {} ({})...", tool.name, pinned.version, entry.file));
-    let artifact = fetch::download(&url, |p| ui.progress(p))?;
+    let artifact = source::release_asset(source, Some(dep_id), Some(&tag), &entry.file, |p| {
+        ui.progress(p)
+    })?;
     let mut extra_artifacts = Vec::new();
     for extra in extras {
-        let url = fetch::tagged_asset_url(source, &tag, &extra.file)?;
         ui.log(&format!("Downloading {}...", extra.file));
         extra_artifacts.push(NamedArtifact {
             id: extra.id.clone().unwrap_or_default(),
-            data: fetch::download(&url, |p| ui.progress(p))?,
+            data: source::release_asset(source, Some(dep_id), Some(&tag), &extra.file, |p| {
+                ui.progress(p)
+            })?,
             expected_sha256: extra.sha256.clone(),
         });
     }

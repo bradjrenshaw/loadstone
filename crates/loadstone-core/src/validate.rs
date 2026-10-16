@@ -943,17 +943,13 @@ fn check_artifact_refs(
 // Link files
 
 fn check_source(source: &str, location: &str, diags: &mut Vec<Diagnostic>) {
-    let valid = source
-        .strip_prefix("github:")
-        .map(|rest| {
-            let parts: Vec<&str> = rest.split('/').collect();
-            parts.len() == 2 && parts.iter().all(|p| !p.is_empty())
-        })
-        .unwrap_or(false);
-    if !valid {
+    if !crate::source::is_valid(source) {
         diags.push(Diagnostic::error(
             location,
-            format!("\"{source}\" is not a valid source (expected github:owner/repo)"),
+            format!(
+                "\"{source}\" is not a valid source (expected {})",
+                crate::source::formats()
+            ),
         ));
     }
 }

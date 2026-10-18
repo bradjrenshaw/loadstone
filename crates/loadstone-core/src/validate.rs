@@ -454,7 +454,7 @@ fn validate_steps(
             validate_condition(cond, &format!("{loc}/when"), game_paths, diags);
         }
         if let Some(req) = &step.common().requires {
-            check_path(&req.file_exists, &format!("{loc}/requires/fileExists"), &scope, diags);
+            validate_condition_in(&req.condition, &format!("{loc}/requires"), &scope, diags);
             if req.retryable && req.on_missing.is_none() {
                 diags.push(Diagnostic::warning(
                     format!("{loc}/requires"),
@@ -583,7 +583,7 @@ fn validate_steps(
                 }
                 for (c, check) in checks.iter().enumerate() {
                     let cloc = format!("{loc}/checks/{c}");
-                    check_path(&check.file_exists, &format!("{cloc}/fileExists"), &scope, diags);
+                    validate_condition_in(&check.condition, &cloc, &scope, diags);
                     if check.message.trim().is_empty() {
                         diags.push(Diagnostic::error(
                             format!("{cloc}/message"),
@@ -602,10 +602,25 @@ fn validate_condition(
     game_paths: Option<&BTreeSet<String>>,
     diags: &mut Vec<Diagnostic>,
 ) {
+    let scope = TokenScope { game_paths, vars: &BTreeSet::new(), allow_namespaced: true };
+    validate_condition_in(cond, location, &scope, diags);
+}
+
+/// `validate_condition` with an explicit token scope: a step's `requires`
+/// may use `${var.*}` bound by earlier pick-directory steps.
+fn validate_condition_in(
+    cond: &Condition,
+    location: &str,
+    scope: &TokenScope,
+    diags: &mut Vec<Diagnostic>,
+) {
     if cond.distribution.is_none()
         && cond.platform.is_none()
         && cond.arch.is_none()
         && cond.file_exists.is_none()
+        && cond.process_running.is_none()
+        && cond.steam_launch_options.is_none()
+        && cond.not.is_none()
     {
         diags.push(Diagnostic::warning(location, "empty condition always matches"));
     }
@@ -640,8 +655,26 @@ fn validate_condition(
         }
     }
     if let Some(path) = &cond.file_exists {
-        let scope = TokenScope { game_paths, vars: &BTreeSet::new(), allow_namespaced: true };
-        check_path(path, &format!("{location}/fileExists"), &scope, diags);
+        check_path(path, &format!("{location}/fileExists"), scope, diags);
+    }
+    if let Some(names) = &cond.process_running {
+        if names.iter().next().is_none() || names.iter().any(|n| n.trim().is_empty()) {
+            diags.push(Diagnostic::error(
+                format!("{location}/processRunning"),
+                "needs one or more non-empty process names",
+            ));
+        }
+    }
+    if let Some(text) = &cond.steam_launch_options {
+        if text.trim().is_empty() {
+            diags.push(Diagnostic::error(
+                format!("{location}/steamLaunchOptions"),
+                "must not be empty",
+            ));
+        }
+    }
+    if let Some(inner) = &cond.not {
+        validate_condition_in(inner, &format!("{location}/not"), scope, diags);
     }
 }
 
@@ -906,10 +939,16 @@ fn validate_launch(
 ) {
     validate_steps(steps, location, game_paths, diags);
     for (i, step) in steps.iter().enumerate() {
-        if !matches!(step, Step::Run { .. } | Step::OpenUrl { .. } | Step::Notice { .. }) {
+        if !matches!(
+            step,
+            Step::Run { .. } | Step::OpenUrl { .. } | Step::Notice { .. } | Step::Expect { .. }
+        ) {
             diags.push(Diagnostic::error(
                 format!("{location}/{i}"),
-                format!("\"{}\" is not a launch step (use run, open-url, or notice)", step.name()),
+                format!(
+                    "\"{}\" is not a launch step (use run, open-url, notice, or expect)",
+                    step.name()
+                ),
             ));
         }
     }

@@ -592,9 +592,11 @@ pub fn foreign_install_present(
                 continue;
             }
         }
-        for check in checks {
-            match ctx.glob_exists(&check.file_exists) {
-                Ok(Some(_)) => any = true,
+        // Only file checks are evidence of an install; a check on, say, a
+        // running process says nothing about what is on disk.
+        for check in checks.iter().filter(|c| c.condition.file_exists.is_some()) {
+            match ctx.condition_matches(&check.condition) {
+                Ok(true) => any = true,
                 _ => return false,
             }
         }

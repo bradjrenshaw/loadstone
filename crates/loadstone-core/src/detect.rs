@@ -164,6 +164,171 @@ pub fn parse_vdf_library_paths(content: &str) -> Vec<PathBuf> {
     out
 }
 
+/// The Launch Options the most recent Steam user set for `app_id`, if Steam,
+/// that user, and an entry for the game can be found. Backs the
+/// `steamLaunchOptions` condition. Steam saves this file itself, so a change
+/// made while Steam runs may not be on disk yet.
+pub fn steam_launch_options(app_id: &str) -> Option<String> {
+    steam_roots().into_iter().find_map(|root| {
+        let account = most_recent_account(&root)?;
+        let path = root.join("userdata").join(account).join("config").join("localconfig.vdf");
+        let tree = parse_vdf(&std::fs::read_to_string(path).ok()?)?;
+        tree.get_path(&["UserLocalConfigStore", "Software", "Valve", "Steam", "apps", app_id, "LaunchOptions"])?
+            .as_str()
+            .map(str::to_string)
+    })
+}
+
+/// The userdata folder name (32-bit account id) of the user who signed in
+/// last: the one marked MostRecent, else the newest timestamp.
+fn most_recent_account(steam_root: &Path) -> Option<String> {
+    const STEAM_ID64_BASE: u64 = 76_561_197_960_265_728;
+    let text = std::fs::read_to_string(steam_root.join("config").join("loginusers.vdf")).ok()?;
+    let tree = parse_vdf(&text)?;
+    let users = tree.get_path(&["users"])?.as_map()?;
+    let field = |v: &Vdf, key: &str| v.get_path(&[key]).and_then(Vdf::as_str).map(str::to_string);
+    let (id64, _) = users
+        .iter()
+        .max_by_key(|(_, u)| {
+            let recent = field(u, "MostRecent").as_deref() == Some("1");
+            let stamp: u64 = field(u, "timestamp").and_then(|t| t.parse().ok()).unwrap_or(0);
+            (recent, stamp)
+        })?;
+    let account = id64.parse::<u64>().ok()?.checked_sub(STEAM_ID64_BASE)?;
+    Some(account.to_string())
+}
+
+/// A Valve KeyValues (text VDF) node.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Vdf {
+    Str(String),
+    Map(Vec<(String, Vdf)>),
+}
+
+impl Vdf {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Vdf::Str(s) => Some(s),
+            Vdf::Map(_) => None,
+        }
+    }
+
+    pub fn as_map(&self) -> Option<&[(String, Vdf)]> {
+        match self {
+            Vdf::Map(m) => Some(m),
+            Vdf::Str(_) => None,
+        }
+    }
+
+    /// Follow keys down from this node. Steam is inconsistent about key case
+    /// ("apps" vs "Apps"), so keys match case-insensitively.
+    pub fn get_path(&self, keys: &[&str]) -> Option<&Vdf> {
+        keys.iter().try_fold(self, |node, key| {
+            node.as_map()?.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v)
+        })
+    }
+}
+
+/// Parse text VDF into a root map. Quoted keys and values with `\\` escapes,
+/// unquoted tokens, `//` comments, and `[$CONDITION]` suffixes (skipped).
+pub fn parse_vdf(text: &str) -> Option<Vdf> {
+    let mut chars = text.chars().peekable();
+    let root = parse_vdf_map(&mut chars, true)?;
+    Some(Vdf::Map(root))
+}
+
+fn parse_vdf_map(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    top: bool,
+) -> Option<Vec<(String, Vdf)>> {
+    let mut entries = Vec::new();
+    loop {
+        match next_vdf_token(chars)? {
+            VdfToken::End if top => return Some(entries),
+            VdfToken::Close if !top => return Some(entries),
+            VdfToken::Text(key) => {
+                let value = match next_vdf_token(chars)? {
+                    VdfToken::Text(v) => Vdf::Str(v),
+                    VdfToken::Open => Vdf::Map(parse_vdf_map(chars, false)?),
+                    _ => return None,
+                };
+                entries.push((key, value));
+            }
+            _ => return None,
+        }
+    }
+}
+
+enum VdfToken {
+    Text(String),
+    Open,
+    Close,
+    End,
+}
+
+fn next_vdf_token(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<VdfToken> {
+    loop {
+        match chars.peek().copied() {
+            None => return Some(VdfToken::End),
+            Some(c) if c.is_whitespace() => {
+                chars.next();
+            }
+            Some('/') => {
+                chars.next();
+                if chars.peek() != Some(&'/') {
+                    return None;
+                }
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        break;
+                    }
+                }
+            }
+            Some('{') => {
+                chars.next();
+                return Some(VdfToken::Open);
+            }
+            Some('}') => {
+                chars.next();
+                return Some(VdfToken::Close);
+            }
+            Some('"') => {
+                chars.next();
+                let mut out = String::new();
+                loop {
+                    match chars.next()? {
+                        '"' => return Some(VdfToken::Text(out)),
+                        '\\' => match chars.next()? {
+                            'n' => out.push('\n'),
+                            't' => out.push('\t'),
+                            other => out.push(other),
+                        },
+                        c => out.push(c),
+                    }
+                }
+            }
+            Some(_) => {
+                let mut out = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_whitespace() || matches!(c, '"' | '{' | '}') {
+                        break;
+                    }
+                    out.push(c);
+                    chars.next();
+                }
+                return Some(VdfToken::Text(out));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +347,53 @@ mod tests {
         assert_eq!(infer_distribution(tmp.path()), "standalone");
         std::fs::write(tmp.path().join("steam_api64.dll"), b"x").unwrap();
         assert_eq!(infer_distribution(tmp.path()), "steam");
+    }
+
+    #[test]
+    fn vdf_tree_parses_launch_options() {
+        let text = r#"
+"UserLocalConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"Apps"
+				{
+					"2379780"
+					{
+						"LaunchOptions"		"\"/Users/me/Balatro/steam_lovely_macos.sh\" %command%"
+						"cloud"	{ "last_sync_state"	"synchronized" }
+					}
+				}
+			}
+		}
+	}
+}
+"#;
+        let tree = parse_vdf(text).unwrap();
+        let opts = tree
+            .get_path(&["UserLocalConfigStore", "Software", "Valve", "Steam", "apps", "2379780", "LaunchOptions"])
+            .and_then(Vdf::as_str);
+        assert_eq!(opts, Some(r#""/Users/me/Balatro/steam_lovely_macos.sh" %command%"#));
+    }
+
+    #[test]
+    fn vdf_rejects_unbalanced_input() {
+        assert!(parse_vdf("\"a\" { \"b\" \"c\"").is_none());
+        assert!(parse_vdf("\"a\" }").is_none());
+    }
+
+    #[test]
+    fn most_recent_account_prefers_marked_then_newest() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        let write = |body: &str| std::fs::write(tmp.path().join("config/loginusers.vdf"), body).unwrap();
+        write(r#""users" { "76561198000000001" { "timestamp" "5" } "76561198000000002" { "timestamp" "9" } }"#);
+        assert_eq!(most_recent_account(tmp.path()).as_deref(), Some("39734274"));
+        write(r#""users" { "76561198000000001" { "timestamp" "5" "MostRecent" "1" } "76561198000000002" { "timestamp" "9" } }"#);
+        assert_eq!(most_recent_account(tmp.path()).as_deref(), Some("39734273"));
     }
 }

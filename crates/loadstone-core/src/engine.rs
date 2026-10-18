@@ -402,13 +402,15 @@ fn run_steps_inner(
         // Retryable precondition.
         if let Some(req) = &step.common().requires {
             loop {
-                if ctx.glob_exists(&req.file_exists)?.is_some() {
+                if ctx.condition_matches(&req.condition)? {
                     break;
                 }
-                let message = req
-                    .on_missing
-                    .clone()
-                    .unwrap_or_else(|| format!("Required file not found: {}", req.file_exists));
+                let message = req.on_missing.clone().unwrap_or_else(|| {
+                    match &req.condition.file_exists {
+                        Some(path) => format!("Required file not found: {path}"),
+                        None => format!("A requirement of step {} is not met.", step.name()),
+                    }
+                });
                 if !req.retryable {
                     bail!("{message}");
                 }
@@ -508,7 +510,7 @@ fn run_steps_inner(
             }
             Step::Expect { checks, .. } => {
                 for check in checks {
-                    if ctx.glob_exists(&check.file_exists)?.is_none() {
+                    if !ctx.condition_matches(&check.condition)? {
                         bail!("{}", check.message);
                     }
                 }

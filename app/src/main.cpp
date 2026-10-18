@@ -1023,6 +1023,11 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
         // operation again from it.
         if (needsSignIn)
             OfferSignIn(wxString::FromUTF8(error.c_str()));
+        else if (lastOpKind_ == OpKind::Launch)
+            // Usually a launch precondition (say, the store client isn't
+            // running): something for the user to do, not a fault.
+            wxMessageBox(wxString::FromUTF8(error.c_str()), "Can't launch",
+                         wxOK | wxICON_WARNING, this);
         else
             wxMessageBox(wxString::FromUTF8(error.c_str()), "Operation failed",
                          wxOK | wxICON_ERROR, this);

@@ -216,6 +216,28 @@ impl InstallContext {
                 return Ok(false);
             }
         }
+        if let Some(names) = &cond.process_running {
+            let wanted: Vec<&str> = names.iter().collect();
+            if !crate::process::any_running(&wanted)? {
+                return Ok(false);
+            }
+        }
+        if let Some(needle) = &cond.steam_launch_options {
+            // No app id, no Steam, or nothing set: the options can't contain it.
+            let options = self
+                .steam_app_id
+                .as_deref()
+                .and_then(crate::detect::steam_launch_options)
+                .unwrap_or_default();
+            if !options.contains(needle.as_str()) {
+                return Ok(false);
+            }
+        }
+        if let Some(inner) = &cond.not {
+            if self.condition_matches(inner)? {
+                return Ok(false);
+            }
+        }
         Ok(true)
     }
 

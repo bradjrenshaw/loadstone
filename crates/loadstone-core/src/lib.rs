@@ -16,6 +16,7 @@ pub mod jsonedit;
 pub mod macho;
 pub mod ops;
 pub mod prefs;
+pub mod process;
 pub mod profile;
 pub mod registry;
 pub mod release;

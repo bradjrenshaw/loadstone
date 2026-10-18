@@ -367,7 +367,7 @@ pub struct StepCommon {
     pub requires: Option<Requires>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Condition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,6 +378,17 @@ pub struct Condition {
     pub arch: Option<StringOrList>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_exists: Option<String>,
+    /// Holds while any of these processes runs (executable names, matched
+    /// case-insensitively, a trailing `.exe` ignored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_running: Option<StringOrList>,
+    /// Holds when the game's Steam launch options (for `detect.steam.appId`,
+    /// most recent Steam user) contain this text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_launch_options: Option<String>,
+    /// Holds when the nested condition does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not: Option<Box<Condition>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,7 +410,10 @@ impl StringOrList {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Requires {
-    pub file_exists: String,
+    /// Any condition (the same keys as `when`); the step fails, or with
+    /// `retryable` asks, while it does not hold.
+    #[serde(flatten)]
+    pub condition: Condition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_missing: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -417,7 +431,9 @@ pub struct Route {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Check {
-    pub file_exists: String,
+    /// Any condition (the same keys as `when`).
+    #[serde(flatten)]
+    pub condition: Condition,
     pub message: String,
 }
 

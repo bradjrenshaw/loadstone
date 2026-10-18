@@ -284,7 +284,7 @@ Top-level fields:
 
 Why users install a mod at all is to play with it, so a manifest can say
 how to start the game with the mod loaded. `launch` is an ordered step
-list restricted to `run`, `open-url`, and `notice` (§9.9–§9.10); it is
+list restricted to `run`, `open-url`, `notice`, and `expect` (§9.7–§9.10); it is
 frozen into `loadstone-release.json` and into the install record, so the
 manager's **Launch** button (and `loadstone launch`) works offline from
 state alone. Steps carry `when` like any other, so one list covers every
@@ -297,6 +297,25 @@ platform:
   { "step": "run", "when": { "platform": "macos" },
     "program": "${gameDir}/Balatro.app/Contents/MacOS/love",
     "cwd": "${gameDir}",
+    "env": { "DYLD_INSERT_LIBRARIES": "${gameDir}/liblovely.dylib" } }
+]
+```
+
+Conditions (§9) let the list pick a route at launch time. Balatro needs the
+Steam client running, and on macOS Steam only loads the injector once the
+game's Launch Options point at a wrapper, so:
+
+```json
+"launch": [
+  { "step": "expect", "when": { "distribution": "steam" }, "checks": [
+      { "processRunning": ["steam", "steam_osx"],
+        "message": "Steam isn't running. Open Steam, then press Launch again." } ] },
+  { "step": "open-url",
+    "when": { "platform": "macos", "steamLaunchOptions": "steam_lovely_macos.sh" },
+    "url": "steam://rungameid/${steam.appId}" },
+  { "step": "run",
+    "when": { "platform": "macos", "not": { "steamLaunchOptions": "steam_lovely_macos.sh" } },
+    "program": "${gameDir}/Balatro.app/Contents/MacOS/love", "cwd": "${gameDir}",
     "env": { "DYLD_INSERT_LIBRARIES": "${gameDir}/liblovely.dylib" } }
 ]
 ```
@@ -390,12 +409,27 @@ tracked writes on failure.
 
 Fields common to every step:
 
-- `when` — condition object; the step is skipped unless it matches. Keys:
-  `distribution`, `platform`, `arch` (string or list), `fileExists` (path/glob).
-- `requires` — precondition that must hold before the step runs:
+- `when` — condition object; the step is skipped unless it matches.
+- `requires` — precondition that must hold before the step runs: a condition
+  object plus `onMissing` (the message shown when it doesn't hold) and
+  `retryable`, e.g.
   `{ "fileExists": <path/glob>, "onMissing": <message>, "retryable": true }`.
-  When `retryable`, the manager shows the message with Retry/Skip options —
-  the generalization of "launch the game once, then retry".
+  Without `retryable` the step list stops there with the message. When
+  `retryable`, the manager shows the message with Retry/Skip options — the
+  generalization of "launch the game once, then retry".
+
+A **condition object** holds when every key in it holds:
+
+| Key | Holds when |
+|---|---|
+| `distribution`, `platform`, `arch` | the context value is the string, or one of the list |
+| `fileExists` | the path/glob matches at least one file |
+| `processRunning` | a process with one of these executable names (string or list) is running; case-insensitive, a trailing `.exe` ignored (`steam` matches `steam.exe`; Steam on macOS is `steam_osx`) |
+| `steamLaunchOptions` | the Launch Options that the most recent Steam user set for the game (`detect.steam.appId`) contain this text; false without an app id, a Steam install, or options. Steam writes them to disk itself, so a change made while Steam runs can take a moment to appear |
+| `not` | the nested condition object does not hold |
+
+Conditions are evaluated when the step is reached, so a launch list can
+check the machine as it is at launch time.
 
 ### 9.1 `extract-archive`
 
@@ -483,7 +517,8 @@ more may be added) used as the dialog's starting point.
 
 ### 9.7 `expect`
 
-Post-conditions; failing any aborts (and rolls back) with the given message.
+Checks that must hold; failing any aborts (and rolls back) with the given
+message. Each check is a condition object (§9) plus its `message`.
 
 ```json
 { "step": "expect", "checks": [
@@ -491,6 +526,10 @@ Post-conditions; failing any aborts (and rolls back) with the given message.
       "message": "The download didn't contain WrathAccess.dll — the repo may be mid-build." }
   ] }
 ```
+
+In an install, `fileExists` checks double as evidence of a copy installed
+without Loadstone. In `launch`, `expect` is how a list states what must be
+true before the game starts (§5.1).
 
 ### 9.8 `notice`
 

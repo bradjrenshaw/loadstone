@@ -250,3 +250,65 @@ fn detect_default_still_parses() {
     let d: Detect = serde_json::from_value(serde_json::json!({ "markers": ["x"] })).unwrap();
     assert_eq!(d.markers, vec!["x"]);
 }
+
+#[test]
+fn requires_takes_any_condition_and_stops_with_its_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = ctx(tmp.path());
+    let mut ui = QuietUi(Vec::new());
+    let mut written = Vec::new();
+    let list = steps(serde_json::json!([
+        { "step": "notice", "message": "never shown",
+          "requires": { "processRunning": "loadstone-no-such-process",
+                        "onMissing": "Start the launcher first." } }
+    ]));
+    let err = engine::run_steps(&mut c, &list, &Artifacts::default(), false, &mut written, &mut ui)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "Start the launcher first.");
+    assert!(ui.0.is_empty());
+
+    // This test binary is a running process, so the requirement holds.
+    let me = std::env::current_exe().unwrap();
+    let me = me.file_name().unwrap().to_string_lossy().into_owned();
+    let list = steps(serde_json::json!([
+        { "step": "notice", "message": "ran", "requires": { "processRunning": [me] } }
+    ]));
+    engine::run_steps(&mut c, &list, &Artifacts::default(), false, &mut written, &mut ui).unwrap();
+    assert_eq!(ui.0, ["ran"]);
+}
+
+#[test]
+fn not_inverts_a_condition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = ctx(tmp.path());
+    let mut ui = QuietUi(Vec::new());
+    let mut written = Vec::new();
+    // App 424242 has no Steam launch options anywhere, so they can't
+    // contain the wrapper's name.
+    let list = steps(serde_json::json!([
+        { "step": "notice", "message": "through steam",
+          "when": { "steamLaunchOptions": "wrapper.sh" } },
+        { "step": "notice", "message": "direct",
+          "when": { "not": { "steamLaunchOptions": "wrapper.sh" } } }
+    ]));
+    engine::run_steps(&mut c, &list, &Artifacts::default(), false, &mut written, &mut ui).unwrap();
+    assert_eq!(ui.0, ["direct"]);
+}
+
+#[test]
+fn expect_checks_any_condition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = ctx(tmp.path());
+    let mut ui = QuietUi(Vec::new());
+    let mut written = Vec::new();
+    let list = steps(serde_json::json!([
+        { "step": "expect", "checks": [
+            { "platform": current_platform(), "message": "wrong platform" },
+            { "processRunning": "loadstone-no-such-process", "message": "Open the launcher first." } ] },
+        { "step": "notice", "message": "never shown" }
+    ]));
+    let err = engine::run_steps(&mut c, &list, &Artifacts::default(), false, &mut written, &mut ui)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "Open the launcher first.");
+    assert!(ui.0.is_empty());
+}

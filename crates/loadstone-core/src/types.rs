@@ -135,10 +135,14 @@ pub struct ReleaseManifest {
     pub launch: Vec<Step>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_policy: Option<String>,
-    /// The standalone installer exe attached to this release, when one is;
-    /// running installers use it to offer self-update.
+    /// The Windows installer exe attached to this release, when one is. Kept
+    /// for clients that predate `installers`, which only read this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installer: Option<InstallerInfo>,
+    /// Every platform's standalone installer/manager build on this release;
+    /// running builds pick their platform's to offer self-update.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub installers: Vec<InstallerInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +167,16 @@ pub struct InstallerInfo {
     pub file: String,
     pub loadstone_version: String,
     pub sha256: String,
+    /// `windows` (an .exe) or `macos` (a zipped .app). Absent means windows:
+    /// the legacy `installer` block only ever named an exe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+impl InstallerInfo {
+    pub fn platform(&self) -> &str {
+        self.platform.as_deref().unwrap_or("windows")
+    }
 }
 
 /// A release pinned in the package file itself, for upstreams that publish no

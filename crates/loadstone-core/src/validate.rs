@@ -108,6 +108,7 @@ const RELEASE_KEYS: &[&str] = &[
     "manifestVersion", "id", "version", "game", "releaseNotes",
     "artifacts", "dependencies", "distributions", "install", "uninstall", "cleanupLegacy",
     "userData", "settings", "actions", "launch", "conflictPolicy", "installer",
+    "installers",
 ];
 
 const LINK_KEYS: &[&str] = &["kind", "source", "packages"];
@@ -901,6 +902,25 @@ fn validate_release(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
         ));
     }
     validate_artifacts(&release.artifacts, "artifacts", diags);
+    let mut seen_platforms = BTreeSet::new();
+    for (i, info) in release.installers.iter().enumerate() {
+        let loc = format!("installers/{i}");
+        match info.platform.as_deref() {
+            Some(p @ ("windows" | "macos")) => {
+                if !seen_platforms.insert(p) {
+                    diags.push(Diagnostic::error(&loc, format!("a second {p} installer")));
+                }
+            }
+            Some(p) => diags.push(Diagnostic::error(
+                format!("{loc}/platform"),
+                format!("\"{p}\" is not an installer platform (windows, macos)"),
+            )),
+            None => diags.push(Diagnostic::error(
+                format!("{loc}/platform"),
+                "installers entries must name their platform",
+            )),
+        }
+    }
 
     let game_paths: Option<BTreeSet<String>> = release
         .game

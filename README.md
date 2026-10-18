@@ -241,8 +241,9 @@ builds a static, universal wxWidgets 3.2 once (cached under
 `dist/Loadstone.app` that links only system libraries. `--profile`,
 `--name`, and `--bundle-id` make a branded installer instead (Developer ID
 signing and notarization are still to do, so Gatekeeper asks on first
-open). macOS builds do not self-update yet: the release `installer` block
-names a Windows exe. The app resolves its
+open). Zip it with `ditto -c -k --keepParent` and pass the zip to
+`loadstone package --installer` (alongside the Windows exe) so macOS builds
+can update themselves too (SPEC §13). The app resolves its
 distribution profile exactly like the CLI — embedded, then a `loadstone.json`
 sidecar, then the manager default. Manager mode shows the catalog (everything
 visible through the profile's registries, merged with installed state) and a

@@ -71,11 +71,11 @@ enum Command {
         /// Built artifact file(s). Overrides the manifest's "packaging" block.
         #[arg(long = "artifact")]
         artifacts: Vec<PathBuf>,
-        /// The branded installer exe shipped with this release; stamps an
-        /// "installer" block (name, hash, Loadstone version) so running
-        /// installers can offer self-update.
-        #[arg(long)]
-        installer: Option<PathBuf>,
+        /// An installer/manager build shipped with this release: a Windows
+        /// .exe or a macOS .app in a .zip (repeat for both). Stamps its name,
+        /// hash and Loadstone version so running builds can self-update.
+        #[arg(long = "installer")]
+        installers: Vec<PathBuf>,
         /// Where to write the release manifest.
         #[arg(long, default_value = "loadstone-release.json")]
         out: PathBuf,
@@ -245,9 +245,9 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Validate { paths, scopes } => cmd_validate(&paths, &scopes),
-        Command::Package { manifest, version, artifacts, installer, out, notes, notes_file, scopes } => {
+        Command::Package { manifest, version, artifacts, installers, out, notes, notes_file, scopes } => {
             cmd_package(
-                manifest.as_deref(), &version, &artifacts, installer, &out, notes, notes_file,
+                manifest.as_deref(), &version, &artifacts, installers, &out, notes, notes_file,
                 &scopes,
             )
         }
@@ -487,7 +487,7 @@ fn cmd_package(
     manifest_arg: Option<&Path>,
     version: &str,
     artifact_paths: &[PathBuf],
-    installer: Option<PathBuf>,
+    installers: Vec<PathBuf>,
     out: &Path,
     notes: Option<String>,
     notes_file: Option<PathBuf>,
@@ -530,14 +530,14 @@ fn cmd_package(
         (None, None) => None,
     };
 
-    if let Some(exe) = &installer {
-        if !exe.is_file() {
-            bail!("installer not found: {}", exe.display());
+    for path in &installers {
+        if !path.is_file() {
+            bail!("installer not found: {}", path.display());
         }
     }
     let release = build_release_manifest(
         &project,
-        &ReleaseOptions { version: version.to_string(), artifacts, release_notes, installer },
+        &ReleaseOptions { version: version.to_string(), artifacts, release_notes, installers },
     )?;
 
     let json = serde_json::to_string_pretty(&release)?;
@@ -548,10 +548,13 @@ fn cmd_package(
     for artifact in &release.artifacts {
         println!("  {}  sha256 {}", artifact.file, artifact.sha256);
     }
-    if let Some(info) = &release.installer {
+    for info in &release.installers {
         println!(
-            "  {}  sha256 {}  (installer, Loadstone {})",
-            info.file, info.sha256, info.loadstone_version
+            "  {}  sha256 {}  ({} installer, Loadstone {})",
+            info.file,
+            info.sha256,
+            info.platform(),
+            info.loadstone_version
         );
     }
     println!("Attach {} and the artifact(s) above to the GitHub release.", out.display());

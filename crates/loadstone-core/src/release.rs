@@ -18,10 +18,43 @@ pub struct ReleaseOptions {
     pub version: String,
     pub artifacts: Vec<ArtifactInput>,
     pub release_notes: Option<String>,
-    /// The branded installer exe shipped with this release, if any. Its
-    /// hash and this tool's own Loadstone version are stamped into the
-    /// manifest so running installers can offer self-update.
-    pub installer: Option<PathBuf>,
+    /// The installer/manager builds shipped with this release: a Windows
+    /// `.exe` and/or a macOS `.zip` holding one `.app`. Their hashes and this
+    /// tool's own Loadstone version are stamped into the manifest so running
+    /// builds can offer self-update.
+    pub installers: Vec<PathBuf>,
+}
+
+/// Which platform an installer build is for, from its file: an `.exe` is
+/// Windows; a `.zip` must hold exactly one top-level `.app` bundle (macOS).
+pub fn installer_platform(path: &Path) -> Result<&'static str> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_lowercase();
+    if name.ends_with(".exe") {
+        return Ok("windows");
+    }
+    if name.ends_with(".zip") {
+        let file = fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .with_context(|| format!("{} is not a zip", path.display()))?;
+        let mut apps = std::collections::BTreeSet::new();
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i)?;
+            if let Some(top) = entry.name().split('/').next() {
+                if top.ends_with(".app") {
+                    apps.insert(top.to_string());
+                }
+            }
+        }
+        if apps.len() == 1 {
+            return Ok("macos");
+        }
+        bail!(
+            "{} must hold exactly one top-level .app bundle (found {})",
+            path.display(),
+            apps.len()
+        );
+    }
+    bail!("{}: an installer is a Windows .exe or a macOS .app in a .zip", path.display())
 }
 
 /// Assemble the release manifest: hash the artifacts and freeze the project
@@ -37,23 +70,31 @@ pub fn build_release_manifest(
         bail!("no artifacts: pass --artifact or add a \"packaging\" block to the manifest");
     }
 
-    let installer = match &options.installer {
-        Some(path) => {
-            let file = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .with_context(|| format!("bad installer path: {}", path.display()))?
-                .to_string();
-            let sha256 = sha256_file(path)
-                .with_context(|| format!("failed to hash {}", path.display()))?;
-            Some(InstallerInfo {
-                file,
-                loadstone_version: env!("CARGO_PKG_VERSION").to_string(),
-                sha256,
-            })
+    let mut installers: Vec<InstallerInfo> = Vec::new();
+    for path in &options.installers {
+        let platform = installer_platform(path)?;
+        if installers.iter().any(|i| i.platform() == platform) {
+            bail!("more than one {platform} installer given");
         }
-        None => None,
-    };
+        let file = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .with_context(|| format!("bad installer path: {}", path.display()))?
+            .to_string();
+        let sha256 =
+            sha256_file(path).with_context(|| format!("failed to hash {}", path.display()))?;
+        installers.push(InstallerInfo {
+            file,
+            loadstone_version: env!("CARGO_PKG_VERSION").to_string(),
+            sha256,
+            platform: Some(platform.to_string()),
+        });
+    }
+    // Older clients read only the single `installer` block, as an exe.
+    let installer = installers
+        .iter()
+        .find(|i| i.platform() == "windows")
+        .map(|i| InstallerInfo { platform: None, ..i.clone() });
 
     let mut artifacts = Vec::new();
     for input in &options.artifacts {
@@ -86,6 +127,7 @@ pub fn build_release_manifest(
         launch: project.launch.clone(),
         conflict_policy: project.conflict_policy.clone(),
         installer,
+        installers,
     })
 }
 
@@ -171,12 +213,15 @@ mod tests {
                 version: "v1.2.3".into(),
                 artifacts: vec![ArtifactInput { path: artifact, when: None }],
                 release_notes: None,
-                installer: Some(exe.clone()),
+                installers: vec![exe.clone()],
             },
         )
         .unwrap();
         let info = release.installer.clone().unwrap();
         assert_eq!(info.file, "ModInstaller.exe");
+        assert_eq!(info.platform, None, "the legacy block stays as old clients read it");
+        assert_eq!(release.installers.len(), 1);
+        assert_eq!(release.installers[0].platform(), "windows");
         assert_eq!(info.loadstone_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(info.sha256, sha256_file(&exe).unwrap());
 
@@ -184,6 +229,49 @@ mod tests {
         assert!(json.contains("\"loadstoneVersion\""), "camelCase key expected");
         let back: ReleaseManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.installer.unwrap().file, "ModInstaller.exe");
+    }
+
+    #[test]
+    fn installers_for_both_platforms() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("Mod.zip");
+        std::fs::write(&artifact, b"zip").unwrap();
+        let exe = dir.path().join("ModInstaller.exe");
+        std::fs::write(&exe, b"exe").unwrap();
+        let app_zip = dir.path().join("ModInstaller.app.zip");
+        {
+            let mut w = zip::ZipWriter::new(std::fs::File::create(&app_zip).unwrap());
+            let opts = zip::write::SimpleFileOptions::default();
+            w.add_directory("Mod Installer.app/", opts).unwrap();
+            w.start_file("Mod Installer.app/Contents/Info.plist", opts).unwrap();
+            std::io::Write::write_all(&mut w, b"plist").unwrap();
+            w.finish().unwrap();
+        }
+        let project: ProjectManifest = serde_json::from_value(serde_json::json!({
+            "manifestVersion": 1, "id": "m", "name": "M", "description": "d",
+            "authors": ["a"], "game": "g",
+            "install": [ { "step": "extract-archive",
+                           "routes": [ { "from": "**", "to": "${gameDir}" } ] } ]
+        }))
+        .unwrap();
+        let options = |installers| ReleaseOptions {
+            version: "1.0.0".into(),
+            artifacts: vec![ArtifactInput { path: artifact.clone(), when: None }],
+            release_notes: None,
+            installers,
+        };
+        let release =
+            build_release_manifest(&project, &options(vec![app_zip.clone(), exe.clone()])).unwrap();
+        let platforms: Vec<&str> = release.installers.iter().map(|i| i.platform()).collect();
+        assert_eq!(platforms, ["macos", "windows"]);
+        assert_eq!(release.installer.unwrap().file, "ModInstaller.exe");
+
+        // A Mac-only release has no legacy block for old Windows clients.
+        let mac_only = build_release_manifest(&project, &options(vec![app_zip.clone()])).unwrap();
+        assert!(mac_only.installer.is_none());
+
+        assert!(build_release_manifest(&project, &options(vec![exe.clone(), exe.clone()])).is_err());
+        assert!(installer_platform(&artifact).is_err(), "a zip without an .app");
     }
 
     #[test]

@@ -317,9 +317,9 @@ mod ffi {
         fn check_self_update(embedded: &str) -> Result<SelfUpdate>;
 
         /// Download the offered build, verify its hash, and swap it in
-        /// for the running exe (the running file is renamed aside).
-        /// Returns the executable path to relaunch. Blocking — worker
-        /// thread.
+        /// for the running one (the running exe, or on macOS the .app
+        /// bundle, is moved aside). Returns what to relaunch: the exe, or
+        /// the bundle on macOS. Blocking — worker thread.
         fn apply_self_update(
             update: &SelfUpdate,
             ui: Pin<&mut UiCallbacks>,

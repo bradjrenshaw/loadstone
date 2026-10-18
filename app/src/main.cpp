@@ -1006,7 +1006,14 @@ void LoadstoneFrame::OfferSelfUpdate(const loadstone::SelfUpdate& update) {
             SetStatusText("Update installed.");
             wxMessageBox("The update is installed. The app will now restart.",
                          "Update installed", wxOK | wxICON_INFORMATION, this);
+#ifdef __WXOSX__
+            // The update replaced the whole .app bundle; LaunchServices
+            // starts a new instance of it (-n) while this one quits.
+            wxExecute("/usr/bin/open -n \"" + wxString::FromUTF8(path.c_str()) + "\"",
+                      wxEXEC_ASYNC);
+#else
             wxExecute("\"" + wxString::FromUTF8(path.c_str()) + "\"", wxEXEC_ASYNC);
+#endif
             Close(true);
         });
     }).detach();

@@ -27,6 +27,10 @@ set(CARGO_TARGET_DIR "${REPO_ROOT}/target")
 # A prebuilt bridge (scripts/build_macos_app.sh passes a universal one made
 # with lipo); otherwise cargo builds it for the host as part of this build.
 set(LOADSTONE_BRIDGE_LIB "" CACHE FILEPATH "Prebuilt loadstone-bridge static library")
+# cxx's generated headers. A host cargo build writes them to target/cxxbridge;
+# a --target build to target/<triple>/cxxbridge (the headers are the same for
+# every target).
+set(LOADSTONE_CXXBRIDGE_DIR "${CARGO_TARGET_DIR}/cxxbridge" CACHE PATH "cxx-generated header directory")
 if(LOADSTONE_BRIDGE_LIB)
     set(BRIDGE_LIB "${LOADSTONE_BRIDGE_LIB}")
     add_custom_target(bridge)
@@ -100,7 +104,7 @@ configure_file(src/embedded_profile.h.in "${CMAKE_BINARY_DIR}/generated/embedded
 
 target_include_directories(loadstone-manager PRIVATE
     "${CMAKE_BINARY_DIR}/generated"
-    "${CARGO_TARGET_DIR}/cxxbridge"
+    "${LOADSTONE_CXXBRIDGE_DIR}"
     # For loadstone-bridge/include/ui_callbacks.h (the callback interface
     # the app implements).
     "${REPO_ROOT}/crates"

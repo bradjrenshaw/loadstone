@@ -101,6 +101,7 @@ cmake -S "$repo/app" -B "$build" -G "Unix Makefiles" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
     -DwxWidgets_CONFIG_EXECUTABLE="$wx_prefix/bin/wx-config" \
     -DLOADSTONE_BRIDGE_LIB="$universal_dir/libloadstone_bridge.a" \
+    -DLOADSTONE_CXXBRIDGE_DIR="$repo/target/aarch64-apple-darwin/cxxbridge" \
     -DLOADSTONE_EMBED_PROFILE="$profile" \
     -DLOADSTONE_APP_NAME="$name" \
     -DLOADSTONE_BUNDLE_ID="$bundle_id" \

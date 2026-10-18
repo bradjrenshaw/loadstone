@@ -78,7 +78,10 @@ Write-Step "Building $Name.exe"
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
 $build = Join-Path $repo 'build-dist'
 if (Test-Path $build) { Remove-Item $build -Recurse -Force }
+# Release only: wxWidgets is installed in Release, and generating the other
+# configurations would point at its never-built Debug libraries.
 Invoke-Native ("cmake -S `"$repo\app`" -B `"$build`" -A x64 " +
+    "-DCMAKE_CONFIGURATION_TYPES=Release " +
     "-DCMAKE_PREFIX_PATH=`"$wxPrefix`" " +
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded " +
     "-DLOADSTONE_EMBED_PROFILE=`"$ProfilePath`" " +

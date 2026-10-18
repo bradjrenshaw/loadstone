@@ -27,6 +27,12 @@ pub struct UpdateInfo {
 /// no releases, no manifest, no `installer` block, unparsable versions —
 /// answers `None`: a launch-time check must never nag or error.
 pub fn check(source: &str, current_version: &str) -> Option<UpdateInfo> {
+    // The `installer` block names one Windows exe, and the swap replaces a
+    // single file; a macOS .app is a bundle. Until releases carry per-platform
+    // builds, other platforms never offer (and never swap in an .exe).
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
     let manifest = crate::source::release_manifest(source, None, None).ok()?;
     let installer = manifest.installer?;
     let offered = normalize_version(&installer.loadstone_version).ok()?;

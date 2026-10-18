@@ -24,19 +24,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # --- Rust bridge -------------------------------------------------------------
 set(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(CARGO_TARGET_DIR "${REPO_ROOT}/target")
-if(WIN32)
-    set(BRIDGE_LIB "${CARGO_TARGET_DIR}/release/loadstone_bridge.lib")
+# A prebuilt bridge (scripts/build_macos_app.sh passes a universal one made
+# with lipo); otherwise cargo builds it for the host as part of this build.
+set(LOADSTONE_BRIDGE_LIB "" CACHE FILEPATH "Prebuilt loadstone-bridge static library")
+if(LOADSTONE_BRIDGE_LIB)
+    set(BRIDGE_LIB "${LOADSTONE_BRIDGE_LIB}")
+    add_custom_target(bridge)
 else()
-    set(BRIDGE_LIB "${CARGO_TARGET_DIR}/release/libloadstone_bridge.a")
+    if(WIN32)
+        set(BRIDGE_LIB "${CARGO_TARGET_DIR}/release/loadstone_bridge.lib")
+    else()
+        set(BRIDGE_LIB "${CARGO_TARGET_DIR}/release/libloadstone_bridge.a")
+    endif()
+    add_custom_target(bridge
+        COMMAND cargo build -p loadstone-bridge --release
+        WORKING_DIRECTORY "${REPO_ROOT}"
+        BYPRODUCTS "${BRIDGE_LIB}"
+        COMMENT "cargo build loadstone-bridge"
+        VERBATIM
+    )
 endif()
-
-add_custom_target(bridge
-    COMMAND cargo build -p loadstone-bridge --release
-    WORKING_DIRECTORY "${REPO_ROOT}"
-    BYPRODUCTS "${BRIDGE_LIB}"
-    COMMENT "cargo build loadstone-bridge"
-    VERBATIM
-)
 
 # --- wxWidgets ----------------------------------------------------------------
 # Windows links a static wx build through its CMake package; elsewhere the
@@ -56,11 +63,21 @@ add_executable(loadstone-manager WIN32 MACOSX_BUNDLE
     src/main.cpp
 )
 add_dependencies(loadstone-manager bridge)
+# Branded installer builds rename the product (the macOS bundle name and id,
+# the Windows exe name).
+set(LOADSTONE_APP_NAME "" CACHE STRING "Product name for a branded build (default: Loadstone)")
+set(LOADSTONE_BUNDLE_ID "com.bradjrenshaw.loadstone" CACHE STRING "macOS bundle identifier")
+if(LOADSTONE_APP_NAME)
+    set_target_properties(loadstone-manager PROPERTIES OUTPUT_NAME "${LOADSTONE_APP_NAME}")
+    set(APP_NAME "${LOADSTONE_APP_NAME}")
+else()
+    set(APP_NAME "Loadstone")
+endif()
 if(APPLE)
     set_target_properties(loadstone-manager PROPERTIES
-        OUTPUT_NAME "Loadstone"
-        MACOSX_BUNDLE_BUNDLE_NAME "Loadstone"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.bradjrenshaw.loadstone"
+        OUTPUT_NAME "${APP_NAME}"
+        MACOSX_BUNDLE_BUNDLE_NAME "${APP_NAME}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "${LOADSTONE_BUNDLE_ID}"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
     )

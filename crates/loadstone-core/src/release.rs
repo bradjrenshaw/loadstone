@@ -26,11 +26,16 @@ pub struct ReleaseOptions {
 }
 
 /// Which platform an installer build is for, from its file: an `.exe` is
-/// Windows; a `.zip` must hold exactly one top-level `.app` bundle (macOS).
+/// Windows; a `.dmg`, or a `.zip` holding exactly one top-level `.app`
+/// bundle, is macOS.
 pub fn installer_platform(path: &Path) -> Result<&'static str> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_lowercase();
     if name.ends_with(".exe") {
         return Ok("windows");
+    }
+    // A disk image can only be looked inside on macOS; trust the extension.
+    if name.ends_with(".dmg") {
+        return Ok("macos");
     }
     if name.ends_with(".zip") {
         let file = fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -54,7 +59,7 @@ pub fn installer_platform(path: &Path) -> Result<&'static str> {
             apps.len()
         );
     }
-    bail!("{}: an installer is a Windows .exe or a macOS .app in a .zip", path.display())
+    bail!("{}: an installer is a Windows .exe, or a macOS .dmg or zipped .app", path.display())
 }
 
 /// Assemble the release manifest: hash the artifacts and freeze the project

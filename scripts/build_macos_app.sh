@@ -10,12 +10,14 @@
 #     name and bundle id
 #   - ad-hoc signed (Apple Silicon refuses to run unsigned code; this is not
 #     a Developer ID signature, so Gatekeeper still asks on first open)
+#   - with --dmg, also a disk image holding the app and an Applications
+#     shortcut: what users download, and what self-update installs from
 #
 # Usage:
 #   scripts/build_macos_app.sh                                   the manager
 #   scripts/build_macos_app.sh --profile <profile.json> \
 #       --name "Blindfold Installer" --bundle-id com.example.installer \
-#       --out <dir>
+#       --out <dir> [--dmg <file.dmg>]
 #
 # The app lands at <out>/<name>.app (default: dist/Loadstone.app).
 # Needs: Xcode command line tools, cmake, rustup targets aarch64-apple-darwin
@@ -29,12 +31,14 @@ profile=""
 name="Loadstone"
 bundle_id="com.bradjrenshaw.loadstone"
 out="$repo/dist"
+dmg=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --profile) profile="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
         --name) name="$2"; shift 2 ;;
         --bundle-id) bundle_id="$2"; shift 2 ;;
         --out) mkdir -p "$2"; out="$(cd "$2" && pwd)"; shift 2 ;;
+        --dmg) mkdir -p "$(dirname "$2")"; dmg="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
         -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -117,3 +121,19 @@ if otool -L "$exe" | grep -q -e /opt/homebrew -e /usr/local; then
 fi
 lipo -info "$exe"
 echo "Built $app"
+
+# --- Disk image ---------------------------------------------------------------
+# The app beside an Applications shortcut: open the image, copy the app over.
+# No Finder window styling: that needs a logged-in Finder (not CI), and
+# screen-reader users get nothing from icon positions anyway.
+if [ -n "$dmg" ]; then
+    step "Building $(basename "$dmg")"
+    image_root="$(mktemp -d "${TMPDIR:-/tmp}/loadstone-dmg-XXXXXX")"
+    ditto "$app" "$image_root/$name.app"
+    ln -s /Applications "$image_root/Applications"
+    rm -f "$dmg"
+    hdiutil create -quiet -volname "$name" -srcfolder "$image_root" -fs HFS+ \
+        -format UDZO -ov "$dmg"
+    rm -rf "$image_root"
+    echo "Built $dmg"
+fi

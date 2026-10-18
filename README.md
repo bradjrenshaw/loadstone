@@ -238,12 +238,13 @@ wxWidgets: fine for development, but it only runs where Homebrew's wx is
 installed. For an app to hand to users, run `scripts/build_macos_app.sh`: it
 builds a static, universal wxWidgets 3.2 once (cached under
 `~/Library/Caches/loadstone`), a universal bridge, and an ad-hoc-signed
-`dist/Loadstone.app` that links only system libraries. `--profile`,
-`--name`, and `--bundle-id` make a branded installer instead (Developer ID
-signing and notarization are still to do, so Gatekeeper asks on first
-open). Zip it with `ditto -c -k --keepParent` and pass the zip to
-`loadstone package --installer` (alongside the Windows exe) so macOS builds
-can update themselves too (SPEC §13). The app resolves its
+`dist/Loadstone.app` that links only system libraries; `--dmg <file>` also
+wraps it in a disk image beside an Applications shortcut, which is what
+users download. `--profile`, `--name`, and `--bundle-id` make a branded
+installer instead (Developer ID signing and notarization are still to do, so
+Gatekeeper asks on first open). Pass the `.dmg` to `loadstone package
+--installer` (alongside the Windows exe) so macOS builds can update
+themselves too (SPEC §13). The app resolves its
 distribution profile exactly like the CLI — embedded, then a `loadstone.json`
 sidecar, then the manager default. Manager mode shows the catalog (everything
 visible through the profile's registries, merged with installed state) and a

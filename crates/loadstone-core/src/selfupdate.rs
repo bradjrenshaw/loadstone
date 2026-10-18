@@ -7,8 +7,9 @@
 //!
 //! - Windows: the rename dance on the exe (Windows allows renaming a running
 //!   exe, not overwriting it).
-//! - macOS: the asset is a zipped `.app`. It is unpacked beside the running
-//!   bundle, checked to carry the same bundle id, and swapped in by renaming
+//! - macOS: the asset is a `.dmg` (or a zipped `.app`) holding the app. The
+//!   app is copied out beside the running bundle, checked to carry the same
+//!   bundle id, and swapped in by renaming
 //!   (a running bundle can be moved; the process keeps its open files). The
 //!   previous bundle waits in a hidden staging folder until the next start.
 
@@ -88,7 +89,7 @@ pub fn apply(info: &UpdateInfo, progress: impl FnMut(u32)) -> Result<PathBuf> {
     }
     match bundle {
         Some(bundle) => {
-            swap_in_bundle(&bundle, &bytes)?;
+            swap_in_bundle(&bundle, &bytes, &info.file)?;
             Ok(bundle)
         }
         None => {
@@ -118,6 +119,24 @@ fn replaceable_bundle(exe: &Path) -> Result<PathBuf> {
              and update again."
         );
     }
+    // Try the write the swap will need. A read-only spot is usually the
+    // disk image the app came in, opened and run without copying it out.
+    let probe = staging_dir(&bundle)?;
+    let _ = std::fs::remove_dir_all(&probe);
+    if std::fs::create_dir(&probe).is_err() {
+        if bundle.starts_with("/Volumes") {
+            bail!(
+                "this app is running from its disk image, so it can't update itself. \
+                 Copy it into your Applications folder, open it from there, and update again."
+            );
+        }
+        bail!(
+            "can't write next to {} (no permission?), so the app can't update itself. \
+             Download the new version from the release page instead.",
+            bundle.display()
+        );
+    }
+    let _ = std::fs::remove_dir(&probe);
     Ok(bundle)
 }
 
@@ -130,10 +149,11 @@ fn staging_dir(bundle: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!(".{name}.update")))
 }
 
-/// Unpack a zipped `.app` beside `bundle`, check it is the same app (same
-/// bundle id), and swap it into place. The old bundle moves into the
-/// staging folder; if the final move fails it is moved back.
-pub fn swap_in_bundle(bundle: &Path, zip_bytes: &[u8]) -> Result<()> {
+/// Unpack the app from an update asset (`asset` names it: a `.dmg`, else a
+/// zip) beside `bundle`, check it is the same app (same bundle id), and swap
+/// it into place. The old bundle moves into the staging folder; if the final
+/// move fails it is moved back.
+pub fn swap_in_bundle(bundle: &Path, bytes: &[u8], asset: &str) -> Result<()> {
     let staging = staging_dir(bundle)?;
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir(&staging).with_context(|| {
@@ -144,7 +164,16 @@ pub fn swap_in_bundle(bundle: &Path, zip_bytes: &[u8]) -> Result<()> {
         )
     })?;
     let unpacked = staging.join("new");
-    unzip_bundle(zip_bytes, &unpacked)?;
+    std::fs::create_dir(&unpacked)?;
+    if asset.to_lowercase().ends_with(".dmg") {
+        let image = staging.join("update.dmg");
+        std::fs::write(&image, bytes)?;
+        let copied = copy_app_from_dmg(&image, &unpacked);
+        let _ = std::fs::remove_file(&image);
+        copied?;
+    } else {
+        unzip_bundle(bytes, &unpacked)?;
+    }
     let new_bundle = single_app(&unpacked)?;
 
     let want = bundle_id(bundle)?;
@@ -205,6 +234,49 @@ fn unzip_bundle(zip_bytes: &[u8], dest: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Mount a disk image read-only and hidden, copy its one `.app` into `dest`
+/// with ditto (modes, symlinks, and the signature intact), and unmount.
+fn copy_app_from_dmg(image: &Path, dest: &Path) -> Result<()> {
+    let mount = image.with_extension("mnt");
+    std::fs::create_dir_all(&mount)?;
+    let attach = std::process::Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-quiet", "-mountpoint"])
+        .arg(&mount)
+        .arg(image)
+        .status()
+        .context("failed to run hdiutil")?;
+    if !attach.success() {
+        bail!("the downloaded update is not a disk image macOS can open");
+    }
+    let copied = (|| -> Result<()> {
+        let app = single_app(&mount)?;
+        let name = app.file_name().context("bad app path")?;
+        let status = std::process::Command::new("ditto")
+            .arg(&app)
+            .arg(dest.join(name))
+            .status()
+            .context("failed to run ditto")?;
+        if !status.success() {
+            bail!("could not copy the app out of the update image");
+        }
+        Ok(())
+    })();
+    let detached = std::process::Command::new("hdiutil")
+        .args(["detach", "-quiet"])
+        .arg(&mount)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !detached {
+        let _ = std::process::Command::new("hdiutil")
+            .args(["detach", "-quiet", "-force"])
+            .arg(&mount)
+            .status();
+    }
+    let _ = std::fs::remove_dir(&mount);
+    copied
 }
 
 /// The one `.app` directly inside `dir`.
@@ -356,7 +428,8 @@ mod tests {
         let bundle = installed_app(tmp.path(), "com.example.app");
 
         // The zipped bundle's own name doesn't matter; the installed name stays.
-        swap_in_bundle(&bundle, &zipped_app("Renamed.app", "com.example.app", b"v2")).unwrap();
+        swap_in_bundle(&bundle, &zipped_app("Renamed.app", "com.example.app", b"v2"), "A.app.zip")
+            .unwrap();
         let exe = bundle.join("Contents/MacOS/App");
         assert_eq!(std::fs::read(&exe).unwrap(), b"v2");
         assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o755);
@@ -373,8 +446,9 @@ mod tests {
     fn bundle_swap_refuses_a_different_app() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = installed_app(tmp.path(), "com.example.app");
-        let err = swap_in_bundle(&bundle, &zipped_app("Other.app", "com.example.other", b"x"))
-            .unwrap_err();
+        let err =
+            swap_in_bundle(&bundle, &zipped_app("Other.app", "com.example.other", b"x"), "A.zip")
+                .unwrap_err();
         assert!(err.to_string().contains("different app"), "{err}");
         assert_eq!(std::fs::read(bundle.join("Contents/MacOS/App")).unwrap(), b"v1");
     }
@@ -406,5 +480,40 @@ mod tests {
         m.installers = vec![info("A.exe", Some("windows")), info("A.app.zip", Some("macos"))];
         assert_eq!(pick_installer(&m, "macos").unwrap().file, "A.app.zip");
         assert!(pick_installer(&m, "linux").is_none());
+    }
+
+    /// The disk image shape the build script makes: the app plus an
+    /// Applications shortcut.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_swap_from_a_dmg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("image");
+        let app = src.join("Built.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), plist("com.example.app")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/App"), b"v2").unwrap();
+        std::os::unix::fs::symlink("/Applications", src.join("Applications")).unwrap();
+        let dmg = tmp.path().join("Update.dmg");
+        let ok = std::process::Command::new("hdiutil")
+            .args(["create", "-quiet", "-volname", "T", "-fs", "HFS+", "-format", "UDZO", "-srcfolder"])
+            .arg(&src)
+            .arg(&dmg)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "hdiutil create");
+
+        let installed = tmp.path().join("installed");
+        let bundle = installed_app(&installed, "com.example.app");
+        swap_in_bundle(&bundle, &std::fs::read(&dmg).unwrap(), "Update.dmg").unwrap();
+        assert_eq!(std::fs::read(bundle.join("Contents/MacOS/App")).unwrap(), b"v2");
+        // Unmounted and tidied: only the previous bundle is left in staging.
+        let staging = installed.join(".My App.app.update");
+        let left: Vec<String> = std::fs::read_dir(&staging)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["previous.app"], "{left:?}");
     }
 }

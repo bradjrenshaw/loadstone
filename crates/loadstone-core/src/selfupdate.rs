@@ -442,6 +442,9 @@ mod tests {
         assert!(exe.exists());
     }
 
+    // Bundle swaps only happen on macOS; the sample app holds a symlink,
+    // which Windows can't unpack.
+    #[cfg(unix)]
     #[test]
     fn bundle_swap_refuses_a_different_app() {
         let tmp = tempfile::tempdir().unwrap();

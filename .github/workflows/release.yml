@@ -1,0 +1,91 @@
+# Release the Loadstone manager: build Loadstone.exe and Loadstone.dmg from
+# the commit this runs on, write the release manifest that running managers
+# read to offer self-update, and publish tag v<workspace version>.
+#
+# Bump `version` in Cargo.toml and commit before running: that version is
+# both the tag and what installers built from this commit report.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Mark as a pre-release
+        type: boolean
+        default: false
+      notes:
+        description: Release notes (Markdown)
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ -n "$version" ] || { echo "no workspace version in Cargo.toml" >&2; exit 1; }
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released; bump version in Cargo.toml first." >&2; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build-installer.yml
+    with:
+      loadstone-ref: ${{ github.sha }}
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release manifest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          version = os.environ["VERSION"]
+          def entry(name, platform):
+              digest = hashlib.sha256(open(f"dist/{name}", "rb").read()).hexdigest()
+              return {"file": name, "loadstoneVersion": version, "sha256": digest, "platform": platform}
+          windows = entry("Loadstone.exe", "windows")
+          manifest = {
+              "manifestVersion": 1,
+              "id": "loadstone-manager",
+              "version": version,
+              "artifacts": [],
+              # Managers that predate `installers` read only this, as the exe.
+              "installer": {k: v for k, v in windows.items() if k != "platform"},
+              "installers": [windows, entry("Loadstone.dmg", "macos")],
+          }
+          json.dump(manifest, open("dist/loadstone-release.json", "w"), indent=2)
+          PY
+          cat dist/loadstone-release.json
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          NOTES: ${{ inputs.notes }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          flags=()
+          [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "v$VERSION" --notes "${NOTES:-Loadstone $VERSION}" "${flags[@]}" \
+            dist/Loadstone.exe dist/Loadstone.dmg dist/loadstone-release.json

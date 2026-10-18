@@ -1,0 +1,135 @@
+# Build a distributable Loadstone for Windows and macOS: the manager, or a
+# mod's branded single-mod installer when a profile is given.
+#
+# Called from another repository's release workflow:
+#
+#   jobs:
+#     installers:
+#       uses: bradjrenshaw/loadstone/.github/workflows/build-installer.yml@master
+#       with:
+#         profile: installer/profile.json      # in the calling repo
+#         windows-name: BlindfoldInstaller     # -> BlindfoldInstaller.exe
+#         macos-name: Blindfold Installer      # -> Blindfold Installer.app
+#         bundle-id: com.example.blindfold.installer
+#         dmg-name: BlindfoldInstaller.dmg
+#         loadstone-ref: v0.2.0                # which Loadstone to build
+#
+# The builds are uploaded as workflow artifacts named `installer-windows`
+# (the .exe) and `installer-macos` (the .dmg); download them in a later job.
+# `loadstone-ref` decides the Loadstone version, which is what running
+# installers compare when offering self-update.
+#
+# It can also be run by hand (Actions -> Build installer -> Run workflow) to
+# test the plain manager build without releasing anything. A manual run only
+# has `loadstone-ref`, so every other input falls back to its default where
+# it is used.
+
+name: Build installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      loadstone-ref:
+        description: Loadstone branch, tag, or commit to build
+        type: string
+        default: master
+  workflow_call:
+    inputs:
+      profile:
+        description: Distribution profile JSON, a path in the calling repository ("" builds the plain manager)
+        type: string
+        default: ""
+      windows-name:
+        description: Windows exe name, without .exe
+        type: string
+        default: Loadstone
+      macos-name:
+        description: macOS app name, without .app
+        type: string
+        default: Loadstone
+      bundle-id:
+        description: macOS bundle identifier
+        type: string
+        default: com.bradjrenshaw.loadstone
+      dmg-name:
+        description: File name of the macOS disk image
+        type: string
+        default: Loadstone.dmg
+      loadstone-ref:
+        description: Loadstone branch, tag, or commit to build
+        type: string
+        default: master
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: bradjrenshaw/loadstone
+          ref: ${{ inputs.loadstone-ref || 'master' }}
+          path: loadstone
+      - uses: actions/checkout@v4
+        if: inputs.profile != ''
+        with:
+          path: caller
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wx-static-mt
+          key: wx-3.2.8-windows-static-mt-v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loadstone
+          key: windows-crt-static
+      - name: Build
+        shell: pwsh
+        env:
+          LOADSTONE_WX_PREFIX: ${{ runner.temp }}/wx-static-mt
+          PROFILE_PATH: ${{ inputs.profile }}
+          EXE_NAME: ${{ inputs.windows-name || 'Loadstone' }}
+        run: |
+          $profilePath = if ($env:PROFILE_PATH) { Join-Path $env:GITHUB_WORKSPACE "caller/$env:PROFILE_PATH" } else { '' }
+          ./loadstone/scripts/build_windows_app.ps1 -ProfilePath $profilePath -Name $env:EXE_NAME -Out out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
+          path: out/${{ inputs.windows-name || 'Loadstone' }}.exe
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: bradjrenshaw/loadstone
+          ref: ${{ inputs.loadstone-ref || 'master' }}
+          path: loadstone
+      - uses: actions/checkout@v4
+        if: inputs.profile != ''
+        with:
+          path: caller
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wx-static-universal
+          key: wx-3.2.8-macos-static-universal-v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loadstone
+          key: macos-universal
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build
+        env:
+          LOADSTONE_WX_PREFIX: ${{ runner.temp }}/wx-static-universal
+          PROFILE: ${{ inputs.profile }}
+          APP_NAME: ${{ inputs.macos-name || 'Loadstone' }}
+          BUNDLE_ID: ${{ inputs.bundle-id || 'com.bradjrenshaw.loadstone' }}
+          DMG_NAME: ${{ inputs.dmg-name || 'Loadstone.dmg' }}
+        run: |
+          args=(--name "$APP_NAME" --bundle-id "$BUNDLE_ID" --out out/app --dmg "out/$DMG_NAME")
+          [ -n "$PROFILE" ] && args+=(--profile "caller/$PROFILE")
+          ./loadstone/scripts/build_macos_app.sh "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-macos
+          path: out/${{ inputs.dmg-name || 'Loadstone.dmg' }}
+          if-no-files-found: error

@@ -275,6 +275,23 @@ A headless smoke mode prints what the bridge returned for CI:
 real operations with auto-answered callbacks (`_STATE`, `_GAME_DIR`,
 `_RELEASE` override the sandbox).
 
+For Windows, `scripts\build_windows_app.ps1` is the counterpart: static
+wxWidgets (built once, cached under `%LOCALAPPDATA%\loadstone`), the C
+runtime linked statically throughout (no Visual C++ Redistributable needed),
+`-ProfilePath`/`-Name` for a branded installer.
+
+### Releases and CI
+
+- `.github/workflows/ci.yml` runs the tests on Windows and macOS for every
+  push and pull request.
+- `.github/workflows/build-installer.yml` builds the Windows `.exe` and the
+  macOS `.dmg` on GitHub's runners. It is reusable: a mod's own release
+  workflow calls it with its profile to get its branded installers (see the
+  file's header; Blindfold's `.github/workflows/release.yml` is an example).
+- `.github/workflows/release.yml` releases the manager: bump `version` in
+  `Cargo.toml`, commit, then run it from the Actions tab. It builds both
+  platforms, writes `loadstone-release.json`, and publishes `v<version>`.
+
 Known toolchain note: very new MSVC releases (VS 18 preview era) can throw
 nondeterministic internal compiler errors building wxWidgets at high
 parallelism; building wx with `-- -j 4` and retrying gets past it.

@@ -27,6 +27,8 @@ public:
     // `suggest` may be empty.
     virtual rust::String pick_directory(rust::Str id, rust::Str prompt,
                                         rust::Str suggest) = 0;
+    // Puts `text` on the clipboard; false when that failed.
+    virtual bool copy_to_clipboard(rust::Str text) = 0;
 };
 
 } // namespace loadstone

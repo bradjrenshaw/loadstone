@@ -465,11 +465,18 @@ fn validate_steps(
         }
 
         match step {
-            Step::Notice { message, .. } => {
+            Step::Notice { message, clipboard, .. } => {
                 if message.trim().is_empty() {
                     diags.push(Diagnostic::error(format!("{loc}/message"), "must not be empty"));
                 } else {
                     check_path(message, &format!("{loc}/message"), &scope, diags);
+                }
+                if let Some(text) = clipboard {
+                    if text.trim().is_empty() {
+                        diags.push(Diagnostic::error(format!("{loc}/clipboard"), "must not be empty"));
+                    } else {
+                        check_path(text, &format!("{loc}/clipboard"), &scope, diags);
+                    }
                 }
             }
             Step::MergeUniversalBinary { inputs, output, .. } => {

@@ -312,3 +312,89 @@ fn expect_checks_any_condition() {
     assert_eq!(err.to_string(), "Open the launcher first.");
     assert!(ui.0.is_empty());
 }
+
+struct ClipboardUi {
+    log: Vec<String>,
+    clipboard: Option<String>,
+}
+
+impl EngineUi for ClipboardUi {
+    fn log(&mut self, message: &str) {
+        self.log.push(message.to_string());
+    }
+    fn progress(&mut self, _percent: u32) {}
+    fn confirm(&mut self, _message: &str) -> bool {
+        true
+    }
+    fn retry_skip_cancel(&mut self, _message: &str) -> RetryChoice {
+        RetryChoice::Cancel
+    }
+    fn pick_directory(&mut self, _id: &str, _prompt: &str, _suggest: Option<&str>) -> Option<std::path::PathBuf> {
+        None
+    }
+    fn copy_to_clipboard(&mut self, text: &str) -> bool {
+        self.clipboard = Some(text.to_string());
+        true
+    }
+}
+
+#[test]
+fn notice_puts_its_substituted_clipboard_text_on_the_clipboard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ctx = ctx(tmp.path());
+    let mut ui = ClipboardUi { log: Vec::new(), clipboard: None };
+    engine::run_steps(
+        &mut ctx,
+        &steps(serde_json::json!([{
+            "step": "notice",
+            "message": "Paste the line on the clipboard into Steam's Launch Options.",
+            "clipboard": "\"${gameDir}/Launcher.app\" %command%"
+        }])),
+        &Artifacts::default(),
+        false,
+        &mut Vec::new(),
+        &mut ui,
+    )
+    .unwrap();
+    let expected = format!("\"{}/Launcher.app\" %command%", tmp.path().join("game").display());
+    assert_eq!(ui.clipboard.as_deref(), Some(expected.as_str()));
+    assert_eq!(ui.log.last().unwrap(), &format!("Copied to the clipboard: {expected}"));
+
+    // A frontend without a clipboard logs the text itself.
+    let mut quiet = QuietUi(Vec::new());
+    engine::run_steps(
+        &mut ctx,
+        &steps(serde_json::json!([{ "step": "notice", "message": "m", "clipboard": "c" }])),
+        &Artifacts::default(),
+        false,
+        &mut Vec::new(),
+        &mut quiet,
+    )
+    .unwrap();
+    assert_eq!(quiet.0, vec!["m".to_string(), "c".to_string()]);
+}
+
+#[test]
+fn delete_files_removes_a_named_directory_only_when_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ctx = ctx(tmp.path());
+    let game_dir = tmp.path().join("game");
+    std::fs::create_dir_all(game_dir.join("Loader").join("patchers")).unwrap();
+    std::fs::create_dir_all(game_dir.join("Loader").join("plugins")).unwrap();
+    std::fs::write(game_dir.join("Loader").join("plugins").join("other.dll"), b"x").unwrap();
+    engine::run_steps(
+        &mut ctx,
+        &steps(serde_json::json!([{
+            "step": "delete-files",
+            "paths": ["${gameDir}/Loader/patchers", "${gameDir}/Loader/plugins"]
+        }])),
+        &Artifacts::default(),
+        false,
+        &mut Vec::new(),
+        &mut QuietUi(Vec::new()),
+    )
+    .unwrap();
+    assert!(!game_dir.join("Loader").join("patchers").exists());
+    assert!(game_dir.join("Loader").join("plugins").join("other.dll").exists());
+    assert!(game_dir.is_dir(), "pruning stops at the game folder");
+}

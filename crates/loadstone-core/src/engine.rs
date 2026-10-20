@@ -34,6 +34,10 @@ pub trait EngineUi {
     /// `id` is the pick-directory step's variable id, letting frontends
     /// pre-supply answers (CLI --dir flags, GUI test drivers).
     fn pick_directory(&mut self, id: &str, prompt: &str, suggest: Option<&str>) -> Option<PathBuf>;
+    /// Put `text` on the clipboard; false when the frontend has none.
+    fn copy_to_clipboard(&mut self, _text: &str) -> bool {
+        false
+    }
 }
 
 /// Everything install() needs, resolved by the caller (CLI or GUI):
@@ -492,13 +496,24 @@ fn run_steps_inner(
                 }
             }
             Step::DeleteFiles { paths, .. } => {
+                let mut files = Vec::new();
+                let mut dirs = Vec::new();
                 for raw in paths {
                     for path in ctx.glob_matches(raw)? {
                         if path.is_file() {
-                            let _ = std::fs::remove_file(&path);
+                            files.push(path);
+                        } else if path.is_dir() {
+                            dirs.push(path);
                         }
                     }
                 }
+                let roots = roots_of(ctx);
+                for e in remove_tracked_files(&files, &roots) {
+                    ui.log(&format!("Warning: {e}"));
+                }
+                // A matched directory goes too once it is empty (a loader's
+                // bare folder an archive created but no file filled).
+                crate::track::prune_empty_dirs(dirs, &roots);
             }
             Step::PickDirectory { id, prompt, suggest, .. } => {
                 match ui.pick_directory(id, prompt, suggest.as_deref()) {
@@ -515,11 +530,21 @@ fn run_steps_inner(
                     }
                 }
             }
-            Step::Notice { message, .. } => {
+            Step::Notice { message, clipboard, .. } => {
                 // Informational only: a follow-up the user has to do by hand
                 // (set Steam launch options, restart the game). It lands in
                 // the activity log, which every frontend reads out.
                 ui.log(&ctx.substitute(message)?);
+                if let Some(text) = clipboard {
+                    let text = ctx.substitute(text)?;
+                    // Without a clipboard the text still reaches the log, so
+                    // the user can copy it by hand.
+                    if ui.copy_to_clipboard(&text) {
+                        ui.log(&format!("Copied to the clipboard: {text}"));
+                    } else {
+                        ui.log(&text);
+                    }
+                }
             }
             Step::MergeUniversalBinary { inputs, output, .. } => {
                 let mut blobs = Vec::with_capacity(inputs.len());
@@ -680,18 +705,21 @@ pub fn uninstall(
             None => ui.confirm("Also remove saved settings and preferences?"),
         };
         if purge {
+            let mut files = Vec::new();
             for path in &state.user_data_paths {
                 if path.is_file() {
-                    let _ = std::fs::remove_file(path);
+                    files.push(path.clone());
                 } else if path.is_dir() {
                     let _ = std::fs::remove_dir_all(path);
                 }
+            }
+            for e in remove_tracked_files(&files, &state.roots) {
+                ui.log(&format!("Warning: {e}"));
             }
             ui.log("Removed saved settings.");
         }
     }
 
     store.remove(&state.game, &state.id, &state.game_dir)?;
-    ui.log(&format!("{} uninstalled.", state.id));
     Ok(())
 }

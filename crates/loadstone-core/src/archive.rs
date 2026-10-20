@@ -231,6 +231,8 @@ pub fn extract_routed(
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
+        crate::track::make_writable(&dest)
+            .with_context(|| format!("failed to make {} writable", dest.display()))?;
         std::fs::write(&dest, &entry.contents)
             .with_context(|| format!("failed to write {}", dest.display()))?;
         apply_mode(&dest, entry.mode)?;
@@ -323,6 +325,29 @@ mod tests {
         assert!(out.written.is_empty());
         assert_eq!(out.kept_existing.len(), 1);
         assert_eq!(std::fs::read(tmp.path().join("game").join("version.dll")).unwrap(), b"newer");
+    }
+
+    #[test]
+    fn overwrites_a_read_only_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx(tmp.path());
+        let target = tmp.path().join("game").join(".doorstop_version");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"old").unwrap();
+        let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&target, permissions).unwrap();
+        let zip = make_zip(&[(".doorstop_version", b"new")]);
+        let out = extract_routed(
+            &ctx,
+            &zip,
+            &routes(serde_json::json!([{ "from": "**", "to": "${gameDir}" }])),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.written.len(), 1);
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
     }
 
     fn make_tar_gz(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {

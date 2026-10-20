@@ -501,7 +501,9 @@ matches.
 { "step": "delete-files", "paths": ["${gameDir}/Tolk.dll"] }
 ```
 
-Best-effort removal; missing files are not errors.
+Best-effort removal; missing files are not errors, and read-only files are
+removed too. A path that names a directory removes it only if it is empty.
+Directories the removal leaves empty are pruned, up to the allowed roots. A failure is logged as a warning and the step continues.
 
 ### 9.6 `pick-directory`
 
@@ -542,6 +544,17 @@ Path tokens are substituted; `when` is the usual way to scope it.
 { "step": "notice",
   "when": { "platform": "macos" },
   "message": "Steam does not load Lovely on macOS by itself. In Steam, open Balatro's Properties and set Launch Options to: \"${gameDir}/steam_lovely_macos.sh\" %command%" }
+```
+
+An optional `clipboard` string (tokens substituted) is put on the clipboard
+and logged after the message (frontends without a clipboard log the text
+alone) — for a line the user has to paste somewhere, such as Steam Launch
+Options:
+
+```json
+{ "step": "notice", "when": { "platform": "macos" },
+  "message": "In Steam, set Balatro's Launch Options to the line now on the clipboard.",
+  "clipboard": "\"${gameDir}/steam_lovely_macos.sh\" %command%" }
 ```
 
 The step never fails and writes nothing to disk.

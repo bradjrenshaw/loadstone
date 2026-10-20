@@ -219,12 +219,38 @@ impl StateStore {
     }
 }
 
+/// Clear a file's read-only flag so it can be overwritten or removed. Windows
+/// refuses both on a read-only file, and a hand-unzipped loader can leave one
+/// behind (a read-only `.doorstop_version`). Missing files are left alone.
+pub fn make_writable(path: &Path) -> std::io::Result<()> {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if !metadata.is_file() || !metadata.permissions().readonly() {
+        return Ok(());
+    }
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(path, permissions)
+}
+
 /// Remove tracked files, then prune any directories that became empty (walking
 /// up, stopping at the given roots). Missing files are not errors.
 pub fn remove_tracked_files(files: &[PathBuf], stop_roots: &[PathBuf]) -> Vec<String> {
     let mut errors = Vec::new();
     let mut parents: Vec<PathBuf> = Vec::new();
     for file in files {
+        if let Err(e) = make_writable(file) {
+            errors.push(format!("{}: {e}", file.display()));
+            continue;
+        }
         match std::fs::remove_file(file) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -234,11 +260,19 @@ pub fn remove_tracked_files(files: &[PathBuf], stop_roots: &[PathBuf]) -> Vec<St
             parents.push(p.to_path_buf());
         }
     }
-    parents.sort();
-    parents.dedup();
+    prune_empty_dirs(parents, stop_roots);
+    errors
+}
+
+/// Remove each directory that is empty, then its parents as they empty in
+/// turn, stopping at the given roots. A non-empty or missing directory ends
+/// that walk; nothing here is an error.
+pub fn prune_empty_dirs(mut dirs: Vec<PathBuf>, stop_roots: &[PathBuf]) {
+    dirs.sort();
+    dirs.dedup();
     // Deepest first so nested empties collapse upward.
-    parents.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    for mut dir in parents {
+    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for mut dir in dirs {
         loop {
             if stop_roots.iter().any(|r| &dir == r) {
                 break;
@@ -253,7 +287,6 @@ pub fn remove_tracked_files(files: &[PathBuf], stop_roots: &[PathBuf]) -> Vec<St
             }
         }
     }
-    errors
 }
 
 fn _assert_is_send(_: &Path) {}

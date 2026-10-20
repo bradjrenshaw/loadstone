@@ -266,6 +266,16 @@ public:
         return rust::String(picked);
     }
 
+    bool copy_to_clipboard(rust::Str text) override {
+        wxString value = FromRust(text);
+        return Ask<bool>(false, [value](LoadstoneFrame*) {
+            if (!wxTheClipboard->Open()) return false;
+            bool ok = wxTheClipboard->SetData(new wxTextDataObject(value));
+            wxTheClipboard->Close();
+            return ok;
+        });
+    }
+
 private:
     // Fire-and-forget onto the GUI thread.
     template <typename Fn>
@@ -1629,6 +1639,10 @@ public:
     rust::String pick_directory(rust::Str id, rust::Str, rust::Str) override {
         out_ << "op-pickdir: " << std::string(id) << " -> cancel\n";
         return rust::String();
+    }
+    bool copy_to_clipboard(rust::Str text) override {
+        out_ << "op-clipboard: " << std::string(text) << "\n";
+        return true;
     }
 
 private:

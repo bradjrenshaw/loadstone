@@ -354,7 +354,12 @@ pub fn resolve_steps(ctx: &InstallContext, steps: &[crate::types::Step]) -> Resu
                 *from = ctx.substitute(from)?;
                 *to = ctx.substitute(to)?;
             }
-            Step::Notice { message, .. } => *message = ctx.substitute(message)?,
+            Step::Notice { message, clipboard, .. } => {
+                *message = ctx.substitute(message)?;
+                if let Some(text) = clipboard {
+                    *text = ctx.substitute(text)?;
+                }
+            }
             Step::MergeUniversalBinary { inputs, output, .. } => {
                 for p in inputs.iter_mut() {
                     *p = ctx.substitute(p)?;

@@ -390,6 +390,7 @@ mod ffi {
             prompt: &str,
             suggest: &str,
         ) -> String;
+        fn copy_to_clipboard(self: Pin<&mut UiCallbacks>, text: &str) -> bool;
     }
 }
 
@@ -430,6 +431,10 @@ impl loadstone_core::engine::EngineUi for GuiUi<'_> {
         } else {
             Some(PathBuf::from(answer.to_string()))
         }
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str) -> bool {
+        self.0.as_mut().copy_to_clipboard(text)
     }
 }
 

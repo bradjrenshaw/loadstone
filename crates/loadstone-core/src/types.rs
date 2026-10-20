@@ -307,6 +307,10 @@ pub enum Step {
     },
     Notice {
         message: String,
+        /// Text the frontend puts on the clipboard (e.g. a launch option
+        /// line the user has to paste somewhere).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clipboard: Option<String>,
         #[serde(flatten)]
         common: StepCommon,
     },

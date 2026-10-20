@@ -23,7 +23,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --- Rust bridge -------------------------------------------------------------
 set(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
-set(CARGO_TARGET_DIR "${REPO_ROOT}/target")
+# Cargo's own answer, so a target dir redirected by CARGO_TARGET_DIR or a
+# cargo config (e.g. off a network share) is where the bridge is looked for.
+execute_process(
+    COMMAND cargo metadata --format-version 1 --no-deps
+    WORKING_DIRECTORY "${REPO_ROOT}"
+    OUTPUT_VARIABLE CARGO_METADATA
+    RESULT_VARIABLE CARGO_METADATA_RESULT
+    ERROR_VARIABLE CARGO_METADATA_ERROR)
+if(NOT CARGO_METADATA_RESULT EQUAL 0)
+    message(FATAL_ERROR "cargo metadata failed: ${CARGO_METADATA_ERROR}")
+endif()
+string(JSON CARGO_TARGET_DIR GET "${CARGO_METADATA}" target_directory)
+file(TO_CMAKE_PATH "${CARGO_TARGET_DIR}" CARGO_TARGET_DIR)
 # A prebuilt bridge (scripts/build_macos_app.sh passes a universal one made
 # with lipo); otherwise cargo builds it for the host as part of this build.
 set(LOADSTONE_BRIDGE_LIB "" CACHE FILEPATH "Prebuilt loadstone-bridge static library")

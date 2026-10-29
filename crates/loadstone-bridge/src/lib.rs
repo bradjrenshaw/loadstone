@@ -54,6 +54,9 @@ mod ffi {
         entries: Vec<CatalogEntry>,
         /// Warnings worth showing (cache fallbacks, unreachable registries).
         notes: Vec<String>,
+        /// Non-empty when a registry was unreachable in a way signing in
+        /// may fix (a private repo): the message to show with the offer.
+        sign_in_hint: String,
     }
 
     struct ChoiceItem {
@@ -767,6 +770,17 @@ fn build_resolver(
     Ok((fetcher, registries.to_vec()))
 }
 
+/// A registry load failed during the catalog fetch: note it, and if
+/// signing in might help, say so — the catalog still lists installed mods,
+/// and the GUI offers to sign in on top.
+fn registry_failed(e: &anyhow::Error, notes: &Rc<RefCell<Vec<String>>>, hint: &mut String) {
+    let text = format!("Could not load registries: {e:#}");
+    if loadstone_core::source::is_maybe_private(e) {
+        *hint = text.clone();
+    }
+    notes.borrow_mut().push(text);
+}
+
 pub fn fetch_catalog(embedded: &str, state_dir: &str) -> Result<Catalog> {
     accounts::track(fetch_catalog_inner(embedded, state_dir))
 }
@@ -782,6 +796,7 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
     // detected game copy — installed by hand or by an old standalone
     // installer.
     let mut foreign_ids: Vec<String> = Vec::new();
+    let mut sign_in_hint = String::new();
     if profile.registries.is_empty() {
         notes
             .borrow_mut()
@@ -814,13 +829,9 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
                     }
                     mods = list;
                 }
-                Err(e) => notes
-                    .borrow_mut()
-                    .push(format!("Could not load registries: {e:#}")),
+                Err(e) => registry_failed(&e, &notes, &mut sign_in_hint),
             },
-            Err(e) => notes
-                .borrow_mut()
-                .push(format!("Could not load registries: {e:#}")),
+            Err(e) => registry_failed(&e, &notes, &mut sign_in_hint),
         }
     }
 
@@ -872,7 +883,7 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     let notes = notes.borrow().clone();
-    Ok(Catalog { entries, notes })
+    Ok(Catalog { entries, notes, sign_in_hint })
 }
 
 fn setting_items(

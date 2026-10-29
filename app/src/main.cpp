@@ -465,6 +465,11 @@ void LoadstoneFrame::OnCatalog(const loadstone::Catalog& catalog) {
     SetStatusText(wxString::Format("Catalog loaded: %zu mods.", entryIds_.size()));
     // Only steal focus when the catalog view is what's showing.
     if (!pagePanel_) modList_->SetFocus();
+
+    // A private registry: installed mods are listed above; offer to sign
+    // in and reload so the rest appear.
+    wxString hint = FromRust(catalog.sign_in_hint);
+    if (!hint.empty() && OfferSignIn(hint)) StartCatalogFetch();
 }
 
 // ---------------------------------------------------------------------------

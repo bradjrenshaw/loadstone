@@ -225,7 +225,10 @@ impl std::error::Error for MaybePrivate {}
 /// True if `err` is (or wraps) the [`MaybePrivate`] hint — the GUI offers
 /// to sign in.
 pub fn is_maybe_private(err: &anyhow::Error) -> bool {
-    err.chain().any(|c| c.downcast_ref::<MaybePrivate>().is_some())
+    // anyhow::Error::downcast_ref sees context values through every layer
+    // of `.context()`; the links `chain()` yields are anyhow's wrapper
+    // types, which never downcast to the context type itself.
+    err.downcast_ref::<MaybePrivate>().is_some()
 }
 
 fn with_credentials<T>(
@@ -322,6 +325,17 @@ mod tests {
         assert!(parse("gitlab:x/y").is_err());
         assert!(parse("github:only-owner").is_err());
         assert!(parse("github:a/b/c").is_err());
+    }
+
+    #[test]
+    fn maybe_private_survives_context_layers() {
+        let base = anyhow::anyhow!("HTTP 404");
+        let err = base
+            .context(MaybePrivate { source: "github:o/r".into() })
+            .context("failed to fetch registry github:o/r")
+            .context("could not be resolved");
+        assert!(is_maybe_private(&err));
+        assert!(!is_maybe_private(&anyhow::anyhow!("HTTP 404").context("outer")));
     }
 
     #[test]

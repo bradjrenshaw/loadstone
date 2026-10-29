@@ -950,6 +950,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
     // state's recorded ids win (what actually got pulled in); a fresh
     // manifest supplies them pre-install.
     let mut dep_infos: Vec<(String, String)> = Vec::new();
+    let mut resolve_err: Option<anyhow::Error> = None;
     if !profile.registries.is_empty() {
         let (mut fetcher, sources) = build_resolver(&profile.registries, notes.clone())?;
         match Resolver::from_sources(&sources, &mut fetcher) {
@@ -976,19 +977,31 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                     }
                     resolved = Some(res);
                 }
-                Err(e) => notes
-                    .borrow_mut()
-                    .push(format!("Not found in the configured registries: {e:#}")),
+                Err(e) => {
+                    notes
+                        .borrow_mut()
+                        .push(format!("Not found in the configured registries: {e:#}"));
+                    resolve_err = Some(e);
+                }
             },
-            Err(e) => notes
-                .borrow_mut()
-                .push(format!("Could not load registries: {e:#}")),
+            Err(e) => {
+                notes.borrow_mut().push(format!("Could not load registries: {e:#}"));
+                resolve_err = Some(e);
+            }
         }
     } else if records.is_empty() {
         anyhow::bail!("\"{mod_id}\" is not installed and no registries are configured");
     }
     if resolved.is_none() && records.is_empty() {
-        anyhow::bail!("\"{mod_id}\" is not installed and could not be resolved");
+        // Keep the underlying error in the chain: if it says the registry
+        // may be private, the GUI offers to sign in and retry.
+        return Err(match resolve_err {
+            Some(e) => {
+                let msg = format!("\"{mod_id}\" is not installed and could not be resolved: {e:#}");
+                e.context(msg)
+            }
+            None => anyhow::anyhow!("\"{mod_id}\" is not installed and could not be resolved"),
+        });
     }
 
     // Latest released version, when a release manifest is reachable. The

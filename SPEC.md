@@ -242,12 +242,13 @@ mods that omit their own copy resolve to it through the scope chain (§2.1).
   Steam app a mod supports equally (a demo, a playtest). Every entry is
   detected; a copy is matched to its entry by folder name, which sets its
   `${steam.appId}`, and an entry's `name` is shown in the copy's label
-  ("Steam demo copy"):
+  ("Steam demo copy"). For a made-up game with a separate demo app (the ids
+  are placeholders, not real apps):
 
 ```json
 "steam": [
-  { "appId": 2379780, "dirName": "Balatro" },
-  { "appId": 2379790, "dirName": "Balatro Demo", "name": "demo" }
+  { "appId": 9999990, "dirName": "Example Game" },
+  { "appId": 9999999, "dirName": "Example Game Demo", "name": "demo" }
 ]
 ```
 - `userData` — per-platform user-data root, resolved into `${userData}`.

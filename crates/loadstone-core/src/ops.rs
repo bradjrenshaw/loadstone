@@ -221,6 +221,9 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     let (version, install_steps, uninstall_steps, user_data_decl, artifact, expected_sha);
     let (settings, actions, launch, strip_top_level);
     let mut extra_artifacts: Vec<NamedArtifact> = Vec::new();
+    // The package manifest's cleanupLegacy, plus whatever the release
+    // froze at packaging time (the registry copy may be newer).
+    let mut cleanup_legacy = manifest.cleanup_legacy.clone();
     let mut artifact_id: Option<String> = None;
     let is_branch_channel = manifest
         .channels
@@ -370,6 +373,11 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         install_steps = release.install.clone();
         uninstall_steps = release.uninstall.clone();
         user_data_decl = release.user_data.clone();
+        for p in &release.cleanup_legacy {
+            if !cleanup_legacy.contains(p) {
+                cleanup_legacy.push(p.clone());
+            }
+        }
         settings = release.settings.clone();
         actions = release.actions.clone();
         launch = release.launch.clone();
@@ -398,6 +406,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         install_steps: &install_steps,
         uninstall_steps: &uninstall_steps,
         user_data_decl: &user_data_decl,
+        cleanup_legacy: &cleanup_legacy,
         artifact: &artifact,
         artifact_id: artifact_id.as_deref(),
         expected_sha256: expected_sha.as_deref(),
@@ -503,6 +512,7 @@ fn install_dependency(
         install_steps: &tool.install,
         uninstall_steps: &tool.uninstall,
         user_data_decl: &tool.user_data,
+        cleanup_legacy: &tool.cleanup_legacy,
         artifact: &artifact,
         artifact_id: entry.id.as_deref(),
         expected_sha256: Some(&entry.sha256),

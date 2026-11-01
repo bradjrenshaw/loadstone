@@ -26,6 +26,9 @@ pub struct InstalledState {
     /// Absolute user-data paths offered for purge on uninstall.
     #[serde(default)]
     pub user_data_paths: Vec<PathBuf>,
+    /// Absolute `cleanupLegacy` paths, deleted again on uninstall.
+    #[serde(default)]
+    pub cleanup_legacy_paths: Vec<PathBuf>,
     /// Dependency ids this package pulled in (for dependent bookkeeping).
     #[serde(default)]
     pub dependencies: Vec<String>,
@@ -275,6 +278,7 @@ mod tests {
             files: vec![tmp.path().join("a.lua")],
             uninstall_steps: Vec::new(),
             user_data_paths: Vec::new(),
+            cleanup_legacy_paths: Vec::new(),
             dependencies: Vec::new(),
             dependents: Vec::new(),
             roots: Vec::new(),

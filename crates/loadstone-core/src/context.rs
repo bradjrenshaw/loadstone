@@ -293,7 +293,7 @@ impl InstallContext {
         }
     }
 
-    fn is_under_allowed_root(&self, path: &Path) -> bool {
+    pub(crate) fn is_under_allowed_root(&self, path: &Path) -> bool {
         let mut roots: Vec<&PathBuf> = vec![&self.game_dir, &self.user_data];
         roots.extend(self.game_paths.values());
         roots.extend(self.vars.values());

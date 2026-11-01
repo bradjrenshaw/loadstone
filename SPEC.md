@@ -625,7 +625,11 @@ file.
 ```
 
 - **`cleanupLegacy`** — paths placed by pre-manager installers (which the manager
-  never tracked). Deleted on first managed install and on uninstall:
+  never tracked). Deleted on every install (so an install made before the
+  manager honoured this list is cleaned on its next update) and on uninstall.
+  Files or folders; a path outside the game's folders, a root itself, one
+  reached through a link, or one holding a file another installed package
+  tracks is skipped:
 
 ```json
 "cleanupLegacy": ["${gameDir}/Tolk.dll", "${gameDir}/nvdaControllerClient64.dll"]

@@ -114,6 +114,7 @@ fn install_update_uninstall_roundtrip() {
             install_steps,
             uninstall_steps,
             user_data_decl: &manifest.user_data,
+            cleanup_legacy: &manifest.cleanup_legacy,
             artifact: &zip_v1,
             artifact_id: None,
             expected_sha256: Some(&sha_v1),
@@ -145,6 +146,7 @@ fn install_update_uninstall_roundtrip() {
             install_steps,
             uninstall_steps,
             user_data_decl: &manifest.user_data,
+            cleanup_legacy: &manifest.cleanup_legacy,
             artifact: &zip_v1,
             artifact_id: None,
             expected_sha256: Some("00000000000000000000000000000000000000000000000000000000deadbeef"),
@@ -179,6 +181,7 @@ fn install_update_uninstall_roundtrip() {
             install_steps,
             uninstall_steps,
             user_data_decl: &manifest.user_data,
+            cleanup_legacy: &manifest.cleanup_legacy,
             artifact: &zip_v2,
             artifact_id: None,
             expected_sha256: Some(&sha_v2),
@@ -254,6 +257,7 @@ fn refuses_to_install_over_linked_dev_checkout() {
             install_steps,
             uninstall_steps,
             user_data_decl: &[],
+            cleanup_legacy: &[],
             artifact: &zip,
             artifact_id: None,
             expected_sha256: Some(&sha),
@@ -315,6 +319,7 @@ fn tool_refuses_uninstall_while_needed() {
             install_steps: &tool.install,
             uninstall_steps: &tool.uninstall,
             user_data_decl: &[],
+            cleanup_legacy: &[],
             artifact: &zip,
             artifact_id: None,
             expected_sha256: Some(&sha),
@@ -338,4 +343,91 @@ fn tool_refuses_uninstall_while_needed() {
     store.save(&freed).unwrap();
     engine::uninstall(&store, &freed, Some(false), &mut ui).unwrap();
     assert!(!game_dir.join("version.dll").exists());
+}
+
+/// cleanupLegacy (SPEC §10): pre-manager leftovers go on install and again
+/// on uninstall, but a file another installed package tracks is left alone,
+/// and a path outside the mod's folders is never touched.
+#[test]
+fn cleanup_legacy_on_install_and_uninstall() {
+    let tmp = tempfile::tempdir().unwrap();
+    let game_dir = tmp.path().join("game");
+    let user_data = tmp.path().join("appdata").join("Balatro");
+    let outside = tmp.path().join("elsewhere.dll");
+    std::fs::create_dir_all(game_dir.join("OldMod")).unwrap();
+    std::fs::write(game_dir.join("Balatro.exe"), b"fake").unwrap();
+    std::fs::write(game_dir.join("Tolk.dll"), b"legacy").unwrap();
+    std::fs::write(game_dir.join("OldMod").join("old.lua"), b"legacy").unwrap();
+    std::fs::write(game_dir.join("shared.dll"), b"another mod's").unwrap();
+    std::fs::write(&outside, b"not ours").unwrap();
+
+    let store = StateStore::open(Some(tmp.path().join("state"))).unwrap();
+    let game = game();
+    let mut ui = SilentUi;
+    let mut ctx = InstallContext::build(&game, game_dir.clone(), Some(user_data.clone()), "steam".into()).unwrap();
+
+    // Another package already tracks shared.dll.
+    let other = mod_manifest_with_id("other");
+    let zip_other = make_zip(&[("Blindfold/lovely.toml", b"[manifest]")]);
+    let mut other_state = engine::install(
+        &store,
+        &mut ctx,
+        &plan(&other, &zip_other, &[]),
+        &mut ui,
+    )
+    .unwrap();
+    other_state.files.push(game_dir.join("shared.dll"));
+    store.save(&other_state).unwrap();
+
+    let manifest = mod_manifest();
+    let cleanup: Vec<String> = vec![
+        "${gameDir}/Tolk.dll".into(),
+        "${gameDir}/OldMod".into(),
+        "${gameDir}/shared.dll".into(),
+        "${gameDir}".into(),
+        outside.to_string_lossy().into_owned(),
+    ];
+    let zip = make_zip(&[("Blindfold/lovely.toml", b"[manifest]")]);
+    engine::install(&store, &mut ctx, &plan(&manifest, &zip, &cleanup), &mut ui).unwrap();
+    assert!(!game_dir.join("Tolk.dll").exists(), "legacy file removed on install");
+    assert!(!game_dir.join("OldMod").exists(), "legacy folder removed on install");
+    assert!(game_dir.join("shared.dll").exists(), "another package's file kept");
+    assert!(game_dir.join("Balatro.exe").exists(), "a root is never removed");
+    assert!(outside.exists(), "paths outside the mod's folders are never removed");
+
+    // A legacy installer run again later: uninstall cleans it up too.
+    std::fs::write(game_dir.join("Tolk.dll"), b"legacy again").unwrap();
+    let state = store.load("balatro", "blindfold", &game_dir).unwrap().unwrap();
+    engine::uninstall(&store, &state, Some(false), &mut ui).unwrap();
+    assert!(!game_dir.join("Tolk.dll").exists(), "legacy file removed on uninstall");
+    assert!(game_dir.join("shared.dll").exists());
+}
+
+fn mod_manifest_with_id(id: &str) -> ProjectManifest {
+    let mut m = mod_manifest();
+    m.id = id.into();
+    m
+}
+
+fn plan<'a>(manifest: &'a ProjectManifest, zip: &'a [u8], cleanup: &'a [String]) -> InstallPlan<'a> {
+    InstallPlan {
+        manifest,
+        game_id: "balatro".into(),
+        version: "1.0.0".into(),
+        channel: "stable".into(),
+        install_steps: &manifest.install,
+        uninstall_steps: &manifest.uninstall,
+        user_data_decl: &[],
+        cleanup_legacy: cleanup,
+        artifact: zip,
+        artifact_id: None,
+        expected_sha256: None,
+        extra_artifacts: &[],
+        launch: &[],
+        keep_existing: false,
+        dependent_of: None,
+        settings: None,
+        actions: &[],
+        strip_top_level: false,
+    }
 }

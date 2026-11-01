@@ -46,6 +46,9 @@ pub struct InstallPlan<'a> {
     pub install_steps: &'a [Step],
     pub uninstall_steps: &'a [Step],
     pub user_data_decl: &'a [String],
+    /// `cleanupLegacy` paths (unresolved): files a pre-manager installer
+    /// left that this install supersedes (SPEC §10).
+    pub cleanup_legacy: &'a [String],
     pub artifact: &'a [u8],
     /// The primary artifact's `id`, when it has one, so steps can name it.
     pub artifact_id: Option<&'a str>,
@@ -153,6 +156,16 @@ pub fn install(
         store.remove(&plan.game_id, &plan.manifest.id, &ctx.game_dir)?;
     }
 
+    // 2b. Files a pre-manager installer left behind. Run on every install,
+    //     not just the first managed one, so installs made before the
+    //     manager honoured cleanupLegacy get cleaned on their next update.
+    let cleanup_legacy_paths = plan
+        .cleanup_legacy
+        .iter()
+        .map(|raw| ctx.resolve_path(raw))
+        .collect::<Result<Vec<_>>>()?;
+    remove_legacy_paths(store, ctx, &plan.game_id, &plan.manifest.id, &cleanup_legacy_paths, ui);
+
     // 3. Run the steps, tracking every write; roll back on failure.
     let mut written: Vec<PathBuf> = Vec::new();
     let run = run_steps_inner(
@@ -204,6 +217,7 @@ pub fn install(
             .iter()
             .map(|raw| ctx.resolve_path(raw))
             .collect::<Result<Vec<_>>>()?,
+        cleanup_legacy_paths,
         dependencies: plan.manifest.dependencies.iter().map(|d| d.id.clone()).collect(),
         dependents: match &plan.dependent_of {
             Some(d) => {
@@ -362,6 +376,59 @@ fn refuse_links_over(files: &[PathBuf], roots: &[PathBuf]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Delete `cleanupLegacy` paths (already resolved). Best effort: a path
+/// that is missing, outside the game's folders, a root itself, reached
+/// through a link, or holding a file another installed package tracks is
+/// skipped, and failures are logged rather than failing the operation.
+fn remove_legacy_paths(
+    store: &StateStore,
+    ctx: &InstallContext,
+    game_id: &str,
+    self_id: &str,
+    paths: &[PathBuf],
+    ui: &mut dyn EngineUi,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    let roots = roots_of(ctx);
+    // Another package's files are its own, even when a legacy installer
+    // once put the same file there (two mods both shipping Tolk.dll).
+    let others: Vec<PathBuf> = store
+        .list(game_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.id != self_id && s.game_dir == ctx.game_dir)
+        .flat_map(|s| s.files)
+        .collect();
+    for path in paths {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            continue; // already gone
+        };
+        if !ctx.is_under_allowed_root(path) || roots.iter().any(|r| r == path) {
+            ui.log(&format!("Not removing {}: outside the mod's folders.", path.display()));
+            continue;
+        }
+        if crate::context::find_link_ancestor(path.parent().unwrap_or(path), &roots).is_some() {
+            ui.log(&format!("Not removing {}: it is reached through a link.", path.display()));
+            continue;
+        }
+        if others.iter().any(|f| f.starts_with(path)) {
+            ui.log(&format!("Not removing {}: another installed package uses it.", path.display()));
+            continue;
+        }
+        let result = if meta.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        match result {
+            Ok(()) => ui.log(&format!("Removed leftover {}", path.display())),
+            Err(e) => ui.log(&format!("Warning: could not remove {}: {e}", path.display())),
+        }
+    }
 }
 
 fn roots_of(ctx: &InstallContext) -> Vec<PathBuf> {
@@ -665,6 +732,11 @@ pub fn uninstall(
     let errors = remove_tracked_files(&state.files, &state.roots);
     for e in &errors {
         ui.log(&format!("Warning: {e}"));
+    }
+
+    if !state.cleanup_legacy_paths.is_empty() {
+        let ctx = context_from_state(state);
+        remove_legacy_paths(store, &ctx, &state.game, &state.id, &state.cleanup_legacy_paths, ui);
     }
 
     if !state.uninstall_steps.is_empty() {

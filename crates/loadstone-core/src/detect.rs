@@ -50,6 +50,54 @@ pub fn infer_distribution(dir: &Path) -> String {
 }
 
 /// Try to auto-detect the game's first-found copy.
+/// One Steam app a game package can be installed as. `detect.steam` is
+/// either a single entry or a list, for games that also ship as a
+/// separate Steam app (a demo, a playtest) a mod supports equally:
+///
+/// ```json
+/// "steam": [ { "appId": 1, "dirName": "Game" },
+///            { "appId": 2, "dirName": "Game Demo", "name": "demo" } ]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteamEntry {
+    pub app_id: Option<String>,
+    pub dir_name: Option<String>,
+    /// Shown in the copy's label ("Steam demo copy"); none for the main app.
+    pub name: Option<String>,
+}
+
+pub fn steam_entries(game: &GameManifest) -> Vec<SteamEntry> {
+    let entry = |v: &serde_json::Value| SteamEntry {
+        app_id: match v.get("appId") {
+            Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        },
+        dir_name: v.get("dirName").and_then(|d| d.as_str()).map(str::to_string),
+        name: v
+            .get("name")
+            .and_then(|d| d.as_str())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string),
+    };
+    match game.detect.distributions.get("steam") {
+        Some(serde_json::Value::Array(items)) => items.iter().filter(|v| v.is_object()).map(entry).collect(),
+        Some(v) if v.is_object() => vec![entry(v)],
+        _ => Vec::new(),
+    }
+}
+
+/// The Steam entry a folder belongs to, matched by its folder name (Steam
+/// installs each app under `steamapps/common/<dirName>`). None when the
+/// folder matches no entry, e.g. a hand-picked copy elsewhere.
+pub fn steam_entry_for_dir(game: &GameManifest, dir: &Path) -> Option<SteamEntry> {
+    let folder = dir.file_name()?.to_string_lossy().to_lowercase();
+    steam_entries(game)
+        .into_iter()
+        .find(|e| e.dir_name.as_deref().is_some_and(|d| d.to_lowercase() == folder))
+}
+
 pub fn detect(game: &GameManifest) -> Result<Option<DetectedGame>> {
     Ok(detect_all(game)?.into_iter().next())
 }
@@ -61,9 +109,8 @@ pub fn detect(game: &GameManifest) -> Result<Option<DetectedGame>> {
 pub fn detect_all(game: &GameManifest) -> Result<Vec<DetectedGame>> {
     let mut found: Vec<DetectedGame> = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
-    if let Some(steam) = game.detect.distributions.get("steam") {
-        let dir_name = steam.get("dirName").and_then(|v| v.as_str());
-        if let Some(dir_name) = dir_name {
+    for steam in steam_entries(game) {
+        if let Some(dir_name) = steam.dir_name.as_deref() {
             for steam_root in steam_roots() {
                 // Library folders listed in libraryfolders.vdf, then the root itself.
                 let vdf = steam_root.join("steamapps").join("libraryfolders.vdf");
@@ -339,6 +386,39 @@ mod tests {
         let paths = parse_vdf_library_paths(content);
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[1], PathBuf::from("D:\\SteamLibrary"));
+    }
+
+    #[test]
+    fn steam_list_matches_each_copy_to_its_app() {
+        let game: GameManifest = serde_json::from_value(serde_json::json!({
+            "manifestVersion": 1, "kind": "game", "id": "g", "name": "G",
+            "detect": { "steam": [
+                { "appId": 100, "dirName": "Game" },
+                { "appId": "200", "dirName": "Game Demo", "name": "demo" }
+            ] }
+        }))
+        .unwrap();
+        let entries = steam_entries(&game);
+        assert_eq!(entries.len(), 2);
+        let demo = steam_entry_for_dir(&game, Path::new("/lib/steamapps/common/game demo")).unwrap();
+        assert_eq!(demo.app_id.as_deref(), Some("200"));
+        assert_eq!(demo.name.as_deref(), Some("demo"));
+        let full = Path::new("/lib/steamapps/common/Game");
+        assert_eq!(steam_entry_for_dir(&game, full).unwrap().name, None);
+        assert_eq!(crate::context::steam_app_id_of(&game, full).as_deref(), Some("100"));
+        // A folder matching no entry gets the main app's id.
+        let elsewhere = Path::new("/somewhere/else");
+        assert!(steam_entry_for_dir(&game, elsewhere).is_none());
+        assert_eq!(crate::context::steam_app_id_of(&game, elsewhere).as_deref(), Some("100"));
+
+        // The single-object form still works.
+        let single: GameManifest = serde_json::from_value(serde_json::json!({
+            "manifestVersion": 1, "kind": "game", "id": "g", "name": "G",
+            "detect": { "steam": { "appId": 7, "dirName": "Game" } }
+        }))
+        .unwrap();
+        assert_eq!(steam_entries(&single).len(), 1);
+        assert_eq!(crate::context::steam_app_id_of(&single, elsewhere).as_deref(), Some("7"));
     }
 
     #[test]

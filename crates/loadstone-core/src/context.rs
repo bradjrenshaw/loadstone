@@ -74,8 +74,9 @@ impl InstallContext {
             user_data: PathBuf::new(),
             game_paths: BTreeMap::new(),
             vars: BTreeMap::new(),
-            steam_app_id: steam_app_id_of(game),
+            steam_app_id: None,
         };
+        ctx.steam_app_id = steam_app_id_of(game, &ctx.game_dir);
 
         ctx.user_data = match user_data_override {
             Some(p) => p,
@@ -301,14 +302,13 @@ impl InstallContext {
     }
 }
 
-/// `detect.steam.appId` from a game package, accepting a number or a string.
-pub fn steam_app_id_of(game: &GameManifest) -> Option<String> {
-    let steam = game.detect.distributions.get("steam")?;
-    match steam.get("appId")? {
-        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
+/// The Steam app id for a copy of the game: the `detect.steam` entry whose
+/// folder name matches `game_dir` (the demo's id for the demo's folder),
+/// else the first entry's. Accepts a number or a string.
+pub fn steam_app_id_of(game: &GameManifest, game_dir: &Path) -> Option<String> {
+    crate::detect::steam_entry_for_dir(game, game_dir)
+        .and_then(|e| e.app_id)
+        .or_else(|| crate::detect::steam_entries(game).into_iter().find_map(|e| e.app_id))
 }
 
 // Free-function wrapper so build() can call resolution mid-construction.

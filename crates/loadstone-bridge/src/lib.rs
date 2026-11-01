@@ -1137,7 +1137,18 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
         } else {
             "not installed".to_string()
         };
-        let dist_title = distribution_title(&distribution);
+        // A game that also ships as a second Steam app (a demo) names it:
+        // "Steam demo copy".
+        let mut dist_title = distribution_title(&distribution);
+        if distribution == "steam" && !game_dir.is_empty() {
+            if let Some(name) = game_manifest
+                .as_ref()
+                .and_then(|g| loadstone_core::detect::steam_entry_for_dir(g, std::path::Path::new(&game_dir)))
+                .and_then(|e| e.name)
+            {
+                dist_title = format!("{dist_title} {name}");
+            }
+        }
         let label = if game_dir.is_empty() {
             "No copy found yet; use Browse to select the game folder.".to_string()
         } else if dist_title.is_empty() {
@@ -1191,9 +1202,17 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
             ));
         }
     }
-    if copies.is_empty() {
-        copies.push(build_copy(None, String::new(), String::new()));
+    // Then one empty slot the user can Browse into: the only entry when
+    // nothing was found, otherwise "Another folder..." so a mod can go into
+    // a copy detection missed (a demo switched for the full game, another
+    // library) even once some copy is installed.
+    let any_found = !copies.is_empty();
+    let mut slot = build_copy(None, String::new(), String::new());
+    if any_found {
+        slot.label = "Another folder...".to_string();
+        slot.status = format!("Use Browse to select the folder. {}", slot.status);
     }
+    copies.push(slot);
     let selected_copy = copies
         .iter()
         .position(|c| !c.installed_version.is_empty())
@@ -1361,7 +1380,10 @@ mod tests {
         let page = fetch_mod_page(r#"{"mode":"manager"}"#, &state_dir, "fake-mod").unwrap();
         assert_eq!(page.name, "fake-mod");
         assert_eq!(page.game_name, "fake-game");
-        assert_eq!(page.copies.len(), 1);
+        // The installed copy, then the "Another folder..." slot.
+        assert_eq!(page.copies.len(), 2);
+        assert_eq!(page.copies[1].label, "Another folder...");
+        assert!(page.copies[1].game_dir.is_empty() && !page.copies[1].can_uninstall);
         assert_eq!(page.selected_copy, 0);
         let copy = &page.copies[0];
         assert_eq!(copy.status, "Installed 1.2.3.");
@@ -1494,7 +1516,7 @@ mod tests {
         let state_dir = state_dir.to_string_lossy().into_owned();
 
         let page = fetch_mod_page(r#"{"mode":"manager"}"#, &state_dir, "fake-mod").unwrap();
-        assert_eq!(page.copies.len(), 2);
+        assert_eq!(page.copies.len(), 3);
         let steam = page.copies.iter().find(|c| c.distribution == "steam").unwrap();
         let epic = page.copies.iter().find(|c| c.distribution == "epic").unwrap();
         assert_eq!(steam.installed_version, "1.0.0");

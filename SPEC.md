@@ -238,6 +238,18 @@ mods that omit their own copy resolve to it through the scope chain (§2.1).
   so list each platform's (`Balatro.exe`, `Balatro.app`).
 - `detect.steam.appId` — the Steam app id, exposed as `${steam.appId}` so a
   mod's `launch` list can open `steam://rungameid/${steam.appId}` (§5).
+- `detect.steam` may also be a list, for a game that ships as more than one
+  Steam app a mod supports equally (a demo, a playtest). Every entry is
+  detected; a copy is matched to its entry by folder name, which sets its
+  `${steam.appId}`, and an entry's `name` is shown in the copy's label
+  ("Steam demo copy"):
+
+```json
+"steam": [
+  { "appId": 2379780, "dirName": "Balatro" },
+  { "appId": 2379790, "dirName": "Balatro Demo", "name": "demo" }
+]
+```
 - `userData` — per-platform user-data root, resolved into `${userData}`.
 - `paths` — named locations resolved into `${game.<name>}` tokens. Entries may
   themselves use tokens and may be overridden per platform or distribution with an

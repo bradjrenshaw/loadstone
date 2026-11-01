@@ -844,6 +844,24 @@ fn validate_game(game: &GameManifest, prefix: &str, _standalone: bool, diags: &m
             ));
         }
     }
+    match game.detect.distributions.get("steam") {
+        Some(Value::Array(items)) => {
+            for (i, item) in items.iter().enumerate() {
+                if !item.is_object() {
+                    diags.push(Diagnostic::error(at(&format!("detect/steam/{i}")), "must be an object"));
+                } else if i > 0 && item.get("name").and_then(|n| n.as_str()).is_none_or(|n| n.trim().is_empty()) {
+                    diags.push(Diagnostic::warning(
+                        at(&format!("detect/steam/{i}")),
+                        "no \"name\": this copy's label won't say which Steam app it is",
+                    ));
+                }
+            }
+        }
+        Some(v) if !v.is_object() => {
+            diags.push(Diagnostic::error(at("detect/steam"), "must be an object or a list of objects"));
+        }
+        _ => {}
+    }
     if game.user_data.is_empty() {
         diags.push(Diagnostic::warning(
             at("userData"),

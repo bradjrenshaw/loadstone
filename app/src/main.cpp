@@ -702,7 +702,18 @@ void LoadstoneFrame::BuildDetail() {
                                  copy.can_update ? "&Update" : "&Install");
     primary->Enable(copy.can_install || copy.can_update);
     OpKind primaryKind = copy.can_update ? OpKind::Update : OpKind::Install;
-    primary->Bind(wxEVT_BUTTON, [this, primaryKind](wxCommandEvent&) {
+    // "Another folder...": an empty folder would fall back to detection
+    // and land on a copy already in the list, so ask for one instead.
+    bool folderSlot = copy.game_dir.empty() && page.copies.size() > 1;
+    auto folderMissing = [this, folderSlot] {
+        if (!folderSlot || !gameDirCtrl_->GetValue().Trim().Trim(false).empty()) return false;
+        wxMessageBox("Use Browse to select the game folder first.", "Loadstone",
+                     wxOK | wxICON_INFORMATION, this);
+        gameDirCtrl_->SetFocus();
+        return true;
+    };
+    primary->Bind(wxEVT_BUTTON, [this, primaryKind, folderMissing](wxCommandEvent&) {
+        if (folderMissing()) return;
         StartVersionPick(primaryKind);
     });
     if (primary->IsEnabled()) pageControls_.push_back(primary);
@@ -712,8 +723,9 @@ void LoadstoneFrame::BuildDetail() {
     // artifact paths resolve relative to that file).
     auto* fromFile = new wxButton(detailPanel_, wxID_ANY, "Install from &file...");
     fromFile->Enable(copy.can_install || copy.can_update);
-    fromFile->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+    fromFile->Bind(wxEVT_BUTTON, [this, folderMissing](wxCommandEvent&) {
         if (opInFlight_ || fetchInFlight_) return;
+        if (folderMissing()) return;
         wxFileDialog dlg(this, "Select the mod's loadstone-release.json", "", "",
                          "loadstone-release.json|loadstone-release.json|"
                          "JSON files (*.json)|*.json|All files (*.*)|*.*",

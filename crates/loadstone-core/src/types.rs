@@ -57,6 +57,10 @@ pub struct ProjectManifest {
     pub uninstall: Vec<Step>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cleanup_legacy: Vec<String>,
+    /// Game files this package replaces, kept and put back on update and
+    /// uninstall (SPEC 10.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserve: Vec<PreserveEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_data: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,6 +129,10 @@ pub struct ReleaseManifest {
     pub uninstall: Vec<Step>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cleanup_legacy: Vec<String>,
+    /// Game files this package replaces, kept and put back on update and
+    /// uninstall (SPEC 10.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserve: Vec<PreserveEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_data: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -425,6 +433,42 @@ pub struct Condition {
     /// Holds when the nested condition does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not: Option<Box<Condition>>,
+}
+
+/// One `preserve` entry: a path or glob, or an object adding `as` (where
+/// the original is kept, for mods that load it under another name) and
+/// `when`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PreserveEntry {
+    Path(String),
+    Detailed {
+        path: String,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        keep_as: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        when: Option<Condition>,
+    },
+}
+
+impl PreserveEntry {
+    pub fn path(&self) -> &str {
+        match self {
+            PreserveEntry::Path(p) | PreserveEntry::Detailed { path: p, .. } => p,
+        }
+    }
+    pub fn keep_as(&self) -> Option<&str> {
+        match self {
+            PreserveEntry::Path(_) => None,
+            PreserveEntry::Detailed { keep_as, .. } => keep_as.as_deref(),
+        }
+    }
+    pub fn when(&self) -> Option<&Condition> {
+        match self {
+            PreserveEntry::Path(_) => None,
+            PreserveEntry::Detailed { when, .. } => when.as_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

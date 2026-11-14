@@ -16,6 +16,7 @@ pub mod ini;
 pub mod jsonedit;
 pub mod macho;
 pub mod ops;
+pub mod originals;
 pub mod prefs;
 pub mod process;
 pub mod profile;

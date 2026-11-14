@@ -61,6 +61,8 @@ pub struct InstallPlan<'a> {
     /// Further release artifacts that matched this context and carry an
     /// `id`, for `extract-archive` steps naming them (SPEC 13).
     pub extra_artifacts: &'a [NamedArtifact],
+    /// Game files to keep and put back on update and uninstall (SPEC 10.1).
+    pub preserve: &'a [crate::types::PreserveEntry],
     /// Tool semantics: keep existing untracked destination files (keep-newer).
     pub keep_existing: bool,
     /// When this is a dependency install, the id of the package needing it.
@@ -148,6 +150,7 @@ pub fn install(
     let prior_dependents = prior.as_ref().map(|p| p.dependents.clone()).unwrap_or_default();
     if let Some(prior) = &prior {
         refuse_links_over(&prior.files, &prior.roots)?;
+        refuse_links_over(&original_paths(prior), &prior.roots)?;
         ui.log(&format!(
             "Removing previously installed version {} ({} file(s)).",
             prior.version,
@@ -157,6 +160,9 @@ pub fn install(
         for e in &errors {
             ui.log(&format!("Warning: {e}"));
         }
+        // The previous version's replaced game files go back to their
+        // originals; this version keeps them afresh below.
+        restore_originals(store, prior, ui)?;
         store.remove(&plan.game_id, &plan.manifest.id, &ctx.game_dir)?;
     }
 
@@ -170,7 +176,11 @@ pub fn install(
         .collect::<Result<Vec<_>>>()?;
     remove_legacy_paths(store, ctx, &plan.game_id, &plan.manifest.id, &cleanup_legacy_paths, ui);
 
-    // 3. Run the steps, tracking every write; roll back on failure.
+    // 3. Keep the originals of game files this package replaces, run the
+    //    steps tracking every write, and roll everything back on failure.
+    let backup_roots = backup_roots(store, &roots_of(ctx));
+    let backup_dir = store.originals_dir(&plan.game_id, &plan.manifest.id, &ctx.game_dir);
+    let pending = crate::originals::back_up(ctx, plan.preserve, &backup_dir, ui)?;
     let mut written: Vec<PathBuf> = Vec::new();
     let run = run_steps_inner(
         ctx,
@@ -180,12 +190,17 @@ pub fn install(
         plan.strip_top_level,
         &mut written,
         ui,
-    );
-    if let Err(e) = run {
-        ui.log("Install failed; removing files written so far.");
-        let _ = remove_tracked_files(&written, &roots_of(ctx));
-        return Err(e);
-    }
+    )
+    .and_then(|()| crate::originals::settle(&pending, &mut written, &backup_roots, ui));
+    let originals = match run {
+        Ok(originals) => originals,
+        Err(e) => {
+            ui.log("Install failed; removing files written so far.");
+            let _ = remove_tracked_files(&written, &roots_of(ctx));
+            crate::originals::roll_back(&pending, &written, &backup_roots);
+            return Err(e);
+        }
+    };
 
     // 3b. Settings: freeze the schema; on a fresh install (or a missing
     //     storage file) materialize values, prompting for promptOnInstall
@@ -215,6 +230,7 @@ pub fn install(
         channel: plan.channel.clone(),
         game: plan.game_id.clone(),
         files: written,
+        originals,
         uninstall_steps: resolve_steps(ctx, plan.uninstall_steps)?,
         user_data_paths: plan
             .user_data_decl
@@ -364,6 +380,10 @@ pub fn launch(store: &StateStore, state: &InstalledState, ui: &mut dyn EngineUi)
     result
 }
 
+fn original_paths(state: &InstalledState) -> Vec<PathBuf> {
+    state.originals.iter().map(|o| o.path.clone()).collect()
+}
+
 /// Refuse to delete tracked files that now sit behind a symlink or junction:
 /// a deploy-script link means those "files" are really a developer's working
 /// copy.
@@ -435,6 +455,37 @@ fn remove_legacy_paths(
             Err(e) => ui.log(&format!("Warning: could not remove {}: {e}", path.display())),
         }
     }
+}
+
+/// Stop roots for pruning emptied backup folders: the package's roots and
+/// the state store (backups without an `as` path live under it).
+fn backup_roots(store: &StateStore, roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut all = roots.to_vec();
+    all.push(store.root().to_path_buf());
+    all
+}
+
+/// Put back a recorded install's replaced game files. When some can't be,
+/// the record is kept holding just those (its files are already gone), so
+/// a retry can finish the job, and the error says which.
+fn restore_originals(store: &StateStore, state: &InstalledState, ui: &mut dyn EngineUi) -> Result<()> {
+    if state.originals.is_empty() {
+        return Ok(());
+    }
+    let failed = crate::originals::restore(&state.originals, &backup_roots(store, &state.roots), ui);
+    if failed.is_empty() {
+        return Ok(());
+    }
+    let mut kept = state.clone();
+    kept.files.clear();
+    kept.originals = failed.iter().map(|(o, _)| o.clone()).collect();
+    store.save(&kept)?;
+    let reasons: Vec<String> = failed.into_iter().map(|(_, reason)| reason).collect();
+    bail!(
+        "could not put back {} original game file(s); close the game and try again.\n{}",
+        reasons.len(),
+        reasons.join("\n")
+    )
 }
 
 fn roots_of(ctx: &InstallContext) -> Vec<PathBuf> {
@@ -772,11 +823,13 @@ pub fn uninstall(
     }
 
     refuse_links_over(&state.files, &state.roots)?;
+    refuse_links_over(&original_paths(state), &state.roots)?;
     ui.log(&format!("Removing {} file(s).", state.files.len()));
     let errors = remove_tracked_files(&state.files, &state.roots);
     for e in &errors {
         ui.log(&format!("Warning: {e}"));
     }
+    restore_originals(store, state, ui)?;
 
     if !state.cleanup_legacy_paths.is_empty() {
         let ctx = context_from_state(state);

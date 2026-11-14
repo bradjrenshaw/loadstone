@@ -219,7 +219,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     // Resolve the release: branch zipball (dev channels), a local
     // loadstone-release.json + artifact pair, or the source repo's latest release.
     let (version, install_steps, uninstall_steps, user_data_decl, artifact, expected_sha);
-    let (settings, actions, launch, strip_top_level);
+    let (settings, actions, launch, strip_top_level, preserve);
     let mut extra_artifacts: Vec<NamedArtifact> = Vec::new();
     // The package manifest's cleanupLegacy, plus whatever the release
     // froze at packaging time (the registry copy may be newer).
@@ -282,6 +282,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         settings = manifest.settings.clone();
         actions = manifest.actions.clone();
         launch = manifest.launch.clone();
+        preserve = manifest.preserve.clone();
         strip_top_level = true;
     } else {
         let release: ReleaseManifest = match &opts.local_release {
@@ -381,6 +382,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         settings = release.settings.clone();
         actions = release.actions.clone();
         launch = release.launch.clone();
+        preserve = release.preserve.clone();
         strip_top_level = false;
     }
 
@@ -411,6 +413,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         artifact_id: artifact_id.as_deref(),
         expected_sha256: expected_sha.as_deref(),
         extra_artifacts: &extra_artifacts,
+        preserve: &preserve,
         keep_existing: false,
         dependent_of: None,
         settings: settings.as_ref(),
@@ -517,6 +520,7 @@ fn install_dependency(
         artifact_id: entry.id.as_deref(),
         expected_sha256: Some(&entry.sha256),
         extra_artifacts: &extra_artifacts,
+        preserve: &tool.preserve,
         keep_existing,
         dependent_of: Some(dependent.to_string()),
         settings: tool.settings.as_ref(),

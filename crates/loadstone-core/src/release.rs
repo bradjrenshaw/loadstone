@@ -126,6 +126,7 @@ pub fn build_release_manifest(
         install: project.install.clone(),
         uninstall: project.uninstall.clone(),
         cleanup_legacy: project.cleanup_legacy.clone(),
+        preserve: project.preserve.clone(),
         user_data: project.user_data.clone(),
         settings: project.settings.clone(),
         actions: project.actions.clone(),

@@ -99,7 +99,7 @@ pub fn validate_value(doc: &Value, ctx: &ValidationContext) -> ValidationResult 
 
 const PROJECT_KEYS: &[&str] = &[
     "manifestVersion", "kind", "id", "name", "description", "authors", "license",
-    "game", "source", "pinnedRelease", "distributions", "dependencies", "channels", "install",
+    "game", "source", "pinnedRelease", "platforms", "distributions", "dependencies", "channels", "install",
     "sourceInstall", "uninstall", "cleanupLegacy", "preserve", "userData", "options", "settings",
     "actions", "launch", "conflictPolicy", "packaging",
 ];
@@ -108,7 +108,7 @@ const GAME_KEYS: &[&str] =
     &["manifestVersion", "kind", "id", "name", "detect", "userData", "paths"];
 
 const RELEASE_KEYS: &[&str] = &[
-    "manifestVersion", "id", "version", "game", "releaseNotes",
+    "manifestVersion", "id", "version", "game", "releaseNotes", "platforms",
     "artifacts", "dependencies", "distributions", "install", "uninstall", "cleanupLegacy", "preserve",
     "userData", "options", "settings", "actions", "launch", "conflictPolicy", "installer",
     "installers",
@@ -291,6 +291,7 @@ fn validate_project(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
     if let Some(source) = &manifest.source {
         check_source(source, "source", diags);
     }
+    check_platforms(&manifest.platforms, diags);
 
     if let Some(pinned) = &manifest.pinned_release {
         validate_pinned_release(pinned, diags);
@@ -1312,5 +1313,22 @@ fn validate_testers(doc: &Value, diags: &mut Vec<Diagnostic>) {
             }
         }
         Err(e) => diags.push(Diagnostic::error("", format!("does not parse as a testers file: {e}"))),
+    }
+}
+
+fn check_platforms(platforms: &[String], diags: &mut Vec<Diagnostic>) {
+    for (i, p) in platforms.iter().enumerate() {
+        let (os, arch) = match p.split_once('/') {
+            Some((os, arch)) => (os, Some(arch)),
+            None => (p.as_str(), None),
+        };
+        let os_ok = ["windows", "macos", "linux"].contains(&os);
+        let arch_ok = arch.is_none_or(|a| ["x64", "arm64"].contains(&a));
+        if !os_ok || !arch_ok {
+            diags.push(Diagnostic::error(
+                format!("platforms/{i}"),
+                format!("\"{p}\" is not a platform: windows, macos or linux, optionally /x64 or /arm64"),
+            ));
+        }
     }
 }

@@ -889,6 +889,24 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
                 r.list_mods()
             } {
                 Ok(list) => {
+                    // Mods that can't run on this computer stay out of the
+                    // list (SPEC 5.2); installed ones always show.
+                    let mut list = list;
+                    let before = list.len();
+                    list.retain(|m| {
+                        installed.iter().any(|s| s.id == m.manifest.id) || {
+                            let game = m.manifest.game.as_ref().and_then(|g| r.resolve_game(g, &m.scope).ok());
+                            loadstone_core::context::platform_support(&m.manifest.platforms, game.as_ref()).is_ok()
+                        }
+                    });
+                    let hidden = before - list.len();
+                    if hidden > 0 {
+                        notes.borrow_mut().push(format!(
+                            "{hidden} mod{} not available for this computer {} hidden.",
+                            if hidden == 1 { "" } else { "s" },
+                            if hidden == 1 { "is" } else { "are" }
+                        ));
+                    }
                     for m in &list {
                         if installed.iter().any(|s| s.id == m.manifest.id) {
                             continue;
@@ -1148,7 +1166,12 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                       game_dir: String|
      -> CopyPage {
         let installed_version = state.map(|s| s.version.clone()).unwrap_or_default();
-        let can_install = state.is_none() && resolved.is_some();
+        // A mod that can't run here can't be installed here (SPEC 5.2).
+        let unsupported = match &resolved {
+            Some(r) => loadstone_core::context::platform_support(&r.manifest.platforms, game_manifest.as_ref()).err(),
+            None => None,
+        };
+        let can_install = state.is_none() && resolved.is_some() && unsupported.is_none();
         // Installed copies keep an enabled Update button whenever the mod
         // resolves: the version picker also serves reinstalls, downgrades,
         // and channel switches, exactly like the old installers' always-on
@@ -1195,7 +1218,9 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
             }
             None => "Not installed.".to_string(),
         };
-        if game_dir.is_empty() && state.is_none() {
+        if let (Some(why), None) = (&unsupported, state) {
+            status = format!("Not available on this computer. {why}");
+        } else if game_dir.is_empty() && state.is_none() {
             status.push_str(" Game directory not found; use Browse to select it.");
         }
 

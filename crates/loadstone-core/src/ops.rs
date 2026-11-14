@@ -128,6 +128,9 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     }
     let game_id = manifest.game.clone().context("mod declares no game")?;
     let game = resolver.resolve_game(&game_id, &mod_scope)?;
+    if let Err(why) = crate::context::platform_support(&manifest.platforms, Some(&game)) {
+        bail!("{} can't be installed on this computer. {why}", manifest.name);
+    }
     let base_scopes = resolver.scopes.clone();
     drop(resolver);
     for note in fetch_notes.borrow_mut().drain(..) {

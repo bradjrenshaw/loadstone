@@ -124,6 +124,7 @@ pub fn build_release_manifest(
         release_notes: options.release_notes.clone(),
         artifacts,
         dependencies: project.dependencies.clone(),
+        platforms: project.platforms.clone(),
         distributions: project.distributions.clone(),
         install: project.install.clone(),
         uninstall: project.uninstall.clone(),

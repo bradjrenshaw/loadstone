@@ -719,6 +719,44 @@ and a file that isn't UTF-8.
   the game's process is running and warns first — replacing per-mod "close the
   game and try again" error strings.
 
+
+### 10.1 Preserved originals
+
+Tracked files are removed on uninstall, which is right for files a mod adds and
+wrong for game files it replaces: a proxy DLL, a patched engine DLL, re-cut
+movies. Removing those would leave the game unable to start. A package lists
+such files in **`preserve`**, and the engine keeps their originals:
+
+```json
+"preserve": [
+  { "path": "${gameDir}/lua51_Win32.dll", "as": "${gameDir}/lua51_original.dll" },
+  "${gameDir}/Assets/DLC/Expansion2/CvGameCore_Expansion2.dll",
+  { "path": "${gameDir}/Assets/DLC/Expansion2/*.bik", "when": { "option": { "movies": "described" } } }
+]
+```
+
+- Entries are paths or globs, or objects with `path`, optional `as`, and
+  optional `when` (evaluated at install time).
+- **Before the install steps run**, every existing file an entry names is
+  copied aside: into the manager's state, or to `as` when the mod needs the
+  original under another name (a proxy that loads the real DLL). `as` names one
+  file, so its `path` cannot be a glob. When the `as` file already exists, it
+  is taken to be the original, left by an earlier installer, and is used as is.
+- **After the steps succeed**, each preserved file the steps replaced or
+  deleted is recorded with the hash of what the package left there. A file the
+  steps left alone needs nothing: its copy is dropped, except that an adopted
+  `as` original is put back, since the file in place was the earlier
+  installer's.
+- **On update and uninstall**, before anything else is written, each recorded
+  original goes back where the package's file still is (same hash) or where the
+  file is gone. Where something else replaced the file since, such as a game
+  update, the newer file stays and the stale copy is dropped. An update then
+  keeps the originals afresh, so a new version, or new install options, that no
+  longer replaces a file leaves the stock one in place.
+- A failed install puts back what it replaced. When an original cannot be put
+  back (the game holds the file open), the operation stops with an error and the
+  record keeps the rest, so retrying finishes the job.
+- Preserved paths are not part of the package's tracked files.
 ---
 
 ## 11. Settings

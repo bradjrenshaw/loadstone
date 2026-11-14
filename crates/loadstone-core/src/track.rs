@@ -61,6 +61,10 @@ pub struct InstalledState {
     /// The game's Steam app id from its game package, for `${steam.appId}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_app_id: Option<String>,
+    /// Replaced game files and their kept originals (SPEC 10.1). These
+    /// paths are not in `files`: restoring, not deleting, undoes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub originals: Vec<crate::originals::Original>,
     /// Install option values this install was made with (SPEC 11.1).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, String>,
@@ -128,6 +132,19 @@ impl StateStore {
                 }
             }
         }
+    }
+
+    /// The store's root directory.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Where backups of a package's replaced game files live (SPEC 10.1).
+    pub fn originals_dir(&self, game: &str, id: &str, game_dir: &Path) -> PathBuf {
+        self.root
+            .join(game)
+            .join(copy_key(game_dir))
+            .join(format!("{id}.originals"))
     }
 
     fn file(&self, game: &str, id: &str, game_dir: &Path) -> PathBuf {

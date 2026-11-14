@@ -97,7 +97,7 @@ pub fn validate_value(doc: &Value, ctx: &ValidationContext) -> ValidationResult 
 const PROJECT_KEYS: &[&str] = &[
     "manifestVersion", "kind", "id", "name", "description", "authors", "license",
     "game", "source", "pinnedRelease", "distributions", "dependencies", "channels", "install",
-    "sourceInstall", "uninstall", "cleanupLegacy", "userData", "settings",
+    "sourceInstall", "uninstall", "cleanupLegacy", "preserve", "userData", "settings",
     "actions", "launch", "conflictPolicy", "packaging",
 ];
 
@@ -106,7 +106,7 @@ const GAME_KEYS: &[&str] =
 
 const RELEASE_KEYS: &[&str] = &[
     "manifestVersion", "id", "version", "game", "releaseNotes",
-    "artifacts", "dependencies", "distributions", "install", "uninstall", "cleanupLegacy",
+    "artifacts", "dependencies", "distributions", "install", "uninstall", "cleanupLegacy", "preserve",
     "userData", "settings", "actions", "launch", "conflictPolicy", "installer",
     "installers",
 ];
@@ -385,6 +385,7 @@ fn validate_project(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
     for (i, p) in manifest.cleanup_legacy.iter().enumerate() {
         check_path(p, &format!("cleanupLegacy/{i}"), &scope, diags);
     }
+    validate_preserve(&manifest.preserve, &scope, diags);
     for (i, p) in manifest.user_data.iter().enumerate() {
         check_path(p, &format!("userData/{i}"), &scope, diags);
     }
@@ -731,6 +732,33 @@ fn validate_condition_in(
     }
 }
 
+fn validate_preserve(entries: &[crate::types::PreserveEntry], scope: &TokenScope, diags: &mut Vec<Diagnostic>) {
+    for (i, entry) in entries.iter().enumerate() {
+        let loc = format!("preserve/{i}");
+        let path = entry.path();
+        if path.trim().is_empty() {
+            diags.push(Diagnostic::error(&loc, "path must not be empty"));
+            continue;
+        }
+        check_path(path, &loc, scope, diags);
+        if let Some(keep_as) = entry.keep_as() {
+            check_path(keep_as, &format!("{loc}/as"), scope, diags);
+            if path.contains(['*', '?']) {
+                diags.push(Diagnostic::error(
+                    format!("{loc}/as"),
+                    "\"as\" names one file, so \"path\" cannot be a glob",
+                ));
+            }
+            if keep_as.contains(['*', '?']) {
+                diags.push(Diagnostic::error(format!("{loc}/as"), "must not be a glob"));
+            }
+        }
+        if let Some(cond) = entry.when() {
+            validate_condition_in(cond, &format!("{loc}/when"), scope, diags);
+        }
+    }
+}
+
 fn validate_settings(
     settings: &Settings,
     game_paths: Option<&BTreeSet<String>>,
@@ -1010,6 +1038,11 @@ fn validate_release(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
     }
     validate_steps(&release.install, "install", game_paths_ref, diags);
     validate_steps(&release.uninstall, "uninstall", game_paths_ref, diags);
+    validate_preserve(
+        &release.preserve,
+        &TokenScope { game_paths: game_paths_ref, vars: &BTreeSet::new(), allow_namespaced: true },
+        diags,
+    );
     if let Some(settings) = &release.settings {
         validate_settings(settings, game_paths_ref, diags);
     }

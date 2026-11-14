@@ -125,6 +125,7 @@ fn install_update_uninstall_roundtrip() {
             settings: None,
             actions: &[],
             strip_top_level: false,
+            preserve: &[],
         },
         &mut ui,
     )
@@ -157,6 +158,7 @@ fn install_update_uninstall_roundtrip() {
             settings: None,
             actions: &[],
             strip_top_level: false,
+            preserve: &[],
         },
         &mut ui,
     );
@@ -192,6 +194,7 @@ fn install_update_uninstall_roundtrip() {
             settings: None,
             actions: &[],
             strip_top_level: false,
+            preserve: &[],
         },
         &mut ui,
     )
@@ -268,6 +271,7 @@ fn refuses_to_install_over_linked_dev_checkout() {
             settings: None,
             actions: &[],
             strip_top_level: false,
+            preserve: &[],
         },
         &mut ui,
     )
@@ -330,6 +334,7 @@ fn tool_refuses_uninstall_while_needed() {
             settings: None,
             actions: &[],
             strip_top_level: false,
+            preserve: &[],
         },
         &mut ui,
     )
@@ -429,5 +434,6 @@ fn plan<'a>(manifest: &'a ProjectManifest, zip: &'a [u8], cleanup: &'a [String])
         settings: None,
         actions: &[],
         strip_top_level: false,
+        preserve: &[],
     }
 }

@@ -34,6 +34,12 @@ pub trait EngineUi {
     /// `id` is the pick-directory step's variable id, letting frontends
     /// pre-supply answers (CLI --dir flags, GUI test drivers).
     fn pick_directory(&mut self, id: &str, prompt: &str, suggest: Option<&str>) -> Option<PathBuf>;
+    /// Ask the user to pick one of `choices` (an install option, SPEC
+    /// 11.1); `default` is preselected. None cancels. Frontends that cannot
+    /// ask take the default.
+    fn choose(&mut self, _id: &str, _prompt: &str, _choices: &[String], default: usize) -> Option<usize> {
+        Some(default)
+    }
     /// Put `text` on the clipboard; false when the frontend has none.
     fn copy_to_clipboard(&mut self, _text: &str) -> bool {
         false
@@ -263,6 +269,67 @@ pub fn install(
     };
     store.save(&state)?;
     Ok(state)
+}
+
+/// Settle the value of every declared install option (SPEC 11.1): an
+/// explicit value (CLI flag) wins; otherwise the previous install's value
+/// is kept unless `ask` is set; otherwise the user is asked, with the
+/// previous value (or the declared default) preselected. Unknown ids and
+/// values are errors; None from the frontend cancels.
+pub fn resolve_options(
+    declared: &[crate::types::InstallOption],
+    explicit: &BTreeMap<String, String>,
+    prior: Option<&BTreeMap<String, String>>,
+    ask: bool,
+    ui: &mut dyn EngineUi,
+) -> Result<BTreeMap<String, String>> {
+    for id in explicit.keys() {
+        if !declared.iter().any(|o| &o.id == id) {
+            let known: Vec<&str> = declared.iter().map(|o| o.id.as_str()).collect();
+            bail!(
+                "\"{id}\" is not an install option of this mod (options: {})",
+                if known.is_empty() { "none".to_string() } else { known.join(", ") }
+            );
+        }
+    }
+    let mut values = BTreeMap::new();
+    for option in declared {
+        let position = |v: &str| option.choices.iter().position(|c| c.value == v);
+        if let Some(value) = explicit.get(&option.id) {
+            if position(value).is_none() {
+                let allowed: Vec<&str> = option.choices.iter().map(|c| c.value.as_str()).collect();
+                bail!("\"{value}\" is not a choice for {} (choices: {})", option.id, allowed.join(", "));
+            }
+            values.insert(option.id.clone(), value.clone());
+            continue;
+        }
+        let previous = prior.and_then(|p| p.get(&option.id)).and_then(|v| position(v));
+        if let (Some(i), false) = (previous, ask) {
+            values.insert(option.id.clone(), option.choices[i].value.clone());
+            continue;
+        }
+        let mut prompt = option.label.clone();
+        if let Some(desc) = &option.description {
+            prompt.push('\n');
+            prompt.push_str(desc);
+        }
+        let labels: Vec<String> = option
+            .choices
+            .iter()
+            .map(|c| match &c.description {
+                Some(d) => format!("{}: {d}", c.label),
+                None => c.label.clone(),
+            })
+            .collect();
+        let preselect = previous.unwrap_or_else(|| option.default_index());
+        let picked = ui
+            .choose(&option.id, &prompt, &labels, preselect)
+            .context("cancelled: no choice made")?;
+        let choice = option.choices.get(picked).context("the frontend picked a choice that does not exist")?;
+        ui.log(&format!("{}: {}", option.label, choice.label));
+        values.insert(option.id.clone(), choice.value.clone());
+    }
+    Ok(values)
 }
 
 /// Write the settings storage file from schema defaults, asking the user the

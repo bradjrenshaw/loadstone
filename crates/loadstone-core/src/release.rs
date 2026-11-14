@@ -10,6 +10,8 @@ use crate::types::*;
 
 pub struct ArtifactInput {
     pub path: PathBuf,
+    /// The artifact's `id`, for `extract-archive` steps that name it.
+    pub id: Option<String>,
     pub when: Option<Condition>,
 }
 
@@ -111,7 +113,7 @@ pub fn build_release_manifest(
             .to_string();
         let sha256 = sha256_file(&input.path)
             .with_context(|| format!("failed to hash {}", input.path.display()))?;
-        artifacts.push(ReleaseArtifact { file: file_name, sha256, id: None, when: input.when.clone() });
+        artifacts.push(ReleaseArtifact { file: file_name, sha256, id: input.id.clone(), when: input.when.clone() });
     }
 
     Ok(ReleaseManifest {
@@ -128,6 +130,7 @@ pub fn build_release_manifest(
         cleanup_legacy: project.cleanup_legacy.clone(),
         preserve: project.preserve.clone(),
         user_data: project.user_data.clone(),
+        options: project.options.clone(),
         settings: project.settings.clone(),
         actions: project.actions.clone(),
         launch: project.launch.clone(),
@@ -147,7 +150,7 @@ pub fn resolve_artifacts(
     if !cli_paths.is_empty() {
         return cli_paths
             .iter()
-            .map(|p| ArtifactInput { path: p.clone(), when: None })
+            .map(|p| ArtifactInput { path: p.clone(), id: None, when: None })
             .collect();
     }
     project
@@ -158,6 +161,7 @@ pub fn resolve_artifacts(
                 .iter()
                 .map(|a| ArtifactInput {
                     path: manifest_dir.join(&a.file),
+                    id: a.id.clone(),
                     when: a.when.clone(),
                 })
                 .collect()
@@ -217,7 +221,7 @@ mod tests {
             &project,
             &ReleaseOptions {
                 version: "v1.2.3".into(),
-                artifacts: vec![ArtifactInput { path: artifact, when: None }],
+                artifacts: vec![ArtifactInput { path: artifact, id: None, when: None }],
                 release_notes: None,
                 installers: vec![exe.clone()],
             },
@@ -262,7 +266,7 @@ mod tests {
         .unwrap();
         let options = |installers| ReleaseOptions {
             version: "1.0.0".into(),
-            artifacts: vec![ArtifactInput { path: artifact.clone(), when: None }],
+            artifacts: vec![ArtifactInput { path: artifact.clone(), id: None, when: None }],
             release_notes: None,
             installers,
         };

@@ -29,6 +29,10 @@ public:
                                         rust::Str suggest) = 0;
     // Puts `text` on the clipboard; false when that failed.
     virtual bool copy_to_clipboard(rust::Str text) = 0;
+    // One of `choices` (newline-separated labels) for an install option;
+    // `default_index` is preselected. Returns the index, or -1 to cancel.
+    virtual std::int32_t choose(rust::Str id, rust::Str prompt, rust::Str choices,
+                                std::uint32_t default_index) = 0;
 };
 
 } // namespace loadstone

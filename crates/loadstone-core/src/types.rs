@@ -63,6 +63,10 @@ pub struct ProjectManifest {
     pub preserve: Vec<PreserveEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_data: Vec<String>,
+    /// Install-time choices steps can test with `option` conditions
+    /// (SPEC 11.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<InstallOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Settings>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -135,6 +139,10 @@ pub struct ReleaseManifest {
     pub preserve: Vec<PreserveEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_data: Vec<String>,
+    /// Install-time choices steps can test with `option` conditions
+    /// (SPEC 11.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<InstallOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Settings>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -447,7 +455,7 @@ pub enum PreserveEntry {
         #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
         keep_as: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        when: Option<Condition>,
+        when: Option<Box<Condition>>,
     },
 }
 
@@ -466,7 +474,7 @@ impl PreserveEntry {
     pub fn when(&self) -> Option<&Condition> {
         match self {
             PreserveEntry::Path(_) => None,
-            PreserveEntry::Detailed { when, .. } => when.as_ref(),
+            PreserveEntry::Detailed { when, .. } => when.as_deref(),
         }
     }
 }
@@ -561,6 +569,39 @@ pub enum IniOpKind {
     RemoveKey,
 }
 
+/// An install option (SPEC 11.1): a choice made when installing that
+/// decides what gets installed, unlike a setting, which the mod reads at
+/// runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub choices: Vec<OptionChoice>,
+    /// The preselected choice's value; the first choice when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+impl InstallOption {
+    pub fn default_index(&self) -> usize {
+        self.default
+            .as_deref()
+            .and_then(|d| self.choices.iter().position(|c| c.value == d))
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionChoice {
+    pub value: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub storage: SettingsStorage,
@@ -635,6 +676,9 @@ pub struct Packaging {
 pub struct PackagingArtifact {
     /// Path to the built artifact, relative to the manifest's directory.
     pub file: String,
+    /// Carried into the release artifact, so steps can extract it by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Condition>,
 }

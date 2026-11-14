@@ -4,6 +4,7 @@
 //! or shows dialogs directly.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -42,6 +43,11 @@ pub struct InstallOptions {
     pub no_deps: bool,
     /// Update mode: bail early when the resolved version is already installed.
     pub update_mode: bool,
+    /// Install option values given up front (CLI `--option id=value`).
+    pub option_values: BTreeMap<String, String>,
+    /// Ask every install option again, even those a previous install of
+    /// this copy already answered ("change install options").
+    pub ask_options: bool,
 }
 
 impl Default for InstallOptions {
@@ -60,6 +66,8 @@ impl Default for InstallOptions {
             tag: None,
             no_deps: false,
             update_mode: false,
+            option_values: BTreeMap::new(),
+            ask_options: false,
         }
     }
 }
@@ -272,6 +280,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         )) {
             return Ok("Install cancelled.".to_string());
         }
+        ctx.options = settle_options(&store, &ctx, &game_id, &id, &manifest.options, opts, ui)?;
         artifact = source::archive(&source, Some(id.as_str()), source::ArchiveRef::Branch(&branch), |p| {
             ui.progress(p)
         })?;
@@ -336,6 +345,8 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 return Ok("Install cancelled.".to_string());
             }
         }
+        // Options first: artifacts may be chosen by them.
+        ctx.options = settle_options(&store, &ctx, &game_id, &id, &release.options, opts, ui)?;
         let (entry, extras) = pick_artifacts(&ctx, &release.artifacts)?;
         // Assets come from the same release the manifest did; a local
         // release resolves them next to its manifest (the primary may be
@@ -392,9 +403,12 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         let mut dep_scopes = vec![mod_scope.clone()];
         dep_scopes.extend(base_scopes.iter().cloned());
         let mut dep_resolver = Resolver { scopes: dep_scopes, fetcher: &mut fetcher };
+        // Install options belong to the mod; its tools are installed without.
+        let mod_options = std::mem::take(&mut ctx.options);
         for dep in &manifest.dependencies {
             install_dependency(&mut dep_resolver, &store, &mut ctx, &game_id, &id, &dep.id, ui)?;
         }
+        ctx.options = mod_options;
         for note in fetch_notes.borrow_mut().drain(..) {
             ui.log(&note);
         }
@@ -423,6 +437,27 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     };
     engine::install(&store, &mut ctx, &plan, ui)?;
     Ok(format!("{} {} installed.", manifest.name, version))
+}
+
+/// This install's option values: flags, else the copy's previous install,
+/// else the user's answers (SPEC 11.1).
+fn settle_options(
+    store: &StateStore,
+    ctx: &InstallContext,
+    game_id: &str,
+    id: &str,
+    declared: &[crate::types::InstallOption],
+    opts: &InstallOptions,
+    ui: &mut dyn EngineUi,
+) -> Result<BTreeMap<String, String>> {
+    let prior = store.load(game_id, id, &ctx.game_dir)?;
+    engine::resolve_options(
+        declared,
+        &opts.option_values,
+        prior.as_ref().map(|p| &p.options),
+        opts.ask_options,
+        ui,
+    )
 }
 
 /// Select this context's artifacts (SPEC 13): the primary is the first

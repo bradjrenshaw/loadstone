@@ -123,11 +123,14 @@ fn element_matches(element: &Value, selectors: &[(String, String)]) -> bool {
         }
         match cur {
             Value::String(s) => s == wanted,
-            Value::Number(_) | Value::Bool(_) => cur.to_string() == *wanted,
+            Value::Number(_) | Value::Bool(_) => serde_json::from_str::<Value>(wanted).is_ok_and(|w| &w == cur),
             _ => false,
         }
     })
 }
+
+/// What an op does to an object holding its final key.
+type Leaf<'f> = dyn FnMut(&mut serde_json::Map<String, Value>, &str) -> Result<()> + 'f;
 
 /// Walk `segments` (all but the op's final key) from `cur` and call `leaf`
 /// on every object the path reaches. Missing keys are created as objects
@@ -178,7 +181,7 @@ fn with_parents(
     root: &mut Value,
     path: &str,
     create: bool,
-    leaf: &mut dyn FnMut(&mut serde_json::Map<String, Value>, &str) -> Result<()>,
+    leaf: &mut Leaf,
 ) -> Result<()> {
     let mut segments = parse_path(path)?;
     let last = segments.pop().unwrap().key;

@@ -79,6 +79,34 @@ impl EngineUi for TerminalUi {
         }
     }
 
+    fn choose(&mut self, id: &str, prompt: &str, choices: &[String], default: usize) -> Option<usize> {
+        if self.assume_yes {
+            println!("{prompt} -- {} (--yes; pass --option {id}=... to choose)", choices[default]);
+            return Some(default);
+        }
+        println!("{prompt}");
+        for (i, c) in choices.iter().enumerate() {
+            println!("  {}. {c}", i + 1);
+        }
+        loop {
+            let answer = self.ask(&format!(
+                "Choose 1 to {}, Enter for {}, or c to cancel:",
+                choices.len(),
+                default + 1
+            ));
+            if answer.is_empty() {
+                return Some(default);
+            }
+            if answer.eq_ignore_ascii_case("c") {
+                return None;
+            }
+            match answer.parse::<usize>() {
+                Ok(n) if (1..=choices.len()).contains(&n) => return Some(n - 1),
+                _ => println!("Please enter a number from 1 to {}.", choices.len()),
+            }
+        }
+    }
+
     fn pick_directory(&mut self, id: &str, prompt: &str, suggest: Option<&str>) -> Option<PathBuf> {
         if let Some(preset) = self.preset_dirs.get(id) {
             println!("{prompt} -- using {} (--dir {id}=...)", preset.display());
@@ -116,6 +144,20 @@ pub struct InstallArgs {
     pub no_deps: bool,
     pub assume_yes: bool,
     pub update_mode: bool,
+    pub option_values: std::collections::BTreeMap<String, String>,
+    pub ask_options: bool,
+}
+
+/// Parse repeated `id=value` flags.
+pub fn parse_pairs(raw: &[String], flag: &str) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for pair in raw {
+        let (k, v) = pair
+            .split_once('=')
+            .with_context(|| format!("{flag} expects id=value, got \"{pair}\""))?;
+        out.insert(k.trim().to_string(), v.trim().to_string());
+    }
+    Ok(out)
 }
 
 pub fn cmd_install(args: &InstallArgs) -> Result<()> {
@@ -134,6 +176,8 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
         tag: args.tag.clone(),
         no_deps: args.no_deps,
         update_mode: args.update_mode,
+        option_values: args.option_values.clone(),
+        ask_options: args.ask_options,
     };
     let summary = ops::install(&opts, &mut ui)?;
     println!("{summary}");

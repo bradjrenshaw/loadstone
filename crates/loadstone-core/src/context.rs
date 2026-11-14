@@ -45,6 +45,66 @@ pub fn current_arch() -> &'static str {
     }
 }
 
+fn platform_name(platform: &str) -> &str {
+    match platform {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    }
+}
+
+/// Can a mod with these `platforms` (SPEC 5.2) for this game run here?
+/// `Err` carries a sentence saying why not, for the frontend to show.
+pub fn platform_support(platforms: &[String], game: Option<&GameManifest>) -> Result<(), String> {
+    platform_support_on(platforms, game, current_platform(), current_arch())
+}
+
+pub fn platform_support_on(
+    platforms: &[String],
+    game: Option<&GameManifest>,
+    platform: &str,
+    arch: &str,
+) -> Result<(), String> {
+    if !platforms.is_empty() {
+        let fits = platforms.iter().any(|p| match p.split_once('/') {
+            Some((os, a)) => os == platform && a == arch,
+            None => p == platform,
+        });
+        if !fits {
+            let narrowed = platforms.iter().any(|p| p.split_once('/').is_some_and(|(os, _)| os == platform));
+            let on: Vec<&str> = platforms
+                .iter()
+                .map(|p| p.split_once('/').map_or(p.as_str(), |(os, _)| os))
+                .map(platform_name)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            return Err(if narrowed {
+                let wanted: Vec<&str> = platforms
+                    .iter()
+                    .filter_map(|p| p.split_once('/'))
+                    .filter(|(os, _)| *os == platform)
+                    .map(|(_, a)| match (platform, a) {
+                        ("macos", "arm64") => "an Apple Silicon processor",
+                        (_, "arm64") => "an ARM processor",
+                        _ => "an Intel or AMD processor",
+                    })
+                    .collect();
+                format!("On {}, this mod needs {}.", platform_name(platform), wanted.join(" or "))
+            } else {
+                format!("This mod is available on {} only.", on.join(" and "))
+            });
+        }
+    }
+    if let Some(game) = game {
+        if !game.user_data.contains_key(platform) {
+            return Err(format!("{} isn't supported on {} here.", game.name, platform_name(platform)));
+        }
+    }
+    Ok(())
+}
+
 fn os_dir(name: &str) -> Option<PathBuf> {
     match name {
         "appData" => dirs::config_dir(),
@@ -496,6 +556,21 @@ mod tests {
         assert!(has(&ctx, serde_json::json!({"option": {"state": "vp"}})));
         assert!(has(&ctx, serde_json::json!({"option": {"state": ["vp", "cp"]}})));
         assert!(!has(&ctx, serde_json::json!({"option": {"state": "vanilla"}})));
+    }
+
+    #[test]
+    fn platform_support_from_mod_and_game() {
+        let g = game(); // user data declared for this platform only
+        let p = current_platform();
+        let list = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(platform_support_on(&[], Some(&g), p, "x64").is_ok());
+        assert!(platform_support_on(&[], Some(&g), "plan9", "x64").is_err());
+        assert!(platform_support_on(&list(&["windows"]), None, "windows", "x64").is_ok());
+        let err = platform_support_on(&list(&["windows"]), None, "macos", "arm64").unwrap_err();
+        assert_eq!(err, "This mod is available on Windows only.");
+        assert!(platform_support_on(&list(&["windows", "macos/arm64"]), None, "macos", "arm64").is_ok());
+        let err = platform_support_on(&list(&["windows", "macos/arm64"]), None, "macos", "x64").unwrap_err();
+        assert_eq!(err, "On macOS, this mod needs an Apple Silicon processor.");
     }
 
     #[test]

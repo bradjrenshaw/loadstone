@@ -43,6 +43,11 @@ pub struct ProjectManifest {
     /// (SPEC 13.1). Mutually exclusive with `channels`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_release: Option<PinnedRelease>,
+    /// Platforms the mod runs on (`windows`, `macos`, `linux`), each
+    /// optionally narrowed to one architecture (`macos/arm64`). Absent means
+    /// every platform its game package declares user data for (SPEC 5.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub distributions: BTreeMap<String, DistributionSupport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -125,6 +130,11 @@ pub struct ReleaseManifest {
     pub artifacts: Vec<ReleaseArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<Dependency>,
+    /// Platforms the mod runs on (`windows`, `macos`, `linux`), each
+    /// optionally narrowed to one architecture (`macos/arm64`). Absent means
+    /// every platform its game package declares user data for (SPEC 5.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub distributions: BTreeMap<String, DistributionSupport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -372,6 +372,24 @@ game's Launch Options point at a wrapper, so:
 A launch list is offered only while the mod is installed by the manager;
 a copy installed some other way has no frozen steps to run.
 
+
+### 5.2 Platforms
+
+```json
+"platforms": ["windows", "macos/arm64"]
+```
+
+`platforms` lists where a mod runs: `windows`, `macos`, `linux`, each optionally
+narrowed to one architecture (`macos/arm64`, `windows/x64`). Absent means
+every platform its game package declares `userData` for, which is also a
+requirement either way: an install needs the game's user-data folder for the
+platform it runs on.
+
+Clients leave mods that can't run on the current computer out of the mod list
+(installed ones always show), say why on the mod's page instead of offering
+Install, and refuse the install with the same sentence ("This mod is available
+on Windows only."). Choosing the right download within a release is separate:
+artifacts' `when` conditions (§13) pick it.
 ---
 
 ## 6. Distribution support

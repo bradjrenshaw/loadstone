@@ -1378,6 +1378,7 @@ mod tests {
                 .unwrap(),
                 launch: Vec::new(),
                 steam_app_id: None,
+                ..Default::default()
             })
             .unwrap();
         let state_dir = state_dir.to_string_lossy().into_owned();
@@ -1444,6 +1445,7 @@ mod tests {
             actions: Vec::new(),
             launch: Vec::new(),
             steam_app_id: None,
+            ..Default::default()
         };
         store
             .save(&InstalledState {
@@ -1508,6 +1510,7 @@ mod tests {
             actions: Vec::new(),
             launch: Vec::new(),
             steam_app_id: None,
+            ..Default::default()
         };
         store.save(&base).unwrap();
         store

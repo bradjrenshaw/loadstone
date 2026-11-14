@@ -195,6 +195,7 @@ fn launch_runs_the_frozen_steps_from_state() {
             { "step": "notice", "message": "Game starting." }
         ])),
         steam_app_id: Some("424242".into()),
+        ..Default::default()
     };
     store.save(&state).unwrap();
 
@@ -240,6 +241,7 @@ fn launch_without_steps_is_an_error() {
         actions: Vec::new(),
         launch: Vec::new(),
         steam_app_id: None,
+        ..Default::default()
     };
     let mut ui = QuietUi(Vec::new());
     let err = engine::launch(&store, &state, &mut ui).unwrap_err();

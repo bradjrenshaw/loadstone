@@ -439,6 +439,8 @@ A **condition object** holds when every key in it holds:
 | `fileExists` | the path/glob matches at least one file |
 | `processRunning` | a process with one of these executable names (string or list) is running; case-insensitive, a trailing `.exe` ignored (`steam` matches `steam.exe`; Steam on macOS is `steam_osx`) |
 | `steamLaunchOptions` | the Launch Options that the most recent Steam user set for the game (`detect.steam.appId`) contain this text; false without an app id, a Steam install, or options. Steam writes them to disk itself, so a change made while Steam runs can take a moment to appear |
+| `fileContains` | `{ "file": <path/glob>, "text": <string> }`: some matching file contains the text, compared byte for byte (so a marker string in an XML or JSON file) |
+| `option` | `{ "<option id>": <value or list> }`: each named install option (§11.1) has the value, or one of the listed values |
 | `not` | the nested condition object does not hold |
 
 Conditions are evaluated when the step is reached, so a launch list can
@@ -507,6 +509,30 @@ or wrong type), `append-unique` (array append if not present), `remove-value`
 (remove matching values from an array), `remove-key`. `path` is dotted. `file` may
 be a glob — ops apply to **every** match, and `requires.fileExists` fails on zero
 matches.
+
+A path segment may carry **selectors**, `key[field=value]`, which address the
+elements of the array under `key` whose `field` equals `value`. `field` may be
+dotted to reach into the element (`[label.id=OniAccess]`); strings compare as
+text, numbers and booleans by their JSON spelling; several selectors on one key
+must all match. The op applies to every matching element. Selectors never create
+elements: a write op whose selector matches nothing fails, and removal ops treat
+it as nothing to remove. A path must end in a key.
+
+```json
+{ "step": "edit-json",
+  "file": "${userData}/mods/mods.json",
+  "requires": { "fileContains": { "file": "${userData}/mods/mods.json", "text": "\"OniAccess\"" },
+                "onMissing": "Start Oxygen Not Included once and quit it, then press Retry.",
+                "retryable": true },
+  "ops": [
+    { "op": "set", "path": "mods[staticID=OniAccess].enabled", "value": true },
+    { "op": "set", "path": "mods[staticID=OniAccess].crash_count", "value": 0 },
+    { "op": "set", "path": "mod_load_in_progress", "value": false }
+  ] }
+```
+
+The file is written back as UTF-8 without a byte-order mark, whatever it was
+read with.
 
 ### 9.5 `delete-files`
 

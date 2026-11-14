@@ -22,6 +22,9 @@ pub struct InstallContext {
     /// The game's Steam app id (game package `detect.steam.appId`), for
     /// `${steam.appId}` in launch steps.
     pub steam_app_id: Option<String>,
+    /// Install option values chosen for this install (SPEC 11.1), for
+    /// `option` conditions.
+    pub options: BTreeMap<String, String>,
 }
 
 pub fn current_platform() -> &'static str {
@@ -75,6 +78,7 @@ impl InstallContext {
             game_paths: BTreeMap::new(),
             vars: BTreeMap::new(),
             steam_app_id: None,
+            options: BTreeMap::new(),
         };
         ctx.steam_app_id = steam_app_id_of(game, &ctx.game_dir);
 
@@ -232,6 +236,30 @@ impl InstallContext {
                 .unwrap_or_default();
             if !options.contains(needle.as_str()) {
                 return Ok(false);
+            }
+        }
+        if let Some(fc) = &cond.file_contains {
+            let needle = fc.text.as_bytes();
+            let mut found = false;
+            for path in self.glob_matches(&fc.file)? {
+                if !path.is_file() {
+                    continue;
+                }
+                let data = std::fs::read(&path)
+                    .with_context(|| format!("failed to read {}", path.display()))?;
+                if !needle.is_empty() && data.windows(needle.len()).any(|w| w == needle) {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Ok(false);
+            }
+        }
+        for (id, wanted) in &cond.option {
+            match self.options.get(id) {
+                Some(value) if hits(wanted, value) => {}
+                _ => return Ok(false),
             }
         }
         if let Some(inner) = &cond.not {
@@ -437,6 +465,31 @@ mod tests {
         let cond: Condition =
             serde_json::from_value(serde_json::json!({"platform": [current_platform(), "linux"]})).unwrap();
         assert!(ctx.condition_matches(&cond).unwrap());
+    }
+
+    #[test]
+    fn file_contains_and_option_conditions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = InstallContext::build(
+            &game(),
+            tmp.path().to_path_buf(),
+            Some(tmp.path().join("ud")),
+            "steam".into(),
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("Expansion2.Civ5Pkg"), b"<Sounds>MinorCivSounds_VoxPopuli</Sounds>").unwrap();
+        let has = |ctx: &InstallContext, v: serde_json::Value| {
+            ctx.condition_matches(&serde_json::from_value::<Condition>(v).unwrap()).unwrap()
+        };
+        assert!(has(&ctx, serde_json::json!({"fileContains": {"file": "${gameDir}/*.Civ5Pkg", "text": "VoxPopuli"}})));
+        assert!(!has(&ctx, serde_json::json!({"fileContains": {"file": "${gameDir}/*.Civ5Pkg", "text": "Lekmod"}})));
+        assert!(!has(&ctx, serde_json::json!({"fileContains": {"file": "${gameDir}/absent.txt", "text": "x"}})));
+
+        assert!(!has(&ctx, serde_json::json!({"option": {"state": "vp"}})));
+        ctx.options.insert("state".into(), "vp".into());
+        assert!(has(&ctx, serde_json::json!({"option": {"state": "vp"}})));
+        assert!(has(&ctx, serde_json::json!({"option": {"state": ["vp", "cp"]}})));
+        assert!(!has(&ctx, serde_json::json!({"option": {"state": "vanilla"}})));
     }
 
     #[test]

@@ -275,7 +275,7 @@ fn apply_one(root: &mut Value, op: &JsonOp) -> Result<()> {
         }
         JsonOpKind::RemoveKey => {
             let _ = with_parents(root, &op.path, false, &mut |obj, key| {
-                obj.remove(key);
+                obj.shift_remove(key);
                 Ok(())
             });
         }
@@ -477,5 +477,19 @@ mod tests {
         .unwrap();
         let out: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
         assert_eq!(out["mods"][0]["enabled"], true);
+    }
+
+    #[test]
+    fn key_order_survives_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("mods.json");
+        std::fs::write(&f, br#"{"version": 1, "mods": [], "zeta": 1, "alpha": 2}"#).unwrap();
+        apply_ops(&f, false, &ops(serde_json::json!([
+            { "op": "set", "path": "mod_load_in_progress", "value": false },
+            { "op": "remove-key", "path": "zeta" }
+        ]))).unwrap();
+        let text = std::fs::read_to_string(&f).unwrap();
+        let at = |k: &str| text.find(&format!("\"{k}\"")).unwrap();
+        assert!(at("version") < at("mods") && at("mods") < at("alpha") && at("alpha") < at("mod_load_in_progress"), "{text}");
     }
 }

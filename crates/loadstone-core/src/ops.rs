@@ -228,6 +228,8 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     // loadstone-release.json + artifact pair, or the source repo's latest release.
     let (version, install_steps, uninstall_steps, user_data_decl, artifact, expected_sha);
     let (settings, actions, launch, strip_top_level, preserve);
+    // The release's artifact hashes, for pruning the download cache.
+    let mut release_hashes: Option<Vec<String>> = None;
     let mut extra_artifacts: Vec<NamedArtifact> = Vec::new();
     // The package manifest's cleanupLegacy, plus whatever the release
     // froze at packaging time (the registry copy may be newer).
@@ -351,7 +353,8 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         // Assets come from the same release the manifest did; a local
         // release resolves them next to its manifest (the primary may be
         // pointed at explicitly with --local-artifact).
-        let mut fetch_asset = |file: &str, explicit: Option<&Path>| -> Result<Vec<u8>> {
+        let cache = crate::cache::ArtifactCache::for_package(store.root(), &id);
+        let mut fetch_asset = |file: &str, sha256: &str, explicit: Option<&Path>| -> Result<Vec<u8>> {
             match &opts.local_release {
                 Some(release_path) => {
                     let artifact_path = match explicit {
@@ -363,24 +366,33 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                         .with_context(|| format!("failed to read {}", artifact_path.display()))
                 }
                 None => {
+                    if let Some(data) = cache.get(sha256) {
+                        ui.log(&format!("Using the already downloaded {file}."));
+                        return Ok(data);
+                    }
                     let source = release_source.clone().unwrap();
                     ui.log(&format!("Downloading {file}..."));
-                    source::release_asset(&source, Some(id.as_str()), opts.tag.as_deref(), file, |p| {
+                    let data = source::release_asset(&source, Some(id.as_str()), opts.tag.as_deref(), file, |p| {
                         ui.progress(p)
-                    })
+                    })?;
+                    cache.put(sha256, &data);
+                    Ok(data)
                 }
             }
         };
-        artifact = fetch_asset(&entry.file, opts.local_artifact.as_deref())?;
+        artifact = fetch_asset(&entry.file, &entry.sha256, opts.local_artifact.as_deref())?;
         artifact_id = entry.id.clone();
         for extra in extras {
             extra_artifacts.push(NamedArtifact {
                 id: extra.id.clone().unwrap_or_default(),
-                data: fetch_asset(&extra.file, None)?,
+                data: fetch_asset(&extra.file, &extra.sha256, None)?,
                 expected_sha256: extra.sha256.clone(),
             });
         }
         expected_sha = Some(entry.sha256.clone());
+        if opts.local_release.is_none() {
+            release_hashes = Some(release.artifacts.iter().map(|a| a.sha256.clone()).collect());
+        }
         version = release.version.clone();
         install_steps = release.install.clone();
         uninstall_steps = release.uninstall.clone();
@@ -436,6 +448,14 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         strip_top_level,
     };
     engine::install(&store, &mut ctx, &plan, ui)?;
+    // Keep only this release's downloads: other options' components stay
+    // for a quick switch, superseded versions go.
+    if let Some(hashes) = &release_hashes {
+        let keep: Vec<&str> = hashes.iter().map(String::as_str).collect();
+        if let Err(e) = crate::cache::ArtifactCache::for_package(store.root(), &id).retain(&keep) {
+            ui.log(&format!("Warning: {e:#}"));
+        }
+    }
     Ok(format!("{} {} installed.", manifest.name, version))
 }
 
@@ -666,6 +686,9 @@ pub fn uninstall(
     let store = StateStore::open(state_dir)?;
     let state = find_installed(&store, game, id, game_dir)?;
     engine::uninstall(&store, &state, purge, ui)?;
+    if store.find_all(game, id)?.is_empty() {
+        crate::cache::ArtifactCache::for_package(store.root(), id).clear();
+    }
     // Release our claim on any tools we pulled in (this copy's).
     for dep_id in &state.dependencies {
         if let Some(mut dep_state) = store.load(game, dep_id, &state.game_dir)? {

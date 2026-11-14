@@ -145,6 +145,13 @@ plain HTTP redirect, no API token, no rate limit. Older versions and branch
 tips use the GitHub API. Private repositories need an account (§15); with
 one, every request for that source goes through the API instead.
 
+**Download cache.** Clients keep the artifacts they installed, keyed by
+SHA-256, per package. An update, a repair, or a change of install options
+(§11.1) downloads only artifacts whose hash isn't already kept; after each
+install, entries the installed release no longer lists are dropped, and
+uninstalling a package from its last game copy drops its cache. A cached entry
+is re-hashed before use, and only bytes that match their hash are kept.
+
 **Identity binding.** A package's id is bound to its source repo by the link
 (or by the `source` field of a registry-hosted package file). Clients MUST
 reject a release manifest whose artifacts resolve outside that repo. Registry

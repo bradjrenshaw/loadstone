@@ -494,7 +494,7 @@ Creates directories (zips drop empty dirs; some loaders require them).
 ### 9.4 `edit-json`
 
 Structured edits to a JSON file. The engine guarantees: UTF-8 BOM tolerated,
-unknown fields and other entries preserved verbatim, atomic write.
+unknown fields and other entries preserved verbatim and in their order, atomic write.
 
 ```json
 { "step": "edit-json",

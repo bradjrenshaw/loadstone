@@ -431,6 +431,10 @@ pub struct Condition {
     /// most recent Steam user) contain this text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_launch_options: Option<String>,
+    /// Holds when the JSON file `file` has a value at `path` (edit-json
+    /// path syntax, selectors allowed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_has: Option<JsonHas>,
     /// Holds when a file matching `file` contains `text` (byte-for-byte).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_contains: Option<FileContains>,
@@ -477,6 +481,12 @@ impl PreserveEntry {
             PreserveEntry::Detailed { when, .. } => when.as_deref(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonHas {
+    pub file: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +548,10 @@ pub struct JsonOp {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
+    /// When the path's selectors match no element, skip the op instead of
+    /// failing (SPEC 9.4).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

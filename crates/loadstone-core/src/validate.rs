@@ -555,6 +555,13 @@ fn validate_steps(
                     if route.from.trim().is_empty() {
                         diags.push(Diagnostic::error(format!("{rloc}/from"), "must not be empty"));
                     }
+                    let body = route.from.strip_suffix("**").unwrap_or(&route.from);
+                    if body.contains(['*', '?']) {
+                        diags.push(Diagnostic::error(
+                            format!("{rloc}/from"),
+                            "\"from\" is an exact entry name or a prefix ending in \"**\" (\"Folder/**\"); other wildcards never match",
+                        ));
+                    }
                     if let Ok(tokens) = tokens::extract(&route.from) {
                         if !tokens.is_empty() {
                             diags.push(Diagnostic::error(
@@ -680,6 +687,7 @@ fn validate_condition_in(
         && cond.process_running.is_none()
         && cond.steam_launch_options.is_none()
         && cond.file_contains.is_none()
+        && cond.json_has.is_none()
         && cond.option.is_empty()
         && cond.not.is_none()
     {
@@ -738,6 +746,12 @@ fn validate_condition_in(
         check_path(&fc.file, &format!("{location}/fileContains/file"), scope, diags);
         if fc.text.is_empty() {
             diags.push(Diagnostic::error(format!("{location}/fileContains/text"), "must not be empty"));
+        }
+    }
+    if let Some(jh) = &cond.json_has {
+        check_path(&jh.file, &format!("{location}/jsonHas/file"), scope, diags);
+        if let Err(e) = crate::jsonedit::check_path_syntax(&jh.path) {
+            diags.push(Diagnostic::error(format!("{location}/jsonHas/path"), format!("{e:#}")));
         }
     }
     for (id, values) in &cond.option {

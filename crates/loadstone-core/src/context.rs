@@ -256,6 +256,12 @@ impl InstallContext {
                 return Ok(false);
             }
         }
+        if let Some(jh) = &cond.json_has {
+            let file = self.resolve_path(&jh.file)?;
+            if !crate::jsonedit::path_exists(&file, &jh.path)? {
+                return Ok(false);
+            }
+        }
         for (id, wanted) in &cond.option {
             match self.options.get(id) {
                 Some(value) if hits(wanted, value) => {}

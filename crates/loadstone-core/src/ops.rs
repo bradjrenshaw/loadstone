@@ -48,6 +48,10 @@ pub struct InstallOptions {
     /// Ask every install option again, even those a previous install of
     /// this copy already answered ("change install options").
     pub ask_options: bool,
+    /// The tester password the user saved (SPEC 2.3): when a registry
+    /// accepts it, tester-only mods resolve and "latest" includes
+    /// prereleases.
+    pub tester_password: Option<String>,
 }
 
 impl Default for InstallOptions {
@@ -68,6 +72,7 @@ impl Default for InstallOptions {
             update_mode: false,
             option_values: BTreeMap::new(),
             ask_options: false,
+            tester_password: None,
         }
     }
 }
@@ -115,8 +120,9 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         Box::new(move |msg| notes_sink.borrow_mut().push(msg.to_string())),
     )?;
     let mut resolver = Resolver::from_sources(&sources, &mut fetcher)?;
+    let testers = resolver.unlock_testers(opts.tester_password.as_deref());
     let resolved = resolver.resolve_project(&id)?;
-    let ResolvedPackage { manifest, scope: mod_scope, release_source } = resolved;
+    let ResolvedPackage { manifest, scope: mod_scope, release_source, .. } = resolved;
     if manifest.kind != Kind::Mod {
         bail!("\"{id}\" is a {:?}; `install` takes a mod (tools install as dependencies)", manifest.kind);
     }
@@ -228,6 +234,9 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     // loadstone-release.json + artifact pair, or the source repo's latest release.
     let (version, install_steps, uninstall_steps, user_data_decl, artifact, expected_sha);
     let (settings, actions, launch, strip_top_level, preserve);
+    // The release to install: the one asked for, a tester's newest, or
+    // (None) the latest stable release.
+    let mut release_tag: Option<String> = opts.tag.clone();
     // The release's artifact hashes, for pruning the download cache.
     let mut release_hashes: Option<Vec<String>> = None;
     let mut extra_artifacts: Vec<NamedArtifact> = Vec::new();
@@ -303,7 +312,11 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 let source = release_source
                     .clone()
                     .context("no --local-release given and no source repo is known for this package")?;
-                match &opts.tag {
+                // Testers get the newest release, beta or not.
+                if testers && release_tag.is_none() {
+                    release_tag = crate::testers::newest_release_tag(&source, Some(id.as_str()))?;
+                }
+                match &release_tag {
                     Some(tag) => {
                         ui.log(&format!("Fetching release {tag} information from {source}..."));
                         source::release_manifest(&source, Some(id.as_str()), Some(tag))?
@@ -322,6 +335,17 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                     .unwrap_or(release.version == state.version);
                 if same {
                     return Ok(format!("{} is up to date ({}).", manifest.name, state.version));
+                }
+                // A beta from tester access stays until a newer release:
+                // losing access never downgrades.
+                let parse = |v: &str| semver::Version::parse(v.trim().trim_start_matches(['v', 'V'])).ok();
+                if let (Some(latest), Some(installed)) = (parse(&release.version), parse(&state.version)) {
+                    if latest < installed {
+                        return Ok(format!(
+                            "{} is up to date ({} is newer than the latest release, {}).",
+                            manifest.name, state.version, release.version
+                        ));
+                    }
                 }
                 ui.log(&format!(
                     "Updating {} {} -> {}.",
@@ -372,7 +396,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                     }
                     let source = release_source.clone().unwrap();
                     ui.log(&format!("Downloading {file}..."));
-                    let data = source::release_asset(&source, Some(id.as_str()), opts.tag.as_deref(), file, |p| {
+                    let data = source::release_asset(&source, Some(id.as_str()), release_tag.as_deref(), file, |p| {
                         ui.progress(p)
                     })?;
                     cache.put(sha256, &data);
@@ -414,7 +438,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     if !opts.no_deps {
         let mut dep_scopes = vec![mod_scope.clone()];
         dep_scopes.extend(base_scopes.iter().cloned());
-        let mut dep_resolver = Resolver { scopes: dep_scopes, fetcher: &mut fetcher };
+        let mut dep_resolver = Resolver { scopes: dep_scopes, fetcher: &mut fetcher, testers: false };
         // Install options belong to the mod; its tools are installed without.
         let mod_options = std::mem::take(&mut ctx.options);
         for dep in &manifest.dependencies {

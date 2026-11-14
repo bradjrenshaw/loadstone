@@ -41,6 +41,7 @@ pub enum PackageForm {
     Game,
     Release,
     Link,
+    Testers,
 }
 
 /// Extra context for cross-file checks: game packages visible from the
@@ -71,6 +72,7 @@ pub fn detect_form(doc: &Value) -> PackageForm {
     match obj.get("kind").and_then(Value::as_str) {
         Some("game") => return PackageForm::Game,
         Some("link") => return PackageForm::Link,
+        Some("testers") => return PackageForm::Testers,
         _ => {}
     }
     if obj.contains_key("artifacts") && obj.contains_key("version") {
@@ -87,6 +89,7 @@ pub fn validate_value(doc: &Value, ctx: &ValidationContext) -> ValidationResult 
         PackageForm::Game => validate_game_doc(doc, &mut diags),
         PackageForm::Release => validate_release(doc, ctx, &mut diags),
         PackageForm::Link => validate_link(doc, &mut diags),
+        PackageForm::Testers => validate_testers(doc, &mut diags),
     }
     ValidationResult { form, diagnostics: diags }
 }
@@ -111,7 +114,7 @@ const RELEASE_KEYS: &[&str] = &[
     "installers",
 ];
 
-const LINK_KEYS: &[&str] = &["kind", "source", "packages"];
+const LINK_KEYS: &[&str] = &["kind", "source", "packages", "testers"];
 
 const KNOWN_DISTRIBUTIONS: &[&str] =
     &["steam", "epic", "gog", "gamepass", "itch", "standalone"];
@@ -1291,5 +1294,23 @@ fn validate_link(doc: &Value, diags: &mut Vec<Diagnostic>) {
     check_source(&link.source, "source", diags);
     for (i, id) in link.packages.iter().enumerate() {
         check_id(id, &format!("packages/{i}"), diags);
+    }
+}
+
+fn validate_testers(doc: &Value, diags: &mut Vec<Diagnostic>) {
+    warn_unknown_keys(doc, &["kind", "salt", "passwordSha256"], diags);
+    match serde_json::from_value::<crate::testers::TestersFile>(doc.clone()) {
+        Ok(t) => {
+            if t.salt.trim().is_empty() {
+                diags.push(Diagnostic::error("salt", "must not be empty"));
+            }
+            if t.password_sha256.len() != 64 || !t.password_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                diags.push(Diagnostic::error(
+                    "passwordSha256",
+                    "must be a SHA-256 hex digest (make the file with `loadstone testers new-file`)",
+                ));
+            }
+        }
+        Err(e) => diags.push(Diagnostic::error("", format!("does not parse as a testers file: {e}"))),
     }
 }

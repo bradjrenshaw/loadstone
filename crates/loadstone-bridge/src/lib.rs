@@ -342,6 +342,14 @@ mod ffi {
         /// only on explicit user action (the API is rate-limited).
         fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntry>>;
 
+        /// Tester access (SPEC 2.3). Whether the registries offer it
+        /// (blocking, network), whether a password is saved, and checking
+        /// and saving one ("" forgets it; blocking). The result is the
+        /// message to show.
+        fn tester_access_offered(embedded: &str) -> bool;
+        fn tester_password_saved(embedded: &str) -> bool;
+        fn set_tester_password(embedded: &str, password: &str) -> Result<String>;
+
         /// Uninstall an installed package from one game copy (`game_dir`,
         /// "" = the only copy it is installed in). The engine asks about
         /// purging user data through `ui.confirm`. Blocking — worker thread.
@@ -481,6 +489,7 @@ pub fn run_install(
     ui: std::pin::Pin<&mut ffi::UiCallbacks>,
 ) -> Result<String> {
     let profile = load_profile(embedded)?;
+    let tester_password = saved_tester_password(&profile);
     let opts = loadstone_core::ops::InstallOptions {
         id: Some(mod_id.to_string()),
         profile,
@@ -491,6 +500,7 @@ pub fn run_install(
         tag: if tag.is_empty() { None } else { Some(tag.to_string()) },
         update_mode: update,
         ask_options,
+        tester_password,
         ..Default::default()
     };
     accounts::track(loadstone_core::ops::install(&opts, &mut GuiUi(ui)))
@@ -507,13 +517,17 @@ fn list_mod_releases_inner(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEn
     }
     let notes = Rc::new(RefCell::new(Vec::new()));
     let (mut fetcher, sources) = build_resolver(&profile.registries, notes)?;
-    let resolved = Resolver::from_sources(&sources, &mut fetcher)?.resolve_project(mod_id)?;
+    let mut resolver = Resolver::from_sources(&sources, &mut fetcher)?;
+    // Beta versions are for testers (SPEC 2.3).
+    let testers = resolver.unlock_testers(saved_tester_password(&profile).as_deref());
+    let resolved = resolver.resolve_project(mod_id)?;
     let source = resolved
         .release_source
         .with_context(|| format!("no source repo is known for \"{mod_id}\""))?;
     let releases = loadstone_core::source::list_releases(&source, Some(mod_id))?;
     Ok(releases
         .into_iter()
+        .filter(|r| testers || !r.prerelease)
         .map(|r| {
             let mut label = r.tag.clone();
             if !r.name.is_empty() && r.name != r.tag {
@@ -669,6 +683,43 @@ fn load_profile(embedded: &str) -> Result<Profile> {
     profile.validate()?;
     accounts::ensure_auth(&profile);
     Ok(profile)
+}
+
+/// The tester password this frontend saved (SPEC 2.3), if any.
+fn saved_tester_password(profile: &Profile) -> Option<String> {
+    loadstone_core::prefs::PrefStore::open(profile, None)
+        .ok()
+        .and_then(|prefs| loadstone_core::testers::saved_password(&prefs))
+}
+
+/// Whether this profile's registries offer tester access at all, for
+/// showing the tester password button. Blocking (network).
+pub fn tester_access_offered(embedded: &str) -> bool {
+    let Ok(profile) = load_profile(embedded) else { return false };
+    let notes = Rc::new(RefCell::new(Vec::new()));
+    let Ok((mut fetcher, sources)) = build_resolver(&profile.registries, notes) else { return false };
+    Resolver::from_sources(&sources, &mut fetcher).is_ok_and(|r| r.offers_testers())
+}
+
+/// Whether a tester password is saved.
+pub fn tester_password_saved(embedded: &str) -> bool {
+    load_profile(embedded).ok().and_then(|p| saved_tester_password(&p)).is_some()
+}
+
+/// Check and save the tester password; an empty one forgets it. Blocking
+/// (network). Returns the message to show.
+pub fn set_tester_password(embedded: &str, password: &str) -> Result<String> {
+    let profile = load_profile(embedded)?;
+    let prefs = loadstone_core::prefs::PrefStore::open(&profile, None)?;
+    if password.is_empty() {
+        loadstone_core::testers::save_password(&prefs, "")?;
+        return Ok("Tester password removed. Tester-only mods and beta versions are hidden again.".into());
+    }
+    if !loadstone_core::testers::check_password(&profile.registries, password)? {
+        anyhow::bail!("That isn't the tester password.");
+    }
+    loadstone_core::testers::save_password(&prefs, password)?;
+    Ok("Tester access unlocked. Tester-only mods are listed, and installs and updates now get beta versions.".into())
 }
 
 fn open_store(state_dir: &str) -> Result<StateStore> {
@@ -833,7 +884,10 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
     } else {
         let (mut fetcher, sources) = build_resolver(&profile.registries, notes.clone())?;
         match Resolver::from_sources(&sources, &mut fetcher) {
-            Ok(mut r) => match r.list_mods() {
+            Ok(mut r) => match {
+                r.unlock_testers(saved_tester_password(&profile).as_deref());
+                r.list_mods()
+            } {
                 Ok(list) => {
                     for m in &list {
                         if installed.iter().any(|s| s.id == m.manifest.id) {
@@ -870,7 +924,11 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
             installed.iter().filter(|s| s.id == m.manifest.id).collect();
         entries.push(CatalogEntry {
             id: m.manifest.id.clone(),
-            name: m.manifest.name.clone(),
+            name: if m.testers {
+                format!("{} (tester preview)", m.manifest.name)
+            } else {
+                m.manifest.name.clone()
+            },
             summary: first_line(&m.manifest.description),
             game: installs
                 .first()
@@ -985,6 +1043,8 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
     // the registries; an installed mod still gets a page when resolution
     // fails (offline, delisted).
     let mut resolved: Option<ResolvedPackage> = None;
+    // Tester access: "latest" includes beta versions (SPEC 2.3).
+    let mut page_testers = false;
     let mut game_manifest: Option<loadstone_core::types::GameManifest> = None;
     // Dependencies (id, display name) for the "Requires ..." note. Installed
     // state's recorded ids win (what actually got pulled in); a fresh
@@ -994,7 +1054,10 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
     if !profile.registries.is_empty() {
         let (mut fetcher, sources) = build_resolver(&profile.registries, notes.clone())?;
         match Resolver::from_sources(&sources, &mut fetcher) {
-            Ok(mut r) => match r.resolve_project(mod_id) {
+            Ok(mut r) => match {
+                page_testers = r.unlock_testers(saved_tester_password(&profile).as_deref());
+                r.resolve_project(mod_id)
+            } {
                 Ok(res) => {
                     if let Some(game_id) = &res.manifest.game {
                         game_manifest = r.resolve_game(game_id, &res.scope).ok();
@@ -1052,7 +1115,12 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
     if let Some(r) = &resolved {
         if !all_dev {
             if let Some(source) = &r.release_source {
-                match loadstone_core::source::release_manifest(source, Some(mod_id), None) {
+                let tag = if page_testers {
+                    loadstone_core::testers::newest_release_tag(source, Some(mod_id)).ok().flatten()
+                } else {
+                    None
+                };
+                match loadstone_core::source::release_manifest(source, Some(mod_id), tag.as_deref()) {
                     Ok(release) => {
                         latest_version =
                             loadstone_core::release::normalize_version(&release.version)

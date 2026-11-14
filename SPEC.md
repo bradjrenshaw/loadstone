@@ -165,6 +165,35 @@ package metadata and latest release info into an `index.json` at the repo
 root, so clients can browse and search with one fetch (and CI catches id
 collisions, §2). Install-time resolution still follows the live chain.
 
+
+### 2.3 Tester access
+
+A registry can give private testers one password that unlocks its tester-only
+listings and every mod's beta versions. It is a gate, not encryption: release
+files stay on public release pages, so it keeps a beta out of the way of
+ordinary users rather than secret.
+
+```json
+// loadstone-packages/testers.json
+{ "kind": "testers", "salt": "<random>", "passwordSha256": "<hex>" }
+```
+
+- `passwordSha256` is SHA-256 of `loadstone-testers:<salt>:<password>`; the
+  password itself is never published. `loadstone testers new-file <password>`
+  prints a file with a fresh salt. Replacing the file changes the password, and
+  everyone who entered the old one is locked out again.
+- A link file with `"testers": true` is a **tester-only listing**: it neither
+  appears in the mod list nor resolves by id until the password is entered.
+  Clients mark such mods as tester previews.
+- **Beta versions** are the source repo's prereleases. Without tester access,
+  clients leave prereleases out of version pickers. With it, they show them,
+  and "latest" (installs and updates without a chosen version) is the newest
+  release by version number, prerelease or not.
+- An update never moves to an older version: a tester who loses access keeps
+  their beta until a newer stable release comes out.
+- The client saves the entered password as the global preference
+  `testerPassword` (§15.2) once a registry's testers file accepts it, and checks
+  it against the registry's current file each time it resolves packages.
 ---
 
 ## 3. The install context and path tokens

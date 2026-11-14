@@ -16,6 +16,7 @@ use loadstone_core::validate::{validate_value, Severity, ValidationContext};
 
 mod auth_cmd;
 mod manage;
+mod testers_cmd;
 
 /// Compile-time distribution profile ("null" unless the binary was built
 /// with LOADSTONE_EMBED_PROFILE=<file> — see loadstone-core::profile).
@@ -240,6 +241,11 @@ enum Command {
         #[command(subcommand)]
         command: auth_cmd::AuthCommand,
     },
+    /// Tester access: a password that unlocks tester-only mods and betas.
+    Testers {
+        #[command(subcommand)]
+        command: testers_cmd::TestersCommand,
+    },
     /// List installed packages per game.
     List {
         /// Override the installed-state directory (mainly for testing).
@@ -329,6 +335,9 @@ fn main() -> ExitCode {
         }
         Command::List { state_dir } => manage::cmd_list(state_dir).map(|()| true),
         Command::Auth { command } => auth_cmd::run(command).map(|()| true),
+        Command::Testers { command } => {
+            load_profile().and_then(|profile| testers_cmd::run(command, &profile)).map(|()| true)
+        }
     };
     match result {
         Ok(ok) => {

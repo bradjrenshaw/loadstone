@@ -1340,6 +1340,33 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         sizer->Add(check, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
     }
 
+    // Tester access: one password for tester-only mods and beta versions.
+    auto* testerBtn = new wxButton(&dlg, wxID_ANY, "Tester &password...");
+    AttachDescription(testerBtn,
+                      "For private testers: enter the password you were given to see "
+                      "tester-only mods and get beta versions. Leave it empty to stop.");
+    bool testerChanged = false;
+    testerBtn->Bind(wxEVT_BUTTON, [this, &dlg, &testerChanged](wxCommandEvent&) {
+        bool saved = loadstone::tester_password_saved(kEmbeddedProfile);
+        wxPasswordEntryDialog ask(&dlg,
+                                  saved ? "A tester password is saved. Enter a new one, or "
+                                          "leave this empty to stop testing."
+                                        : "Enter the tester password you were given.",
+                                  "Tester password");
+        if (ask.ShowModal() != wxID_OK) return;
+        if (!saved && ask.GetValue().empty()) return;
+        try {
+            wxBusyCursor busy;
+            auto message = loadstone::set_tester_password(kEmbeddedProfile, ToStd(ask.GetValue()));
+            testerChanged = true;
+            wxMessageBox(FromRust(message), "Tester password", wxOK | wxICON_INFORMATION, &dlg);
+        } catch (const std::exception& e) {
+            wxMessageBox(wxString::FromUTF8(e.what()), "Tester password not saved",
+                         wxOK | wxICON_ERROR, &dlg);
+        }
+    });
+    sizer->Add(testerBtn, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+
     auto* closeRow = new wxBoxSizer(wxHORIZONTAL);
     closeRow->AddStretchSpacer();
     auto* closeBtn = new wxButton(&dlg, wxID_CLOSE, "&Close");
@@ -1491,6 +1518,8 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
     dlg.CentreOnParent();
     accountList->SetFocus();
     dlg.ShowModal();
+    // Tester access changes which mods and versions exist.
+    if (testerChanged) StartCatalogFetch();
 }
 
 // ---------------------------------------------------------------------------

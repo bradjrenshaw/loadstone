@@ -440,6 +440,7 @@ A **condition object** holds when every key in it holds:
 | `processRunning` | a process with one of these executable names (string or list) is running; case-insensitive, a trailing `.exe` ignored (`steam` matches `steam.exe`; Steam on macOS is `steam_osx`) |
 | `steamLaunchOptions` | the Launch Options that the most recent Steam user set for the game (`detect.steam.appId`) contain this text; false without an app id, a Steam install, or options. Steam writes them to disk itself, so a change made while Steam runs can take a moment to appear |
 | `fileContains` | `{ "file": <path/glob>, "text": <string> }`: some matching file contains the text, compared byte for byte (so a marker string in an XML or JSON file) |
+| `jsonHas` | `{ "file": <path>, "path": <edit-json path> }`: the JSON file has a value at the path (§9.4 syntax, selectors allowed); false for a missing or unparsable file |
 | `option` | `{ "<option id>": <value or list> }`: each named install option (§11.1) has the value, or one of the listed values |
 | `not` | the nested condition object does not hold |
 
@@ -464,10 +465,11 @@ Extracts the current artifact (or source tree) through routing rules.
   the step extracts the primary artifact.
 - Files whose archive entry carries an executable bit, or whose name ends
   in `.sh`, are written executable (zips built on Windows record no mode).
-- `from` — a prefix glob over archive entry paths (`\` normalized to `/`).
-  If it contains no wildcard, it names a single file and `to` is the destination
-  *file* path; otherwise `to` is a destination *directory* and the path suffix
-  after the fixed prefix is appended.
+- `from` — an archive entry path (`\` normalized to `/`), or a prefix ending
+  in `**` (`Folder/**`, or `**` for everything). An exact path names a single
+  file and `to` is the destination *file* path; for a prefix, `to` is a
+  destination *directory* and the path after the prefix is appended. No other
+  wildcards are supported; the validator rejects them.
 - Entries matching no route are ignored.
 - Routes accept `when`.
 - Before extracting, the engine verifies at least one route matches something;
@@ -516,7 +518,9 @@ dotted to reach into the element (`[label.id=OniAccess]`); strings compare as
 text, numbers and booleans by their JSON spelling; several selectors on one key
 must all match. The op applies to every matching element. Selectors never create
 elements: a write op whose selector matches nothing fails, and removal ops treat
-it as nothing to remove. A path must end in a key.
+it as nothing to remove. A path must end in a key. An op
+with `"optional": true` whose selectors match no element is skipped instead of
+failing (switching off another copy of a mod only if it is there).
 
 ```json
 { "step": "edit-json",

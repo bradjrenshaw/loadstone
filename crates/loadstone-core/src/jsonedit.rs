@@ -183,16 +183,50 @@ fn with_parents(
     create: bool,
     leaf: &mut Leaf,
 ) -> Result<()> {
-    let mut segments = parse_path(path)?;
-    let last = segments.pop().unwrap().key;
-    let reached = for_each_parent(root, &segments, create, path, &mut |obj| leaf(obj, &last))?;
-    if reached == 0 {
+    if with_parents_counted(root, path, create, leaf)? == 0 {
         bail!("path \"{path}\": no array element matches its selector");
     }
     Ok(())
 }
 
+fn with_parents_counted(root: &mut Value, path: &str, create: bool, leaf: &mut Leaf) -> Result<usize> {
+    let mut segments = parse_path(path)?;
+    let last = segments.pop().unwrap().key;
+    for_each_parent(root, &segments, create, path, &mut |obj| leaf(obj, &last))
+}
+
+/// Does `path` (selectors allowed) name an existing value in `file`? A
+/// missing or unparsable file holds nothing. For the `jsonHas` condition.
+pub fn path_exists(file: &Path, path: &str) -> Result<bool> {
+    let Ok(raw) = std::fs::read_to_string(file) else {
+        return Ok(false);
+    };
+    let Ok(mut root) = serde_json::from_str::<Value>(raw.trim_start_matches('\u{feff}')) else {
+        return Ok(false);
+    };
+    let mut found = false;
+    let walked = with_parents_counted(&mut root, path, false, &mut |obj, key| {
+        found |= obj.contains_key(key);
+        Ok(())
+    });
+    match walked {
+        Ok(_) => Ok(found),
+        // A path that leaves the document early simply isn't there, but a
+        // malformed path is the manifest's mistake.
+        Err(_) => parse_path(path).map(|_| false),
+    }
+}
+
 fn apply_one(root: &mut Value, op: &JsonOp) -> Result<()> {
+    // An optional op whose selector matches no element does nothing.
+    if op.optional && op.op != JsonOpKind::RemoveValue && op.op != JsonOpKind::RemoveKey {
+        let mut probe = root.clone();
+        if with_parents_counted(&mut probe, &op.path, false, &mut |_, _| Ok(())).unwrap_or(0) == 0
+            && parse_path(&op.path)?.iter().any(|seg| !seg.selectors.is_empty())
+        {
+            return Ok(());
+        }
+    }
     match op.op {
         JsonOpKind::Set => {
             let value = op.value.clone().context("set requires a value")?;
@@ -417,5 +451,31 @@ mod tests {
                 Segment { key: "c".into(), selectors: vec![] },
             ]
         );
+    }
+
+    #[test]
+    fn path_exists_and_optional_ops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("mods.json");
+        std::fs::write(&f, br#"{"mods": [{"label": {"id": "OniAccess", "distribution_platform": 0}, "enabled": false}]}"#).unwrap();
+        assert!(path_exists(&f, "mods[label.id=OniAccess][label.distribution_platform=0].enabled").unwrap());
+        assert!(!path_exists(&f, "mods[label.id=OniAccess][label.distribution_platform=1].enabled").unwrap());
+        assert!(!path_exists(&f, "mods[label.id=OniAccess].missing").unwrap());
+        assert!(!path_exists(&f, "nothing.here").unwrap());
+        assert!(!path_exists(&tmp.path().join("absent.json"), "a").unwrap());
+        assert!(path_exists(&f, "mods[bad").is_err());
+
+        // The Steam copy is absent: the optional op is skipped, the rest applies.
+        apply_ops(
+            &f,
+            false,
+            &ops(serde_json::json!([
+                { "op": "set", "path": "mods[label.distribution_platform=1].enabled", "value": false, "optional": true },
+                { "op": "set", "path": "mods[label.distribution_platform=0].enabled", "value": true }
+            ])),
+        )
+        .unwrap();
+        let out: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(out["mods"][0]["enabled"], true);
     }
 }

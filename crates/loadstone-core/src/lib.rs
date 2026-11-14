@@ -7,6 +7,7 @@
 //! handling (parsing, extraction, verification) belongs here, not in the GUI.
 
 pub mod archive;
+pub mod cache;
 pub mod auth;
 pub mod context;
 pub mod detect;

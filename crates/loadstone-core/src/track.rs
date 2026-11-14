@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{Action, Settings, Step};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledState {
     pub id: String,
@@ -61,6 +61,9 @@ pub struct InstalledState {
     /// The game's Steam app id from its game package, for `${steam.appId}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_app_id: Option<String>,
+    /// Install option values this install was made with (SPEC 11.1).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, String>,
 }
 
 /// Stable identity of one game copy: hash of its canonical directory.
@@ -324,6 +327,7 @@ mod tests {
             actions: Vec::new(),
             launch: Vec::new(),
             steam_app_id: None,
+            ..Default::default()
         };
         store.save(&state).unwrap();
         let game_dir = state.game_dir.clone();

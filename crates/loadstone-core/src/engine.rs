@@ -243,6 +243,7 @@ pub fn install(
         actions: plan.actions.to_vec(),
         launch: plan.launch.to_vec(),
         steam_app_id: ctx.steam_app_id.clone(),
+        options: ctx.options.clone(),
     };
     store.save(&state)?;
     Ok(state)
@@ -300,6 +301,7 @@ pub fn context_from_state(state: &InstalledState) -> InstallContext {
         game_paths: state.game_paths.clone(),
         vars: Default::default(),
         steam_app_id: state.steam_app_id.clone(),
+        options: state.options.clone(),
     }
 }
 

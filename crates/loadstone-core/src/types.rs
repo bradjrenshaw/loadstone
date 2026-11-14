@@ -404,9 +404,23 @@ pub struct Condition {
     /// most recent Steam user) contain this text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_launch_options: Option<String>,
+    /// Holds when a file matching `file` contains `text` (byte-for-byte).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_contains: Option<FileContains>,
+    /// Holds when every named install option (SPEC 11.1) has the given
+    /// value, or one of the listed values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub option: BTreeMap<String, StringOrList>,
     /// Holds when the nested condition does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not: Option<Box<Condition>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileContains {
+    /// Path or glob; any matching file may contain the text.
+    pub file: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

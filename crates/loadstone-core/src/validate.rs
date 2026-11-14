@@ -568,6 +568,8 @@ fn validate_steps(
                     let oloc = format!("{loc}/ops/{o}");
                     if op.path.trim().is_empty() {
                         diags.push(Diagnostic::error(format!("{oloc}/path"), "must not be empty"));
+                    } else if let Err(e) = crate::jsonedit::check_path_syntax(&op.path) {
+                        diags.push(Diagnostic::error(format!("{oloc}/path"), format!("{e:#}")));
                     }
                     let needs_value = !matches!(op.op, JsonOpKind::RemoveKey);
                     if needs_value && op.value.is_none() {
@@ -628,6 +630,8 @@ fn validate_condition_in(
         && cond.file_exists.is_none()
         && cond.process_running.is_none()
         && cond.steam_launch_options.is_none()
+        && cond.file_contains.is_none()
+        && cond.option.is_empty()
         && cond.not.is_none()
     {
         diags.push(Diagnostic::warning(location, "empty condition always matches"));
@@ -678,6 +682,20 @@ fn validate_condition_in(
             diags.push(Diagnostic::error(
                 format!("{location}/steamLaunchOptions"),
                 "must not be empty",
+            ));
+        }
+    }
+    if let Some(fc) = &cond.file_contains {
+        check_path(&fc.file, &format!("{location}/fileContains/file"), scope, diags);
+        if fc.text.is_empty() {
+            diags.push(Diagnostic::error(format!("{location}/fileContains/text"), "must not be empty"));
+        }
+    }
+    for (id, values) in &cond.option {
+        if values.iter().next().is_none() {
+            diags.push(Diagnostic::error(
+                format!("{location}/option/{id}"),
+                "needs a value or a list of values",
             ));
         }
     }

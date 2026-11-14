@@ -287,6 +287,15 @@ pub enum Step {
         #[serde(flatten)]
         common: StepCommon,
     },
+    /// Set or remove keys in an INI-style config file (SPEC 9.12).
+    EditIni {
+        file: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        create_if_missing: bool,
+        ops: Vec<IniOp>,
+        #[serde(flatten)]
+        common: StepCommon,
+    },
     DeleteFiles {
         paths: Vec<String>,
         #[serde(flatten)]
@@ -350,6 +359,7 @@ impl Step {
             Step::CopyFiles { .. } => "copy-files",
             Step::EnsureDirs { .. } => "ensure-dirs",
             Step::EditJson { .. } => "edit-json",
+            Step::EditIni { .. } => "edit-ini",
             Step::DeleteFiles { .. } => "delete-files",
             Step::PickDirectory { .. } => "pick-directory",
             Step::Expect { .. } => "expect",
@@ -366,6 +376,7 @@ impl Step {
             | Step::CopyFiles { common, .. }
             | Step::EnsureDirs { common, .. }
             | Step::EditJson { common, .. }
+            | Step::EditIni { common, .. }
             | Step::DeleteFiles { common, .. }
             | Step::PickDirectory { common, .. }
             | Step::Expect { common, .. }
@@ -484,6 +495,25 @@ pub enum JsonOpKind {
     Ensure,
     AppendUnique,
     RemoveValue,
+    RemoveKey,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IniOp {
+    pub op: IniOpKind,
+    /// The `[section]` holding the key; absent means the first matching key
+    /// anywhere in the file (a missing key is then appended at the end).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IniOpKind {
+    Set,
     RemoveKey,
 }
 

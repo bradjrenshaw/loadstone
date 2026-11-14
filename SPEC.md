@@ -657,6 +657,30 @@ depends on the Steam client, not the machine. Under a tool's `keep-newer`
 policy an untracked file already at `output` is kept, like any extracted
 file.
 
+
+### 9.12 `edit-ini`
+
+Sets or removes keys in an INI-style config file, leaving every other byte as
+it was: comments, order, spacing around `=`, line endings, a byte-order mark,
+and a file that isn't UTF-8.
+
+```json
+{ "step": "edit-ini",
+  "when": { "fileExists": "${game.civ5Docs}/config.ini" },
+  "file": "${game.civ5Docs}/config.ini",
+  "ops": [ { "op": "set", "key": "LoggingEnabled", "value": 1 } ] }
+```
+
+- Ops: `set` (needs `value`: a string, number, or boolean) and `remove-key`.
+- `section` names the `[section]` holding the key. Without it, the op addresses
+  the first line with that key anywhere in the file, and `set` appends a missing
+  key at the end of the file. With it, a missing key is added at the end of that
+  section, and a missing section is appended.
+- Keys and section names compare case-insensitively. A `set` replaces only the
+  value, keeping the line's spacing.
+- `file` may be a glob, as in `edit-json`; `createIfMissing` creates a single
+  named file. A file that already holds the values is not rewritten.
+- Like `edit-json`, edits are not undone on uninstall; use `uninstall` steps.
 ---
 
 ## 10. Uninstall, updates, and migration

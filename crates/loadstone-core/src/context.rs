@@ -372,7 +372,7 @@ pub fn resolve_steps(ctx: &InstallContext, steps: &[crate::types::Step]) -> Resu
     for step in steps {
         let mut s = step.clone();
         match &mut s {
-            Step::EditJson { file, .. } => *file = ctx.substitute(file)?,
+            Step::EditJson { file, .. } | Step::EditIni { file, .. } => *file = ctx.substitute(file)?,
             Step::DeleteFiles { paths, .. } | Step::EnsureDirs { paths, .. } => {
                 for p in paths.iter_mut() {
                     *p = ctx.substitute(p)?;

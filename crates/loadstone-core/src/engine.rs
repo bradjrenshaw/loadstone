@@ -564,6 +564,23 @@ fn run_steps_inner(
                     }
                 }
             }
+            Step::EditIni { file, create_if_missing, ops, .. } => {
+                let mut matches = ctx.glob_matches(file)?;
+                if matches.is_empty() {
+                    let has_wildcard = file.contains('*') || file.contains('?');
+                    if *create_if_missing && !has_wildcard {
+                        matches.push(ctx.resolve_path(file)?);
+                    } else {
+                        bail!("edit-ini: no file matches {file}");
+                    }
+                }
+                for path in matches {
+                    ctx.check_write_allowed(&path)?;
+                    if crate::ini::apply_ops(&path, *create_if_missing, ops)? {
+                        ui.log(&format!("Updated {}.", path.display()));
+                    }
+                }
+            }
             Step::DeleteFiles { paths, .. } => {
                 let mut files = Vec::new();
                 let mut dirs = Vec::new();

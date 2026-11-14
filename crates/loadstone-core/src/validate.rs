@@ -580,6 +580,33 @@ fn validate_steps(
                     }
                 }
             }
+            Step::EditIni { file, ops, .. } => {
+                check_path(file, &format!("{loc}/file"), &scope, diags);
+                if ops.is_empty() {
+                    diags.push(Diagnostic::error(format!("{loc}/ops"), "must not be empty"));
+                }
+                for (o, op) in ops.iter().enumerate() {
+                    let oloc = format!("{loc}/ops/{o}");
+                    let bad = |t: &str| t.contains(['\n', '\r']);
+                    if op.key.trim().is_empty() || op.key.contains(['=', '[', ']']) || bad(&op.key) {
+                        diags.push(Diagnostic::error(format!("{oloc}/key"), "must be a non-empty key without =, [, ] or line breaks"));
+                    }
+                    if let Some(section) = &op.section {
+                        if section.trim().is_empty() || section.contains(['[', ']']) || bad(section) {
+                            diags.push(Diagnostic::error(format!("{oloc}/section"), "must be a non-empty name without [, ] or line breaks"));
+                        }
+                    }
+                    match (op.op, &op.value) {
+                        (crate::types::IniOpKind::Set, None) => diags.push(Diagnostic::error(&oloc, "op \"set\" requires a \"value\"")),
+                        (_, Some(v)) => match crate::ini::value_text(v) {
+                            Ok(text) if bad(&text) => diags.push(Diagnostic::error(format!("{oloc}/value"), "must not contain line breaks")),
+                            Ok(_) => {}
+                            Err(e) => diags.push(Diagnostic::error(format!("{oloc}/value"), format!("{e:#}"))),
+                        },
+                        _ => {}
+                    }
+                }
+            }
             Step::PickDirectory { id, prompt, .. } => {
                 check_var_id(id, &format!("{loc}/id"), diags);
                 if prompt.trim().is_empty() {

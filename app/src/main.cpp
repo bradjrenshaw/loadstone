@@ -115,7 +115,7 @@ void AttachDescription(wxWindow* win, const wxString& description) {
 
 // ---------------------------------------------------------------------------
 
-enum class OpKind { Install, Update, Uninstall, Action, Launch };
+enum class OpKind { Install, Update, ChangeOptions, Uninstall, Action, Launch };
 
 class LoadstoneFrame : public wxFrame {
 public:
@@ -264,6 +264,23 @@ public:
             return std::string(dlg.GetPath().utf8_str());
         });
         return rust::String(picked);
+    }
+
+    std::int32_t choose(rust::Str id, rust::Str prompt, rust::Str choices,
+                        std::uint32_t default_index) override {
+        (void)id; // GUI has no preset answers; test drivers use them
+        wxString text = FromRust(prompt);
+        wxArrayString items = wxSplit(FromRust(choices), '\n', '\0');
+        int preselect = static_cast<int>(default_index);
+        return Ask<std::int32_t>(-1, [text, items, preselect](LoadstoneFrame* f) -> std::int32_t {
+            // A plain list of choices: arrow keys move, Enter picks, and a
+            // screen reader reads the prompt then the selected choice.
+            wxSingleChoiceDialog dlg(f, text, "Install options", items);
+            if (preselect >= 0 && preselect < static_cast<int>(items.size()))
+                dlg.SetSelection(preselect);
+            if (dlg.ShowModal() != wxID_OK) return -1;
+            return dlg.GetSelection();
+        });
     }
 
     bool copy_to_clipboard(rust::Str text) override {
@@ -765,6 +782,17 @@ void LoadstoneFrame::BuildDetail() {
     if (copy.can_launch) pageControls_.push_back(launch);
     buttons->Add(launch, 0, wxRIGHT, 8);
 
+    if (copy.can_change_options) {
+        auto* change = new wxButton(detailPanel_, wxID_ANY, "Change install &options...");
+        AttachDescription(change,
+                          "Asks the mod's install questions again and reinstalls "
+                          "the latest version with your answers.");
+        change->Bind(wxEVT_BUTTON,
+                     [this](wxCommandEvent&) { RunOperation(OpKind::ChangeOptions); });
+        pageControls_.push_back(change);
+        buttons->Add(change, 0, wxRIGHT, 8);
+    }
+
     for (const auto& a : copy.actions) {
         auto* b = new wxButton(detailPanel_, wxID_ANY, FromRust(a.label));
         b->Enable(copy.actions_available);
@@ -939,7 +967,8 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
     // engine gets for installs; empty falls back to auto-detection.
     std::string gameDir = gameDirCtrl_ ? ToStd(gameDirCtrl_->GetValue()) : "";
     // After the reload, land back on the copy this operation targets.
-    currentCopyDir_ = (kind == OpKind::Install || kind == OpKind::Update)
+    currentCopyDir_ = (kind == OpKind::Install || kind == OpKind::Update ||
+                       kind == OpKind::ChangeOptions)
                           ? wxString::FromUTF8(gameDir.c_str())
                           : wxString::FromUTF8(copyDir.c_str());
     std::thread([alive, this, cb, kind, modId, game, channel, installChannel,
@@ -953,12 +982,19 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
                     // channel pick changes that (never the copy's old one).
                     result = std::string(loadstone::run_install(
                         kEmbeddedProfile, "", modId, installChannel, false,
-                        tagStr, gameDir, local, *cb));
+                        tagStr, gameDir, local, false, *cb));
                     break;
                 case OpKind::Update:
                     result = std::string(loadstone::run_install(
                         kEmbeddedProfile, "", modId, channel, true, tagStr,
-                        gameDir, "", *cb));
+                        gameDir, "", false, *cb));
+                    break;
+                case OpKind::ChangeOptions:
+                    // Reinstall on the copy's channel, asking every install
+                    // option again with the current answers preselected.
+                    result = std::string(loadstone::run_install(
+                        kEmbeddedProfile, "", modId, channel, false, "",
+                        gameDir, "", true, *cb));
                     break;
                 case OpKind::Uninstall:
                     result = std::string(
@@ -1661,6 +1697,10 @@ public:
         out_ << "op-clipboard: " << std::string(text) << "\n";
         return true;
     }
+    std::int32_t choose(rust::Str id, rust::Str, rust::Str, std::uint32_t default_index) override {
+        out_ << "op-choose: " << std::string(id) << " -> " << default_index << "\n";
+        return static_cast<std::int32_t>(default_index);
+    }
 
 private:
     std::ofstream& out_;
@@ -1747,7 +1787,7 @@ bool LoadstoneApp::OnInit() {
                         auto summary = loadstone::run_install(
                             kEmbeddedProfile, state, installId, "", false,
                             tag ? tag : "", gameDir ? gameDir : "",
-                            release ? release : "", sui);
+                            release ? release : "", false, sui);
                         out << "op-result: " << std::string(summary) << "\n";
                         out << "installed-after: "
                             << std::string(loadstone::installed_json(state)) << "\n";

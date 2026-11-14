@@ -97,7 +97,7 @@ pub fn validate_value(doc: &Value, ctx: &ValidationContext) -> ValidationResult 
 const PROJECT_KEYS: &[&str] = &[
     "manifestVersion", "kind", "id", "name", "description", "authors", "license",
     "game", "source", "pinnedRelease", "distributions", "dependencies", "channels", "install",
-    "sourceInstall", "uninstall", "cleanupLegacy", "preserve", "userData", "settings",
+    "sourceInstall", "uninstall", "cleanupLegacy", "preserve", "userData", "options", "settings",
     "actions", "launch", "conflictPolicy", "packaging",
 ];
 
@@ -107,7 +107,7 @@ const GAME_KEYS: &[&str] =
 const RELEASE_KEYS: &[&str] = &[
     "manifestVersion", "id", "version", "game", "releaseNotes",
     "artifacts", "dependencies", "distributions", "install", "uninstall", "cleanupLegacy", "preserve",
-    "userData", "settings", "actions", "launch", "conflictPolicy", "installer",
+    "userData", "options", "settings", "actions", "launch", "conflictPolicy", "installer",
     "installers",
 ];
 
@@ -394,6 +394,27 @@ fn validate_project(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
     if let Some(settings) = &manifest.settings {
         validate_settings(settings, game_paths_ref, diags);
     }
+
+    // Install options, and every condition that reads them.
+    validate_options(&manifest.options, diags);
+    let mut conds = Vec::new();
+    collect_step_conditions(&manifest.install, "install", &mut conds);
+    collect_step_conditions(&manifest.source_install, "sourceInstall", &mut conds);
+    collect_step_conditions(&manifest.uninstall, "uninstall", &mut conds);
+    collect_step_conditions(&manifest.launch, "launch", &mut conds);
+    collect_action_conditions(&manifest.actions, &mut conds);
+    collect_preserve_conditions(&manifest.preserve, &mut conds);
+    if let Some(packaging) = &manifest.packaging {
+        for (i, a) in packaging.artifacts.iter().enumerate() {
+            if let Some(w) = &a.when {
+                conds.push((format!("packaging/artifacts/{i}/when"), w));
+            }
+        }
+    }
+    if let Some(pinned) = &manifest.pinned_release {
+        collect_artifact_conditions(&pinned.artifacts, "pinnedRelease/artifacts", &mut conds);
+    }
+    check_option_refs(&conds, &manifest.options, diags);
 
     // Actions.
     let mut action_ids = BTreeSet::new();
@@ -732,6 +753,125 @@ fn validate_condition_in(
     }
 }
 
+fn validate_options(options: &[InstallOption], diags: &mut Vec<Diagnostic>) {
+    let mut ids = BTreeSet::new();
+    for (i, option) in options.iter().enumerate() {
+        let loc = format!("options/{i}");
+        check_id(&option.id, &format!("{loc}/id"), diags);
+        if !ids.insert(option.id.as_str()) {
+            diags.push(Diagnostic::error(format!("{loc}/id"), format!("duplicate option id \"{}\"", option.id)));
+        }
+        if option.label.trim().is_empty() {
+            diags.push(Diagnostic::error(format!("{loc}/label"), "must not be empty"));
+        }
+        if option.choices.is_empty() {
+            diags.push(Diagnostic::error(format!("{loc}/choices"), "must offer at least one choice"));
+        }
+        let mut values = BTreeSet::new();
+        for (c, choice) in option.choices.iter().enumerate() {
+            let cloc = format!("{loc}/choices/{c}");
+            if choice.value.trim().is_empty() {
+                diags.push(Diagnostic::error(format!("{cloc}/value"), "must not be empty"));
+            } else if !values.insert(choice.value.as_str()) {
+                diags.push(Diagnostic::error(format!("{cloc}/value"), format!("duplicate value \"{}\"", choice.value)));
+            }
+            if choice.label.trim().is_empty() {
+                diags.push(Diagnostic::error(format!("{cloc}/label"), "must not be empty"));
+            }
+        }
+        if let Some(default) = &option.default {
+            if !values.contains(default.as_str()) {
+                diags.push(Diagnostic::error(
+                    format!("{loc}/default"),
+                    format!("\"{default}\" is not one of the choices"),
+                ));
+            }
+        }
+    }
+}
+
+fn collect_condition<'a>(cond: &'a Condition, loc: String, out: &mut Vec<(String, &'a Condition)>) {
+    if let Some(inner) = &cond.not {
+        collect_condition(inner, format!("{loc}/not"), out);
+    }
+    out.push((loc, cond));
+}
+
+fn collect_step_conditions<'a>(steps: &'a [Step], location: &str, out: &mut Vec<(String, &'a Condition)>) {
+    for (i, step) in steps.iter().enumerate() {
+        let loc = format!("{location}/{i}");
+        if let Some(w) = &step.common().when {
+            collect_condition(w, format!("{loc}/when"), out);
+        }
+        if let Some(r) = &step.common().requires {
+            collect_condition(&r.condition, format!("{loc}/requires"), out);
+        }
+        match step {
+            Step::ExtractArchive { routes, .. } => {
+                for (r, route) in routes.iter().enumerate() {
+                    if let Some(w) = &route.when {
+                        collect_condition(w, format!("{loc}/routes/{r}/when"), out);
+                    }
+                }
+            }
+            Step::Expect { checks, .. } => {
+                for (c, check) in checks.iter().enumerate() {
+                    collect_condition(&check.condition, format!("{loc}/checks/{c}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_action_conditions<'a>(actions: &'a [Action], out: &mut Vec<(String, &'a Condition)>) {
+    for (i, action) in actions.iter().enumerate() {
+        if let Some(w) = &action.enabled_when {
+            collect_condition(w, format!("actions/{i}/enabledWhen"), out);
+        }
+        collect_step_conditions(&action.steps, &format!("actions/{i}/steps"), out);
+    }
+}
+
+fn collect_preserve_conditions<'a>(entries: &'a [PreserveEntry], out: &mut Vec<(String, &'a Condition)>) {
+    for (i, entry) in entries.iter().enumerate() {
+        if let Some(w) = entry.when() {
+            collect_condition(w, format!("preserve/{i}/when"), out);
+        }
+    }
+}
+
+fn collect_artifact_conditions<'a>(artifacts: &'a [ReleaseArtifact], location: &str, out: &mut Vec<(String, &'a Condition)>) {
+    for (i, a) in artifacts.iter().enumerate() {
+        if let Some(w) = &a.when {
+            collect_condition(w, format!("{location}/{i}/when"), out);
+        }
+    }
+}
+
+/// Every `option` condition must name a declared option and its choices.
+fn check_option_refs(conds: &[(String, &Condition)], options: &[InstallOption], diags: &mut Vec<Diagnostic>) {
+    for (loc, cond) in conds {
+        for (id, wanted) in &cond.option {
+            let Some(option) = options.iter().find(|o| &o.id == id) else {
+                diags.push(Diagnostic::error(
+                    format!("{loc}/option"),
+                    format!("\"{id}\" is not a declared install option"),
+                ));
+                continue;
+            };
+            for value in wanted.iter() {
+                if !option.choices.iter().any(|c| c.value == value) {
+                    diags.push(Diagnostic::error(
+                        format!("{loc}/option/{id}"),
+                        format!("\"{value}\" is not a choice of option \"{id}\""),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 fn validate_preserve(entries: &[crate::types::PreserveEntry], scope: &TokenScope, diags: &mut Vec<Diagnostic>) {
     for (i, entry) in entries.iter().enumerate() {
         let loc = format!("preserve/{i}");
@@ -1043,6 +1183,15 @@ fn validate_release(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
         &TokenScope { game_paths: game_paths_ref, vars: &BTreeSet::new(), allow_namespaced: true },
         diags,
     );
+    validate_options(&release.options, diags);
+    let mut conds = Vec::new();
+    collect_step_conditions(&release.install, "install", &mut conds);
+    collect_step_conditions(&release.uninstall, "uninstall", &mut conds);
+    collect_step_conditions(&release.launch, "launch", &mut conds);
+    collect_action_conditions(&release.actions, &mut conds);
+    collect_preserve_conditions(&release.preserve, &mut conds);
+    collect_artifact_conditions(&release.artifacts, "artifacts", &mut conds);
+    check_option_refs(&conds, &release.options, diags);
     if let Some(settings) = &release.settings {
         validate_settings(settings, game_paths_ref, diags);
     }

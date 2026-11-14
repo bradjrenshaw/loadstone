@@ -126,6 +126,13 @@ enum Command {
         /// Skip dependency installation.
         #[arg(long)]
         no_deps: bool,
+        /// Answer an install option up front: --option id=value (repeatable).
+        #[arg(long = "option")]
+        options: Vec<String>,
+        /// Ask every install option again instead of keeping this copy's
+        /// previous answers.
+        #[arg(long)]
+        choose_options: bool,
         /// Answer prompts automatically (confirms yes, skips retryable steps).
         #[arg(long)]
         yes: bool,
@@ -253,8 +260,9 @@ fn main() -> ExitCode {
         }
         Command::Install {
             id, scopes, registries, game_dir, user_data, state_dir, local_release, local_artifact,
-            channel, tag, no_deps, yes,
+            channel, tag, no_deps, options, choose_options, yes,
         } => load_profile().and_then(|profile| {
+            let option_values = manage::parse_pairs(&options, "--option")?;
             manage::cmd_install(&manage::InstallArgs {
                 id,
                 scopes,
@@ -270,6 +278,8 @@ fn main() -> ExitCode {
                 no_deps,
                 assume_yes: yes,
                 update_mode: false,
+                option_values,
+                ask_options: choose_options,
             })
             .map(|()| true)
         }),
@@ -292,6 +302,8 @@ fn main() -> ExitCode {
                     no_deps: false,
                     assume_yes: yes,
                     update_mode: true,
+                    option_values: Default::default(),
+                    ask_options: false,
                 })
                 .map(|()| true)
             })

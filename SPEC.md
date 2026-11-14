@@ -787,6 +787,43 @@ order, and screen reader behavior are the manager's, identical for every mod.
 - Changing settings writes the file immediately; a `note` field (e.g. "Restart the
   game for changes to take effect") is announced after saving.
 
+
+### 11.1 Install options
+
+Settings are read by the mod at runtime. **Install options** decide what gets
+installed: which artifacts are downloaded, which steps run, which files are
+preserved. They are asked when a mod is installed and remembered per game copy.
+
+```json
+"options": [
+  { "id": "profile", "label": "Who will play with this install?", "default": "blind",
+    "choices": [
+      { "value": "blind", "label": "A blind player" },
+      { "value": "sighted", "label": "A sighted multiplayer partner",
+        "description": "Uninstall after playing with people who don't have the mod." } ] },
+  { "id": "state", "label": "Which game setup?",
+    "choices": [ { "value": "vanilla", "label": "Brave New World" },
+                 { "value": "vp", "label": "Vox Populi" } ] }
+]
+```
+
+- `option` conditions (§9) test the values anywhere a condition is accepted:
+  step `when` and `requires`, routes, `expect` checks, artifact `when` (so only
+  the chosen artifacts download), `preserve` entries, and actions.
+- Values are strings. `default` preselects a choice; without it the first
+  choice is preselected.
+- **Answers.** An explicit value (the CLI's `--option id=value`) wins. Otherwise
+  an update or reinstall keeps the value this copy was installed with, and asks
+  only options it has no valid answer for. A fresh install asks each option in
+  order; cancelling the question cancels the install. Clients offer a "change
+  install options" operation that asks every option again, with the current
+  answers preselected, and reinstalls. Because each install starts by removing
+  the previous one's files and restoring its originals (§10), switching options
+  needs no teardown logic in the package.
+- Unknown option ids and values are errors, both in validation and when given
+  explicitly. Install options are frozen into each release like the rest of the
+  manifest.
+- Dependencies (tools, libraries) are installed without the mod's options.
 ---
 
 ## 12. Actions

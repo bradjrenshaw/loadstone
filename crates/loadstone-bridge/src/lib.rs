@@ -120,6 +120,9 @@ mod ffi {
         /// The mod is installed here and declares launch steps for this
         /// platform: the page shows a Launch button.
         can_launch: bool,
+        /// The mod is installed here with install options (SPEC 11.1): the
+        /// page offers to reinstall with different choices.
+        can_change_options: bool,
     }
 
     /// A branch ("development") channel the mod declares, for the version
@@ -300,7 +303,8 @@ mod ffi {
         /// installs exactly that release, from its own
         /// loadstone-release.json); `game_dir` overrides detection;
         /// `local_release` names a local loadstone-release.json for
-        /// offline/from-file installs ("" = none). Returns a summary.
+        /// offline/from-file installs ("" = none); `ask_options` asks
+        /// every install option again. Returns a summary.
         fn run_install(
             embedded: &str,
             state_dir: &str,
@@ -310,6 +314,7 @@ mod ffi {
             tag: &str,
             game_dir: &str,
             local_release: &str,
+            ask_options: bool,
             ui: Pin<&mut UiCallbacks>,
         ) -> Result<String>;
 
@@ -391,6 +396,15 @@ mod ffi {
             suggest: &str,
         ) -> String;
         fn copy_to_clipboard(self: Pin<&mut UiCallbacks>, text: &str) -> bool;
+        /// One of `choices` (newline-separated) for an install option;
+        /// the chosen index, or -1 for "cancelled".
+        fn choose(
+            self: Pin<&mut UiCallbacks>,
+            id: &str,
+            prompt: &str,
+            choices: &str,
+            default_index: u32,
+        ) -> i32;
     }
 }
 
@@ -436,6 +450,14 @@ impl loadstone_core::engine::EngineUi for GuiUi<'_> {
     fn copy_to_clipboard(&mut self, text: &str) -> bool {
         self.0.as_mut().copy_to_clipboard(text)
     }
+
+    fn choose(&mut self, id: &str, prompt: &str, choices: &[String], default: usize) -> Option<usize> {
+        // Choice labels are single lines; flatten any stray line breaks so
+        // the newline-joined list keeps its shape.
+        let flat: Vec<String> = choices.iter().map(|c| c.replace(['\r', '\n'], " ")).collect();
+        let picked = self.0.as_mut().choose(id, prompt, &flat.join("\n"), default as u32);
+        usize::try_from(picked).ok().filter(|&i| i < choices.len())
+    }
 }
 
 fn opt_path(s: &str) -> Option<PathBuf> {
@@ -455,6 +477,7 @@ pub fn run_install(
     tag: &str,
     game_dir: &str,
     local_release: &str,
+    ask_options: bool,
     ui: std::pin::Pin<&mut ffi::UiCallbacks>,
 ) -> Result<String> {
     let profile = load_profile(embedded)?;
@@ -467,6 +490,7 @@ pub fn run_install(
         channel: if channel.is_empty() { "stable".to_string() } else { channel.to_string() },
         tag: if tag.is_empty() { None } else { Some(tag.to_string()) },
         update_mode: update,
+        ask_options,
         ..Default::default()
     };
     accounts::track(loadstone_core::ops::install(&opts, &mut GuiUi(ui)))
@@ -1178,6 +1202,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
             actions_available: state.is_some(),
             actions,
             can_launch: state.is_some_and(|s| !s.launch.is_empty()),
+            can_change_options: state.is_some_and(|s| !s.options.is_empty()),
         }
     };
 

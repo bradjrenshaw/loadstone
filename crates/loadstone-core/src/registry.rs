@@ -34,6 +34,8 @@ pub struct ResolvedPackage {
     /// The repo its releases come from: the manifest's `source` field, or
     /// the scope's source when absent (SPEC §2 default).
     pub release_source: Option<String>,
+    /// Reached through a tester-only link (SPEC 2.3).
+    pub testers: bool,
 }
 
 /// Fetches a registry source into a local directory of package files.
@@ -262,6 +264,9 @@ fn extract_packages(zip_bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
 pub struct Resolver<'a> {
     pub scopes: Vec<Scope>,
     pub fetcher: &'a mut dyn RegistryFetcher,
+    /// Tester access is unlocked (SPEC 2.3): tester-only links resolve
+    /// and are listed.
+    pub testers: bool,
 }
 
 fn read_docs(dir: &Path) -> Result<Vec<(PathBuf, serde_json::Value)>> {
@@ -298,7 +303,7 @@ impl<'a> Resolver<'a> {
         fetcher: &'a mut dyn RegistryFetcher,
     ) -> Result<Self> {
         let mut scopes = Vec::new();
-        let mut resolver = Resolver { scopes: Vec::new(), fetcher };
+        let mut resolver = Resolver { scopes: Vec::new(), fetcher, testers: false };
         for source in sources {
             let dir = resolver.fetcher.fetch(source)?;
             let src = source::is_remote(source).then(|| source.clone());
@@ -306,6 +311,22 @@ impl<'a> Resolver<'a> {
         }
         resolver.scopes = scopes;
         Ok(resolver)
+    }
+
+    /// Unlock tester access when `password` matches a testers file in one
+    /// of the scopes. Returns whether access is unlocked.
+    pub fn unlock_testers(&mut self, password: Option<&str>) -> bool {
+        self.testers = password.is_some_and(|pw| {
+            self.scopes
+                .iter()
+                .any(|scope| crate::testers::read(&scope.dir).is_some_and(|t| t.accepts(pw)))
+        });
+        self.testers
+    }
+
+    /// Whether any scope offers tester access at all.
+    pub fn offers_testers(&self) -> bool {
+        self.scopes.iter().any(|scope| crate::testers::read(&scope.dir).is_some())
     }
 
     /// Find a project package (mod/tool/library) by id: full files across
@@ -319,7 +340,7 @@ impl<'a> Resolver<'a> {
                     let manifest: ProjectManifest = serde_json::from_value(doc)
                         .with_context(|| format!("package \"{id}\" is not a valid project manifest"))?;
                     let release_source = manifest.source.clone().or_else(|| scope.source.clone());
-                    return Ok(ResolvedPackage { manifest, scope: scope.clone(), release_source });
+                    return Ok(ResolvedPackage { manifest, scope: scope.clone(), release_source, testers: false });
                 }
             }
         }
@@ -330,6 +351,9 @@ impl<'a> Resolver<'a> {
             for (_, doc) in read_docs(&scope.dir)? {
                 if doc_kind(&doc) == "link" {
                     if let Ok(link) = serde_json::from_value::<LinkEntry>(doc) {
+                        if link.testers && !self.testers {
+                            continue;
+                        }
                         let allowlisted = link.packages.iter().any(|p| p == id);
                         let open = link.packages.is_empty();
                         if allowlisted || open {
@@ -356,7 +380,7 @@ impl<'a> Resolver<'a> {
                         .with_context(|| format!("package \"{id}\" is not a valid project manifest"))?;
                     let scope = Scope { dir: dir.clone(), source: Some(link.source.clone()) };
                     let release_source = manifest.source.clone().or_else(|| scope.source.clone());
-                    return Ok(ResolvedPackage { manifest, scope, release_source });
+                    return Ok(ResolvedPackage { manifest, scope, release_source, testers: link.testers });
                 }
             }
         }
@@ -398,6 +422,7 @@ impl<'a> Resolver<'a> {
                                     manifest,
                                     scope: scope.clone(),
                                     release_source,
+                                    testers: false,
                                 });
                             }
                         }
@@ -411,7 +436,9 @@ impl<'a> Resolver<'a> {
             for (_, doc) in read_docs(&scope.dir)? {
                 if doc_kind(&doc) == "link" {
                     if let Ok(link) = serde_json::from_value::<LinkEntry>(doc) {
-                        links.push(link);
+                        if !link.testers || self.testers {
+                            links.push(link);
+                        }
                     }
                 }
             }
@@ -437,7 +464,7 @@ impl<'a> Resolver<'a> {
                             let scope = Scope { dir: dir.clone(), source: Some(link.source.clone()) };
                             let release_source =
                                 manifest.source.clone().or_else(|| scope.source.clone());
-                            out.push(ResolvedPackage { manifest, scope, release_source });
+                            out.push(ResolvedPackage { manifest, scope, release_source, testers: link.testers });
                         }
                     }
                 }

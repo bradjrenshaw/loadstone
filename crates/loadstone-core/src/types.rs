@@ -215,6 +215,10 @@ pub struct LinkEntry {
     /// Optional allowlist of package ids resolvable through this link.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<String>,
+    /// Listed only for users who entered the registry's tester password
+    /// (SPEC 2.3).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub testers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

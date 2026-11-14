@@ -27,6 +27,7 @@ pub mod secrets;
 pub mod selfupdate;
 pub mod settings;
 pub mod source;
+pub mod testers;
 pub mod tokens;
 pub mod track;
 pub mod types;

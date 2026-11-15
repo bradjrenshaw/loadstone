@@ -6,9 +6,10 @@
 //! 1. [`back_up`] runs before the install steps. Each existing file the
 //!    package's `preserve` list names is copied to a backup — in the state
 //!    store, or to the entry's `as` path when the mod itself needs the
-//!    original under another name (a proxy DLL loading the real one). When an
-//!    `as` path already holds a file, that file *is* the original (left by an
-//!    earlier installer) and is adopted instead of overwritten.
+//!    original under another name (a proxy DLL loading the real one). When
+//!    the backup's place already holds a different file, that file *is* the
+//!    original (left by an earlier installer, or by an install that failed
+//!    and could not put it back) and is adopted instead of overwritten.
 //! 2. [`settle`] runs after the steps succeed. A preserved file the steps
 //!    replaced or deleted is recorded as an [`Original`], with the hash of
 //!    what the package left there. One the steps didn't touch needs nothing:
@@ -49,8 +50,9 @@ pub struct Original {
 pub struct Pending {
     pub path: PathBuf,
     pub backup: PathBuf,
-    /// The backup was already in place (an `as` path an earlier installer
-    /// filled), so the file at `path` is not the original.
+    /// The backup was already in place with other content (an `as` path
+    /// an earlier installer filled, or a backup a failed install left), so
+    /// the file at `path` is not the original.
     pub adopted: bool,
     /// SHA-256 of the file at `path` before the steps ran.
     pub before_sha256: String,
@@ -130,50 +132,77 @@ fn remove_backup(backup: &Path) -> Result<()> {
     }
 }
 
+/// The backup file name for a preserved path: the same for the same path
+/// on every attempt, so a backup that outlived a failed install is found
+/// again rather than sitting beside a fresh, wrong one.
+fn backup_name(path: &Path) -> Result<String> {
+    let name = path.file_name().context("preserved path has no file name")?;
+    let key = path.to_string_lossy();
+    #[cfg(windows)]
+    let key = key.to_lowercase();
+    let hash = crate::release::sha256_bytes(key.as_bytes());
+    Ok(format!("{}-{}", &hash[..16], name.to_string_lossy()))
+}
+
 /// Step 1: back up every existing file the `preserve` list names.
 /// `backup_dir` holds backups for entries without an `as` path.
+///
+/// A backup that is already there is never overwritten. An install's
+/// backups are gone once it is updated or uninstalled, so one found here
+/// outlived an install that failed and could not put it back (the game
+/// held the file open), or that never finished. It holds the real
+/// original, and the file in place may be the mod's: copying that over the
+/// backup would lose the original for good. It is adopted instead.
 pub fn back_up(
     ctx: &InstallContext,
     entries: &[PreserveEntry],
     backup_dir: &Path,
     ui: &mut dyn EngineUi,
 ) -> Result<Vec<Pending>> {
-    let mut pending: Vec<Pending> = Vec::new();
+    // Which entries apply, and the `as` paths they keep originals at: a
+    // glob in another entry may match such a copy, which is not a game file.
+    let mut active: Vec<(&PreserveEntry, Option<PathBuf>)> = Vec::new();
     for entry in entries {
         if let Some(cond) = entry.when() {
             if !ctx.condition_matches(cond)? {
                 continue;
             }
         }
+        let keep_as = match entry.keep_as() {
+            Some(raw) => Some(ctx.resolve_path(raw)?),
+            None => None,
+        };
+        active.push((entry, keep_as));
+    }
+    let kept_copies: Vec<&PathBuf> = active.iter().filter_map(|(_, keep_as)| keep_as.as_ref()).collect();
+
+    let mut pending: Vec<Pending> = Vec::new();
+    for (entry, keep_as) in &active {
         for path in ctx.glob_matches(entry.path())? {
-            if !path.is_file() || pending.iter().any(|p| p.path == path) {
+            if !path.is_file()
+                || pending.iter().any(|p| same_file(&p.path, &path))
+                || kept_copies.iter().any(|kept| same_file(kept, &path))
+            {
                 continue;
             }
             ctx.check_write_allowed(&path)?;
             let before_sha256 = sha256_file(&path)?;
-            match entry.keep_as() {
-                Some(raw) => {
-                    let backup = ctx.resolve_path(raw)?;
-                    ctx.check_write_allowed(&backup)?;
-                    if backup.is_file() {
-                        ui.log(&format!(
-                            "Using the original already kept at {}.",
-                            backup.display()
-                        ));
-                        pending.push(Pending { path, backup, adopted: true, before_sha256 });
-                    } else {
-                        copy_over(&path, &backup)?;
-                        pending.push(Pending { path, backup, adopted: false, before_sha256 });
-                    }
+            let backup = match keep_as {
+                Some(backup) => {
+                    ctx.check_write_allowed(backup)?;
+                    backup.clone()
                 }
-                None => {
-                    let name = path.file_name().context("preserved path has no file name")?;
-                    let backup =
-                        backup_dir.join(format!("{}-{}", pending.len(), name.to_string_lossy()));
-                    copy_over(&path, &backup)?;
-                    pending.push(Pending { path, backup, adopted: false, before_sha256 });
-                }
+                None => backup_dir.join(backup_name(&path)?),
+            };
+            // An existing copy with the same content is no different from
+            // a fresh one; anything else is an original to adopt.
+            let adopted = backup.is_file() && !sha256_file(&backup)?.eq_ignore_ascii_case(&before_sha256);
+            if adopted {
+                ui.log(&format!("Using the original already kept at {}.", backup.display()));
+            } else if !backup.is_file() {
+                copy_over(&path, &backup)?;
             }
+            pending.push(Pending { path, backup, adopted, before_sha256 });
         }
     }
     if !pending.is_empty() {
@@ -207,12 +236,28 @@ pub fn settle(pending: &[Pending], written: &[PathBuf]) -> Result<Settled> {
 impl Settled {
     /// After the state is saved: drop the copies of files the steps left
     /// alone, putting adopted originals back (the file in place was an
-    /// earlier installer's). Best effort; a leftover backup only costs disk.
-    pub fn finish(self, roots: &[PathBuf], ui: &mut dyn EngineUi) {
+    /// earlier installer's, or a failed install's).
+    ///
+    /// Returns the adopted originals that could not be put back now (the
+    /// game holds the file open). The caller adds them to the install's
+    /// state, so an update or uninstall puts them back instead of the
+    /// original being forgotten beside a file nobody tracks.
+    #[must_use]
+    pub fn finish(self, roots: &[PathBuf], ui: &mut dyn EngineUi) -> Vec<Original> {
+        let mut deferred = Vec::new();
         for p in &self.untouched {
             if p.adopted {
                 if let Err(e) = copy_over(&p.backup, &p.path) {
-                    ui.log(&format!("Warning: could not restore the original {}: {e:#}", p.path.display()));
+                    ui.log(&format!(
+                        "Warning: could not restore the original {} now ({e:#}). \
+                         It will be put back when this mod is updated or uninstalled.",
+                        p.path.display()
+                    ));
+                    deferred.push(Original {
+                        path: p.path.clone(),
+                        backup: p.backup.clone(),
+                        installed_sha256: p.before_sha256.clone(),
+                    });
                     continue;
                 }
                 ui.log(&format!("Restored the original {}.", p.path.display()));
@@ -222,6 +267,7 @@ impl Settled {
             }
             prune_parent(&p.backup, roots);
         }
+        deferred
     }
 }
 

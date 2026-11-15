@@ -268,8 +268,16 @@ pub fn install(
         Ok((state, settled))
     })();
     match outcome {
-        Ok((state, settled)) => {
-            settled.finish(&backup_roots, ui);
+        Ok((mut state, settled)) => {
+            // An adopted original that can't go back yet joins the record,
+            // so the next update or uninstall puts it back.
+            let deferred = settled.finish(&backup_roots, ui);
+            if !deferred.is_empty() {
+                state.originals.extend(deferred);
+                if let Err(e) = store.save(&state) {
+                    ui.log(&format!("Warning: could not record the originals still to restore: {e:#}"));
+                }
+            }
             Ok(state)
         }
         Err(e) => {

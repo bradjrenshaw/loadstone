@@ -168,37 +168,79 @@ collisions, §2). Install-time resolution still follows the live chain.
 
 ### 2.3 Tester access
 
-A registry can give private testers one password that unlocks its tester-only
-listings and every mod's beta versions. It is a gate, not encryption: release
-files stay on public release pages, so it keeps a beta out of the way of
-ordinary users rather than secret.
+Private testers can be given passwords that unlock tester-only listings and
+beta versions. A **registry** can have one password for the mods it lists, and
+a **mod** can have its own. It is a gate, not encryption: release files stay on
+public release pages, so it keeps a beta out of the way of ordinary users
+rather than secret.
+
+The registry's password lives in a testers file in the registry:
 
 ```json
 // loadstone-packages/testers.json
 { "kind": "testers", "salt": "<random>", "passwordSha256": "<hex>" }
 ```
 
-- `passwordSha256` is SHA-256 of `loadstone-testers:<salt>:<password>`; the
-  password itself is never published. `loadstone testers new-file <password>`
-  prints a file with a fresh salt. Replacing the file changes the password, and
-  everyone who entered the old one is locked out again.
-- A link file with `"testers": true` is a **tester-only listing**: it neither
-  appears in the mod list nor resolves by id until that registry's password is
-  entered. A password unlocks only the listings of the registries whose
-  testers file accepts it. Clients mark such mods as tester previews.
-- **Beta versions** are the source repo's prereleases. When a configured
-  registry has a testers file and none accepts the password, clients leave
-  prereleases out of version pickers; with no testers file anywhere,
-  prereleases are public and pickers show them. With tester access, "latest"
-  (installs and updates without a chosen version) is the newest release by
-  version number, prerelease or not; when that can't be determined (the
-  releases list is unreachable or rate-limited, or the newest release has no
-  `loadstone-release.json`), it falls back to the latest stable release.
-- An update never moves to an older version: a tester who loses access keeps
-  their beta until a newer stable release comes out.
-- The client saves the entered password as the global preference
-  `testerPassword` (§15.2) once a registry's testers file accepts it, and checks
-  it against the registry's current file each time it resolves packages.
+A mod's own password lives in the mod's package file (§5), in the mod's repo,
+so the mod's author sets it and it applies wherever the mod is listed:
+
+```json
+// loadstone-packages/wrath-access.json
+{
+  "manifestVersion": 1, "id": "wrath-access", "name": "Wrath Access",
+  "testers": { "salt": "<random>", "passwordSha256": "<hex>" }
+}
+```
+
+- Each `passwordSha256` is SHA-256 of `loadstone-testers:<salt>:<password>`;
+  the passwords themselves are never published.
+  `loadstone testers new-file <password>` prints a testers file, and
+  `loadstone testers mod-password <password>` prints the `testers` field for a
+  package file, each with a fresh salt. Replacing a hash changes that password,
+  and everyone who entered the old one is locked out again.
+
+**One password covers a mod:**
+
+- its own, when its package file has `testers`. The registry's password then
+  does not open it, so a mod can be kept to a smaller group than the
+  registry's testers;
+- otherwise the password of the registry that lists it (the registry holding
+  its package file, or the link that leads to it), when that registry has a
+  testers file. Another registry's testers file, and a password that registry
+  accepts, change nothing for it;
+- otherwise none.
+
+That puts each mod in one of three states: **open** (no password covers it),
+**locked** (one does, and the tester has not entered it) or **unlocked**.
+
+- A link file with `"testers": true` is a **tester-only listing**: a mod reached
+  through it neither appears in the mod list nor resolves by id unless the mod
+  is unlocked. Clients mark such mods as tester previews. A client follows
+  such a link only when the user has saved some tester password, and then
+  reads the mod's package file to see whether one of them unlocks it.
+- **Beta versions** are the source repo's prereleases. Version pickers leave
+  them out for a locked mod and show them otherwise: an open mod's prereleases
+  are public, whatever passwords other mods and registries have.
+- For an unlocked mod, "latest" (installs and updates without a chosen version)
+  is the newest release by version number, prerelease or not; when that can't
+  be determined (the releases list is unreachable or rate-limited, or the
+  newest release has no `loadstone-release.json`), it falls back to the latest
+  stable release. For every other mod, "latest" is the latest stable release.
+  An install or update looks the newest release up afresh; clients may reuse a
+  recent answer only for display.
+- "Latest" never moves to an older version: a tester who loses access, or whose
+  lookup fell back to the stable release, keeps their beta until a newer
+  release comes out. An update reports that the mod is up to date; any other
+  install without a chosen version (a reinstall to change install options)
+  stops with an error instead of downgrading. Choosing a version explicitly
+  still installs it, older or not.
+- A tester may hold several passwords, for different registries and mods. The
+  client saves each one entered, once a registry or a listed mod accepts it,
+  in the global preference `testerPassword` (§15.2), a list, and tries them
+  all against the current files every time it resolves packages. A lone string
+  there is read as a list of one.
+- The password in force is the one in the package file as the registry serves
+  it now, not one frozen into a release.
 ---
 
 ## 3. The install context and path tokens
@@ -323,6 +365,7 @@ Top-level fields:
 | `game`            | yes (mods) | `id` of the game package                          |
 | `source`          | no  | Repo whose releases carry the artifacts; defaults to the repo containing this file (§2) |
 | `pinnedRelease`   | no  | Registry-pinned release for externally released packages (§13.1) |
+| `testers`         | no  | The package's own tester password, as a salted hash (§2.3) |
 | `distributions`   | no  | Distribution support declaration (§6)                    |
 | `dependencies`    | no  | Tool/library dependencies (§7)                           |
 | `channels`        | no  | Install channels (§8); default is `stable` only          |
@@ -805,13 +848,22 @@ such files in **`preserve`**, and the engine keeps their originals:
 - **Before the install steps run**, every existing file an entry names is
   copied aside: into the manager's state, or to `as` when the mod needs the
   original under another name (a proxy that loads the real DLL). `as` names one
-  file, so its `path` cannot be a glob. When the `as` file already exists, it
-  is taken to be the original, left by an earlier installer, and is used as is.
+  file, so its `path` cannot be a glob. A file is preserved once however many
+  entries name it, in whatever spelling, and a copy kept under an `as` name is
+  not itself preserved when a glob matches it.
+- **A copy that is already there is never overwritten.** When the `as` file, or
+  the copy in the manager's state, already exists with different content, it is
+  taken to be the original and is used as is: it was left by an earlier
+  installer, or by an install that failed and could not put it back. The file
+  in place is then not the game's, and copying it over the kept one would lose
+  the original.
 - **After the steps succeed**, each preserved file the steps replaced or
   deleted is recorded with the hash of what the package left there. A file the
   steps left alone needs nothing: its copy is dropped, except that an adopted
-  `as` original is put back, since the file in place was the earlier
-  installer's.
+  original is put back, since the file in place was not the game's. When it
+  cannot be put back yet (the game holds the file open), the install still
+  succeeds, with a warning, and records it like a replaced file, so the next
+  update or uninstall puts it back.
 - **On update and uninstall**, before anything else is written, each recorded
   original goes back where the package's file still is (same hash) or where the
   file is gone. Where something else replaced the file since, such as a game

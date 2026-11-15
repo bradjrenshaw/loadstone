@@ -99,7 +99,7 @@ pub fn validate_value(doc: &Value, ctx: &ValidationContext) -> ValidationResult 
 
 const PROJECT_KEYS: &[&str] = &[
     "manifestVersion", "kind", "id", "name", "description", "authors", "license",
-    "game", "source", "pinnedRelease", "platforms", "distributions", "dependencies", "channels", "install",
+    "game", "source", "pinnedRelease", "platforms", "testers", "distributions", "dependencies", "channels", "install",
     "sourceInstall", "uninstall", "cleanupLegacy", "preserve", "userData", "options", "settings",
     "actions", "launch", "conflictPolicy", "packaging",
 ];
@@ -292,6 +292,9 @@ fn validate_project(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
         check_source(source, "source", diags);
     }
     check_platforms(&manifest.platforms, diags);
+    if let Some(own) = &manifest.testers {
+        check_password_hash("testers", &own.salt, &own.password_sha256, "loadstone testers mod-password", diags);
+    }
 
     if let Some(pinned) = &manifest.pinned_release {
         validate_pinned_release(pinned, diags);
@@ -1301,18 +1304,23 @@ fn validate_link(doc: &Value, diags: &mut Vec<Diagnostic>) {
 fn validate_testers(doc: &Value, diags: &mut Vec<Diagnostic>) {
     warn_unknown_keys(doc, &["kind", "salt", "passwordSha256"], diags);
     match serde_json::from_value::<crate::testers::TestersFile>(doc.clone()) {
-        Ok(t) => {
-            if t.salt.trim().is_empty() {
-                diags.push(Diagnostic::error("salt", "must not be empty"));
-            }
-            if t.password_sha256.len() != 64 || !t.password_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-                diags.push(Diagnostic::error(
-                    "passwordSha256",
-                    "must be a SHA-256 hex digest (make the file with `loadstone testers new-file`)",
-                ));
-            }
-        }
+        Ok(t) => check_password_hash("", &t.salt, &t.password_sha256, "loadstone testers new-file", diags),
         Err(e) => diags.push(Diagnostic::error("", format!("does not parse as a testers file: {e}"))),
+    }
+}
+
+/// One salted tester password hash (SPEC 2.3), found under `at` ("" for
+/// the top of the document). `command` is what makes one.
+fn check_password_hash(at: &str, salt: &str, sha: &str, command: &str, diags: &mut Vec<Diagnostic>) {
+    let field = |name: &str| if at.is_empty() { name.to_string() } else { format!("{at}/{name}") };
+    if salt.trim().is_empty() {
+        diags.push(Diagnostic::error(field("salt"), "must not be empty"));
+    }
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        diags.push(Diagnostic::error(
+            field("passwordSha256"),
+            format!("must be a SHA-256 hex digest (make it with `{command}`)"),
+        ));
     }
 }
 

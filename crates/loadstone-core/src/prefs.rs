@@ -122,9 +122,10 @@ pub static DEFINITIONS: &[PrefDef] = &[
     PrefDef {
         key: crate::testers::PREF_TESTER_PASSWORD,
         kind: PrefType::Structured,
-        default: "\"\"",
-        label: "Tester password",
-        description: "Unlocks tester-only mods and beta versions. Set from the tester password button.",
+        default: "[]",
+        label: "Tester passwords",
+        description: "Unlock tester-only mods and beta versions, for a registry or for single mods. \
+                      Set from the tester password button.",
         applies: Applies::Global,
     },
     PrefDef {

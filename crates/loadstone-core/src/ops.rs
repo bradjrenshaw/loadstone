@@ -48,10 +48,10 @@ pub struct InstallOptions {
     /// Ask every install option again, even those a previous install of
     /// this copy already answered ("change install options").
     pub ask_options: bool,
-    /// The tester password the user saved (SPEC 2.3): when a registry
-    /// accepts it, tester-only mods resolve and "latest" includes
-    /// prereleases.
-    pub tester_password: Option<String>,
+    /// The tester passwords the user saved (SPEC 2.3): where one unlocks
+    /// the mod, or the registry that lists it, a tester-only mod resolves
+    /// and "latest" includes prereleases.
+    pub tester_passwords: Vec<String>,
 }
 
 impl Default for InstallOptions {
@@ -72,7 +72,7 @@ impl Default for InstallOptions {
             update_mode: false,
             option_values: BTreeMap::new(),
             ask_options: false,
-            tester_password: None,
+            tester_passwords: Vec::new(),
         }
     }
 }
@@ -120,8 +120,11 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         Box::new(move |msg| notes_sink.borrow_mut().push(msg.to_string())),
     )?;
     let mut resolver = Resolver::from_sources(&sources, &mut fetcher)?;
-    let testers = resolver.unlock_testers(opts.tester_password.as_deref());
+    resolver.unlock_testers(&opts.tester_passwords);
     let resolved = resolver.resolve_project(&id)?;
+    // Beta versions follow the mod's tester access in the registry that
+    // lists it (SPEC 2.3).
+    let testers = resolved.access.betas();
     let ResolvedPackage { manifest, scope: mod_scope, release_source, .. } = resolved;
     if manifest.kind != Kind::Mod {
         bail!("\"{id}\" is a {:?}; `install` takes a mod (tools install as dependencies)", manifest.kind);
@@ -321,16 +324,41 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                         source::release_manifest(&source, Some(id.as_str()), Some(&tag))?
                     }
                     None => {
-                        // Testers get the newest release, beta or not.
+                        // Testers get the newest release, beta or not. Looked
+                        // up afresh: an install acts on what is published now.
                         ui.log(&format!("Fetching latest release information from {source}..."));
-                        let (tag, release) =
-                            crate::testers::latest_release(&source, Some(id.as_str()), testers, &mut |m| ui.log(m))?;
+                        let (tag, release) = crate::testers::latest_release(
+                            &source,
+                            Some(id.as_str()),
+                            testers,
+                            crate::testers::Lookup::Fresh,
+                            &mut |m| ui.log(m),
+                        )?;
                         release_tag = tag;
                         release
                     }
                 }
             }
         };
+        // "Latest" never replaces a newer install with an older release
+        // (SPEC 2.3), whatever asked for it: a tester who lost access, or
+        // whose beta lookup fell back to the stable release, keeps the beta.
+        // An update says so below; any other install stops here, since
+        // reinstalling (new install options, say) would otherwise downgrade.
+        if !opts.update_mode && opts.tag.is_none() && opts.local_release.is_none() {
+            if let Some(state) = store.load(&game_id, &id, &ctx.game_dir)? {
+                if crate::release::is_older_version(&release.version, &state.version) {
+                    bail!(
+                        "{} {} is installed, which is newer than the latest release available \
+                         to you now ({}). Nothing was changed. To install an older version, \
+                         choose that version explicitly.",
+                        manifest.name,
+                        state.version,
+                        release.version
+                    );
+                }
+            }
+        }
         if opts.update_mode && opts.tag.is_none() {
             if let Some(state) = store.load(&game_id, &id, &ctx.game_dir)? {
                 let same = crate::release::normalize_version(&release.version)
@@ -438,7 +466,10 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     if !opts.no_deps {
         let mut dep_scopes = vec![mod_scope.clone()];
         dep_scopes.extend(base_scopes.iter().cloned());
-        let mut dep_resolver = Resolver { scopes: dep_scopes, fetcher: &mut fetcher, unlocked: Vec::new() };
+        // The tester passwords come along, so a tester-only mod can depend
+        // on a tester-only tool.
+        let mut dep_resolver =
+            Resolver { scopes: dep_scopes, fetcher: &mut fetcher, passwords: opts.tester_passwords.clone() };
         // Install options belong to the mod; its tools are installed without.
         let mod_options = std::mem::take(&mut ctx.options);
         for dep in &manifest.dependencies {

@@ -178,9 +178,9 @@ pub fn cmd_install(args: &InstallArgs) -> Result<()> {
         update_mode: args.update_mode,
         option_values: args.option_values.clone(),
         ask_options: args.ask_options,
-        tester_password: loadstone_core::prefs::PrefStore::open(&args.profile, None)
-            .ok()
-            .and_then(|prefs| loadstone_core::testers::saved_password(&prefs)),
+        tester_passwords: loadstone_core::prefs::PrefStore::open(&args.profile, None)
+            .map(|prefs| loadstone_core::testers::saved_passwords(&prefs))
+            .unwrap_or_default(),
     };
     let summary = ops::install(&opts, &mut ui)?;
     println!("{summary}");

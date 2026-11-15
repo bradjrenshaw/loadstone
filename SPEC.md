@@ -183,12 +183,17 @@ ordinary users rather than secret.
   prints a file with a fresh salt. Replacing the file changes the password, and
   everyone who entered the old one is locked out again.
 - A link file with `"testers": true` is a **tester-only listing**: it neither
-  appears in the mod list nor resolves by id until the password is entered.
-  Clients mark such mods as tester previews.
-- **Beta versions** are the source repo's prereleases. Without tester access,
-  clients leave prereleases out of version pickers. With it, they show them,
-  and "latest" (installs and updates without a chosen version) is the newest
-  release by version number, prerelease or not.
+  appears in the mod list nor resolves by id until that registry's password is
+  entered. A password unlocks only the listings of the registries whose
+  testers file accepts it. Clients mark such mods as tester previews.
+- **Beta versions** are the source repo's prereleases. When a configured
+  registry has a testers file and none accepts the password, clients leave
+  prereleases out of version pickers; with no testers file anywhere,
+  prereleases are public and pickers show them. With tester access, "latest"
+  (installs and updates without a chosen version) is the newest release by
+  version number, prerelease or not; when that can't be determined (the
+  releases list is unreachable or rate-limited, or the newest release has no
+  `loadstone-release.json`), it falls back to the latest stable release.
 - An update never moves to an older version: a tester who loses access keeps
   their beta until a newer stable release comes out.
 - The client saves the entered password as the global preference
@@ -720,7 +725,9 @@ file.
 
 Sets or removes keys in an INI-style config file, leaving every other byte as
 it was: comments, order, spacing around `=`, line endings, a byte-order mark,
-and a file that isn't UTF-8.
+and a file that isn't UTF-8. A file starting with a UTF-16 byte-order mark is
+read and written as UTF-16; one that looks like UTF-16 without a mark (it holds
+NUL bytes) is refused rather than corrupted.
 
 ```json
 { "step": "edit-ini",

@@ -154,7 +154,10 @@ fn for_each_parent(
         .as_object_mut()
         .with_context(|| format!("path \"{path}\": \"{}\" is not inside an object", seg.key))?;
     if !obj.contains_key(&seg.key) {
-        if create && seg.selectors.is_empty() {
+        if !seg.selectors.is_empty() {
+            // No array, so no element to match.
+            return Ok(0);
+        } else if create {
             obj.insert(seg.key.clone(), Value::Object(serde_json::Map::new()));
         } else {
             bail!("path \"{path}\": \"{}\" not found", seg.key);
@@ -217,27 +220,33 @@ pub fn path_exists(file: &Path, path: &str) -> Result<bool> {
     }
 }
 
-fn apply_one(root: &mut Value, op: &JsonOp) -> Result<()> {
-    // An optional op whose selector matches no element does nothing.
-    if op.optional && op.op != JsonOpKind::RemoveValue && op.op != JsonOpKind::RemoveKey {
-        let mut probe = root.clone();
-        if with_parents_counted(&mut probe, &op.path, false, &mut |_, _| Ok(())).unwrap_or(0) == 0
-            && parse_path(&op.path)?.iter().any(|seg| !seg.selectors.is_empty())
-        {
-            return Ok(());
-        }
+/// Run a write op's `leaf`, creating missing keys. An optional op whose
+/// selectors match no element is skipped, leaving the document untouched
+/// (keys the walk created on the way are dropped too); any other problem
+/// (a selector key that is not an array, say) is still an error.
+fn write_parents(root: &mut Value, op: &JsonOp, leaf: &mut Leaf) -> Result<()> {
+    if !op.optional {
+        return with_parents(root, &op.path, true, leaf);
     }
+    let mut work = root.clone();
+    if with_parents_counted(&mut work, &op.path, true, leaf)? > 0 {
+        *root = work;
+    }
+    Ok(())
+}
+
+fn apply_one(root: &mut Value, op: &JsonOp) -> Result<()> {
     match op.op {
         JsonOpKind::Set => {
             let value = op.value.clone().context("set requires a value")?;
-            with_parents(root, &op.path, true, &mut |obj, key| {
+            write_parents(root, op, &mut |obj, key| {
                 obj.insert(key.to_string(), value.clone());
                 Ok(())
             })?;
         }
         JsonOpKind::Ensure => {
             let value = op.value.clone().context("ensure requires a value")?;
-            with_parents(root, &op.path, true, &mut |obj, key| {
+            write_parents(root, op, &mut |obj, key| {
                 let wrong_type = obj
                     .get(key)
                     .map(|existing| std::mem::discriminant(existing) != std::mem::discriminant(&value))
@@ -251,7 +260,7 @@ fn apply_one(root: &mut Value, op: &JsonOp) -> Result<()> {
         JsonOpKind::AppendUnique => {
             let value = op.value.clone().context("append-unique requires a value")?;
             let path = op.path.clone();
-            with_parents(root, &op.path, true, &mut |obj, key| {
+            write_parents(root, op, &mut |obj, key| {
                 let entry = obj.entry(key.to_string()).or_insert_with(|| Value::Array(Vec::new()));
                 let arr = entry
                     .as_array_mut()
@@ -477,6 +486,30 @@ mod tests {
         .unwrap();
         let out: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
         assert_eq!(out["mods"][0]["enabled"], true);
+    }
+
+    #[test]
+    fn optional_ops_create_what_they_need_and_report_real_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("mods.json");
+        // Element X exists but has no settings object: the op creates it,
+        // exactly as it would without `optional`.
+        std::fs::write(&f, br#"{"mods": [{"id": "X"}]}"#).unwrap();
+        apply_ops(&f, false, &ops(serde_json::json!([
+            { "op": "set", "path": "mods[id=X].settings.enabled", "value": true, "optional": true },
+            { "op": "set", "path": "extra.mods[id=Y].enabled", "value": true, "optional": true }
+        ]))).unwrap();
+        let out: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(out["mods"][0]["settings"]["enabled"], true);
+        assert!(out.get("extra").is_none(), "a skipped op leaves nothing behind: {out}");
+
+        // A selector key that is not an array is the document's problem.
+        std::fs::write(&f, br#"{"mods": {"id": "X"}}"#).unwrap();
+        let err = apply_ops(&f, false, &ops(serde_json::json!([
+            { "op": "set", "path": "mods[id=X].enabled", "value": true, "optional": true }
+        ])))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not an array"), "{err:#}");
     }
 
     #[test]

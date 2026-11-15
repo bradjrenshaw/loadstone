@@ -264,9 +264,10 @@ fn extract_packages(zip_bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
 pub struct Resolver<'a> {
     pub scopes: Vec<Scope>,
     pub fetcher: &'a mut dyn RegistryFetcher,
-    /// Tester access is unlocked (SPEC 2.3): tester-only links resolve
-    /// and are listed.
-    pub testers: bool,
+    /// Scopes (by directory) whose testers file accepted the tester
+    /// password (SPEC 2.3): their tester-only links resolve and are listed.
+    /// Each registry's password unlocks only its own listings.
+    pub unlocked: Vec<PathBuf>,
 }
 
 fn read_docs(dir: &Path) -> Result<Vec<(PathBuf, serde_json::Value)>> {
@@ -303,7 +304,7 @@ impl<'a> Resolver<'a> {
         fetcher: &'a mut dyn RegistryFetcher,
     ) -> Result<Self> {
         let mut scopes = Vec::new();
-        let mut resolver = Resolver { scopes: Vec::new(), fetcher, testers: false };
+        let mut resolver = Resolver { scopes: Vec::new(), fetcher, unlocked: Vec::new() };
         for source in sources {
             let dir = resolver.fetcher.fetch(source)?;
             let src = source::is_remote(source).then(|| source.clone());
@@ -313,15 +314,31 @@ impl<'a> Resolver<'a> {
         Ok(resolver)
     }
 
-    /// Unlock tester access when `password` matches a testers file in one
-    /// of the scopes. Returns whether access is unlocked.
+    /// Unlock the tester-only listings of every scope whose testers file
+    /// accepts `password`. Returns whether any scope accepted it (which
+    /// also unlocks beta versions, SPEC 2.3).
     pub fn unlock_testers(&mut self, password: Option<&str>) -> bool {
-        self.testers = password.is_some_and(|pw| {
-            self.scopes
+        self.unlocked = match password {
+            Some(pw) => self
+                .scopes
                 .iter()
-                .any(|scope| crate::testers::read(&scope.dir).is_some_and(|t| t.accepts(pw)))
-        });
-        self.testers
+                .filter(|scope| crate::testers::read(&scope.dir).is_some_and(|t| t.accepts(pw)))
+                .map(|scope| scope.dir.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        !self.unlocked.is_empty()
+    }
+
+    fn scope_unlocked(&self, scope: &Scope) -> bool {
+        self.unlocked.contains(&scope.dir)
+    }
+
+    /// Whether version pickers show prereleases (SPEC 2.3): with tester
+    /// access, or when no registry gates them behind a testers file (then
+    /// they are simply public).
+    pub fn shows_prereleases(&self) -> bool {
+        !self.unlocked.is_empty() || !self.offers_testers()
     }
 
     /// Whether any scope offers tester access at all.
@@ -351,7 +368,7 @@ impl<'a> Resolver<'a> {
             for (_, doc) in read_docs(&scope.dir)? {
                 if doc_kind(&doc) == "link" {
                     if let Ok(link) = serde_json::from_value::<LinkEntry>(doc) {
-                        if link.testers && !self.testers {
+                        if link.testers && !self.scope_unlocked(scope) {
                             continue;
                         }
                         let allowlisted = link.packages.iter().any(|p| p == id);
@@ -436,7 +453,7 @@ impl<'a> Resolver<'a> {
             for (_, doc) in read_docs(&scope.dir)? {
                 if doc_kind(&doc) == "link" {
                     if let Ok(link) = serde_json::from_value::<LinkEntry>(doc) {
-                        if !link.testers || self.testers {
+                        if !link.testers || self.scope_unlocked(scope) {
                             links.push(link);
                         }
                     }

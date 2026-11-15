@@ -177,6 +177,13 @@ pub fn normalize_version(version: &str) -> Result<String> {
     Ok(parsed.to_string())
 }
 
+/// Whether version `a` is older than `b` by semver; false when either
+/// does not parse.
+pub fn is_older_version(a: &str, b: &str) -> bool {
+    let parse = |v: &str| semver::Version::parse(v.trim().trim_start_matches(['v', 'V'])).ok();
+    matches!((parse(a), parse(b)), (Some(a), Some(b)) if a < b)
+}
+
 pub fn sha256_file(path: &Path) -> Result<String> {
     let data = fs::read(path)?;
     Ok(sha256_bytes(&data))
@@ -196,6 +203,15 @@ pub fn sha256_bytes(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_versions_compare_by_semver() {
+        assert!(is_older_version("1.1.0", "1.2.0-beta.1"));
+        assert!(is_older_version("v1.2.0-beta.1", "1.2.0"));
+        assert!(!is_older_version("1.2.0", "1.2.0"));
+        assert!(!is_older_version("1.10.0", "1.9.0"));
+        assert!(!is_older_version("", "1.0.0"), "unparsable is never older");
+    }
 
     #[test]
     fn normalize_strips_v_prefix() {

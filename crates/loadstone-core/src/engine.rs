@@ -188,87 +188,102 @@ pub fn install(
     let backup_dir = store.originals_dir(&plan.game_id, &plan.manifest.id, &ctx.game_dir);
     let pending = crate::originals::back_up(ctx, plan.preserve, &backup_dir, ui)?;
     let mut written: Vec<PathBuf> = Vec::new();
-    let run = run_steps_inner(
-        ctx,
-        plan.install_steps,
-        &artifacts,
-        plan.keep_existing,
-        plan.strip_top_level,
-        &mut written,
-        ui,
-    )
-    .and_then(|()| crate::originals::settle(&pending, &mut written, &backup_roots, ui));
-    let originals = match run {
-        Ok(originals) => originals,
+    let mut new_settings: Option<PathBuf> = None;
+    // Everything from the steps to the saved state either completes or is
+    // rolled back as one: until the state is on disk, nothing would undo
+    // the steps' writes later, and every backup must still be in place.
+    let outcome = (|| -> Result<(InstalledState, crate::originals::Settled)> {
+        run_steps_inner(
+            ctx,
+            plan.install_steps,
+            &artifacts,
+            plan.keep_existing,
+            plan.strip_top_level,
+            &mut written,
+            ui,
+        )?;
+        let mut settled = crate::originals::settle(&pending, &written)?;
+
+        // 3b. Settings: freeze the schema; on a fresh install (or a missing
+        //     storage file) materialize values, prompting for promptOnInstall
+        //     booleans. An existing file is the user's — leave it alone.
+        let settings_file = match plan.settings {
+            Some(settings) => {
+                let path = ctx.resolve_path(&settings.storage.file)?;
+                if !path.exists() {
+                    new_settings = Some(path.clone());
+                    initialize_settings(ctx, settings, prior.is_none(), &path, ui)?;
+                }
+                Some(path)
+            }
+            None => None,
+        };
+
+        // 4. Record state, with uninstall data pre-resolved so removal never
+        //    needs manifests or token resolution again.
+        let state = InstalledState {
+            id: plan.manifest.id.clone(),
+            kind: match plan.manifest.kind {
+                Kind::Tool => "tool",
+                Kind::Library => "library",
+                _ => "mod",
+            }
+            .to_string(),
+            version: plan.version.clone(),
+            channel: plan.channel.clone(),
+            game: plan.game_id.clone(),
+            files: std::mem::take(&mut settled.files),
+            originals: std::mem::take(&mut settled.originals),
+            uninstall_steps: resolve_steps(ctx, plan.uninstall_steps)?,
+            user_data_paths: plan
+                .user_data_decl
+                .iter()
+                .map(|raw| ctx.resolve_path(raw))
+                .collect::<Result<Vec<_>>>()?,
+            cleanup_legacy_paths,
+            dependencies: plan.manifest.dependencies.iter().map(|d| d.id.clone()).collect(),
+            dependents: match &plan.dependent_of {
+                Some(d) => {
+                    let mut deps = prior_dependents;
+                    if !deps.contains(d) {
+                        deps.push(d.clone());
+                    }
+                    deps
+                }
+                None => prior_dependents,
+            },
+            roots: roots_of(ctx),
+            game_dir: ctx.game_dir.clone(),
+            user_data: ctx.user_data.clone(),
+            distribution: ctx.distribution.clone(),
+            game_paths: ctx.game_paths.clone(),
+            settings: plan.settings.cloned(),
+            settings_file,
+            actions: plan.actions.to_vec(),
+            launch: plan.launch.to_vec(),
+            steam_app_id: ctx.steam_app_id.clone(),
+            options: ctx.options.clone(),
+        };
+        store.save(&state)?;
+        Ok((state, settled))
+    })();
+    match outcome {
+        Ok((state, settled)) => {
+            settled.finish(&backup_roots, ui);
+            Ok(state)
+        }
         Err(e) => {
             ui.log("Install failed; removing files written so far.");
             let _ = remove_tracked_files(&written, &roots_of(ctx));
+            if let Some(path) = new_settings {
+                let _ = std::fs::remove_file(path);
+            }
             crate::originals::roll_back(&pending, &written, &backup_roots);
-            return Err(e);
+            // A save that failed partway must not leave a half-written record.
+            let _ = store.remove(&plan.game_id, &plan.manifest.id, &ctx.game_dir);
+            Err(e)
         }
-    };
-
-    // 3b. Settings: freeze the schema; on a fresh install (or a missing
-    //     storage file) materialize values, prompting for promptOnInstall
-    //     booleans. An existing file is the user's — leave it alone.
-    let settings_file = match plan.settings {
-        Some(settings) => {
-            let path = ctx.resolve_path(&settings.storage.file)?;
-            if !path.exists() {
-                initialize_settings(ctx, settings, prior.is_none(), &path, ui)?;
-            }
-            Some(path)
-        }
-        None => None,
-    };
-
-    // 4. Record state, with uninstall data pre-resolved so removal never
-    //    needs manifests or token resolution again.
-    let state = InstalledState {
-        id: plan.manifest.id.clone(),
-        kind: match plan.manifest.kind {
-            Kind::Tool => "tool",
-            Kind::Library => "library",
-            _ => "mod",
-        }
-        .to_string(),
-        version: plan.version.clone(),
-        channel: plan.channel.clone(),
-        game: plan.game_id.clone(),
-        files: written,
-        originals,
-        uninstall_steps: resolve_steps(ctx, plan.uninstall_steps)?,
-        user_data_paths: plan
-            .user_data_decl
-            .iter()
-            .map(|raw| ctx.resolve_path(raw))
-            .collect::<Result<Vec<_>>>()?,
-        cleanup_legacy_paths,
-        dependencies: plan.manifest.dependencies.iter().map(|d| d.id.clone()).collect(),
-        dependents: match &plan.dependent_of {
-            Some(d) => {
-                let mut deps = prior_dependents;
-                if !deps.contains(d) {
-                    deps.push(d.clone());
-                }
-                deps
-            }
-            None => prior_dependents,
-        },
-        roots: roots_of(ctx),
-        game_dir: ctx.game_dir.clone(),
-        user_data: ctx.user_data.clone(),
-        distribution: ctx.distribution.clone(),
-        game_paths: ctx.game_paths.clone(),
-        settings: plan.settings.cloned(),
-        settings_file,
-        actions: plan.actions.to_vec(),
-        launch: plan.launch.to_vec(),
-        steam_app_id: ctx.steam_app_id.clone(),
-        options: ctx.options.clone(),
-    };
-    store.save(&state)?;
-    Ok(state)
+    }
 }
 
 /// Settle the value of every declared install option (SPEC 11.1): an

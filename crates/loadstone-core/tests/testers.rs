@@ -64,3 +64,55 @@ fn tester_links_appear_only_with_the_password() {
     );
     assert!(bad.has_errors());
 }
+
+#[test]
+fn a_registrys_password_unlocks_only_its_own_listings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("registry-a");
+    let b = tmp.path().join("registry-b");
+    let mine = tmp.path().join("my-registry");
+    let secret_b = tmp.path().join("secret-b");
+    write(&secret_b.join("secret-b.json"), mod_file("secret-b"));
+    write(&b.join("secret-b.json"), serde_json::json!({ "kind": "link", "source": secret_b, "packages": ["secret-b"], "testers": true }));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::write(a.join("testers.json"), serde_json::to_string(&TestersFile::new("alpha")).unwrap()).unwrap();
+    std::fs::write(b.join("testers.json"), serde_json::to_string(&TestersFile::new("bravo")).unwrap()).unwrap();
+    // A registry the user added themselves, with a password they chose.
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("testers.json"), serde_json::to_string(&TestersFile::new("mine")).unwrap()).unwrap();
+
+    let sources: Vec<String> = [&mine, &a, &b].iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let mut fetcher = HttpFetcher::new(Some(tmp.path().join("cache")), Box::new(|_| {})).unwrap();
+    let mut resolver = Resolver::from_sources(&sources, &mut fetcher).unwrap();
+    let ids = |r: &mut Resolver| r.list_mods().unwrap().into_iter().map(|m| m.manifest.id).collect::<Vec<_>>();
+
+    for password in ["alpha", "mine"] {
+        assert!(resolver.unlock_testers(Some(password)), "{password} is accepted somewhere");
+        assert!(ids(&mut resolver).is_empty(), "{password} must not list B's tester mods");
+        assert!(resolver.resolve_project("secret-b").is_err(), "{password} must not resolve B's tester mods");
+    }
+    assert!(resolver.unlock_testers(Some("bravo")));
+    assert_eq!(ids(&mut resolver), vec!["secret-b"]);
+}
+
+#[test]
+fn prereleases_are_public_unless_a_registry_gates_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let open = tmp.path().join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    let mut fetcher = HttpFetcher::new(Some(tmp.path().join("cache")), Box::new(|_| {})).unwrap();
+    let mut resolver = Resolver::from_sources(&[open.to_string_lossy().into_owned()], &mut fetcher).unwrap();
+    assert!(!resolver.unlock_testers(None));
+    assert!(resolver.shows_prereleases(), "no testers.json: prereleases are public");
+
+    let gated = tmp.path().join("gated");
+    std::fs::create_dir_all(&gated).unwrap();
+    std::fs::write(gated.join("testers.json"), serde_json::to_string(&TestersFile::new("swordfish")).unwrap()).unwrap();
+    let mut fetcher = HttpFetcher::new(Some(tmp.path().join("cache")), Box::new(|_| {})).unwrap();
+    let sources: Vec<String> = [&open, &gated].iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let mut resolver = Resolver::from_sources(&sources, &mut fetcher).unwrap();
+    assert!(!resolver.unlock_testers(Some("wrong")));
+    assert!(!resolver.shows_prereleases());
+    assert!(resolver.unlock_testers(Some("swordfish")));
+    assert!(resolver.shows_prereleases());
+}

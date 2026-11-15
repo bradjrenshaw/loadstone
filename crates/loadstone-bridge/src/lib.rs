@@ -518,8 +518,10 @@ fn list_mod_releases_inner(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEn
     let notes = Rc::new(RefCell::new(Vec::new()));
     let (mut fetcher, sources) = build_resolver(&profile.registries, notes)?;
     let mut resolver = Resolver::from_sources(&sources, &mut fetcher)?;
-    // Beta versions are for testers (SPEC 2.3).
-    let testers = resolver.unlock_testers(saved_tester_password(&profile).as_deref());
+    // Beta versions are for testers when a registry gates them behind a
+    // testers file; otherwise they are public (SPEC 2.3).
+    resolver.unlock_testers(saved_tester_password(&profile).as_deref());
+    let show_prereleases = resolver.shows_prereleases();
     let resolved = resolver.resolve_project(mod_id)?;
     let source = resolved
         .release_source
@@ -527,7 +529,7 @@ fn list_mod_releases_inner(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEn
     let releases = loadstone_core::source::list_releases(&source, Some(mod_id))?;
     Ok(releases
         .into_iter()
-        .filter(|r| testers || !r.prerelease)
+        .filter(|r| show_prereleases || !r.prerelease)
         .map(|r| {
             let mut label = r.tag.clone();
             if !r.name.is_empty() && r.name != r.tag {
@@ -1133,13 +1135,11 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
     if let Some(r) = &resolved {
         if !all_dev {
             if let Some(source) = &r.release_source {
-                let tag = if page_testers {
-                    loadstone_core::testers::newest_release_tag(source, Some(mod_id)).ok().flatten()
-                } else {
-                    None
-                };
-                match loadstone_core::source::release_manifest(source, Some(mod_id), tag.as_deref()) {
-                    Ok(release) => {
+                let latest = loadstone_core::testers::latest_release(source, Some(mod_id), page_testers, &mut |m| {
+                    notes.borrow_mut().push(m.to_string())
+                });
+                match latest {
+                    Ok((_, release)) => {
                         latest_version =
                             loadstone_core::release::normalize_version(&release.version)
                                 .unwrap_or(release.version);
@@ -1202,6 +1202,12 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
             Some(s) if !latest_version.is_empty() && latest_version == s.version => {
                 format!("Up to date (version {}).", s.version)
             }
+            // Updates never move to an older version (SPEC 2.3): a beta
+            // stays until a newer release than it comes out.
+            Some(s) if loadstone_core::release::is_older_version(&latest_version, &s.version) => format!(
+                "Up to date (version {}, newer than the latest release, {latest_version}).",
+                s.version
+            ),
             Some(s) if !latest_version.is_empty() => {
                 format!("Update available: {} to {}.", s.version, latest_version)
             }

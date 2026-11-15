@@ -3,13 +3,17 @@
 //! prereleases. A gate for private testing, not encryption: the files stay
 //! on public release pages.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::prefs::{PrefStore, Scope};
 use crate::release::sha256_bytes;
+use crate::types::ReleaseManifest;
 
 /// Global preference holding the tester password the user entered.
 pub const PREF_TESTER_PASSWORD: &str = "testerPassword";
@@ -94,18 +98,64 @@ pub fn check_password(sources: &[String], password: &str) -> Result<bool> {
     Ok(resolver.unlock_testers(Some(password)))
 }
 
+/// How long a looked-up newest tag is reused. Each lookup is a GitHub
+/// releases-list call, and unauthenticated clients get 60 an hour.
+const NEWEST_TAG_TTL: Duration = Duration::from_secs(5 * 60);
+
+static NEWEST_TAGS: Mutex<BTreeMap<String, (Instant, Option<String>)>> = Mutex::new(BTreeMap::new());
+
 /// The newest release of `source` by version number, prereleases
-/// included; None when none has a semver tag.
+/// included; None when none has a semver tag. Answers are reused for a
+/// few minutes.
 pub fn newest_release_tag(source: &str, mod_id: Option<&str>) -> Result<Option<String>> {
+    let key = format!("{source}\n{}", mod_id.unwrap_or(""));
+    if let Some((at, tag)) = NEWEST_TAGS.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        if at.elapsed() < NEWEST_TAG_TTL {
+            return Ok(tag);
+        }
+    }
     let releases = crate::source::list_releases(source, mod_id)?;
-    Ok(releases
+    let tag = releases
         .into_iter()
         .filter_map(|r| {
             let v = semver::Version::parse(r.tag.trim().trim_start_matches(['v', 'V'])).ok()?;
             Some((v, r.tag))
         })
         .max_by(|a, b| a.0.cmp(&b.0))
-        .map(|(_, tag)| tag))
+        .map(|(_, tag)| tag);
+    if let Ok(mut m) = NEWEST_TAGS.lock() {
+        m.insert(key, (Instant::now(), tag.clone()));
+    }
+    Ok(tag)
+}
+
+/// The release "latest" means (SPEC 2.3), with its tag when that is not
+/// simply the latest stable release. For testers it is the newest release
+/// by version number, beta or not; when that can't be determined (the
+/// releases list is unreachable or rate-limited, or the newest tag has no
+/// loadstone-release.json) it falls back to the latest stable release,
+/// telling `note` why, so testers can always install what everyone can.
+pub fn latest_release(
+    source: &str,
+    mod_id: Option<&str>,
+    testers: bool,
+    note: &mut dyn FnMut(&str),
+) -> Result<(Option<String>, ReleaseManifest)> {
+    if testers {
+        match newest_release_tag(source, mod_id) {
+            Ok(Some(tag)) => match crate::source::release_manifest(source, mod_id, Some(&tag)) {
+                Ok(release) => return Ok((Some(tag), release)),
+                Err(e) => note(&format!(
+                    "Release {tag} has no usable Loadstone metadata ({e:#}); using the latest stable release."
+                )),
+            },
+            Ok(None) => {}
+            Err(e) => note(&format!(
+                "Could not look up beta versions ({e:#}); using the latest stable release."
+            )),
+        }
+    }
+    Ok((None, crate::source::release_manifest(source, mod_id, None)?))
 }
 
 #[cfg(test)]

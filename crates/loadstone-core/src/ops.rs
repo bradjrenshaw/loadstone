@@ -315,18 +315,18 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 let source = release_source
                     .clone()
                     .context("no --local-release given and no source repo is known for this package")?;
-                // Testers get the newest release, beta or not.
-                if testers && release_tag.is_none() {
-                    release_tag = crate::testers::newest_release_tag(&source, Some(id.as_str()))?;
-                }
-                match &release_tag {
+                match release_tag.clone() {
                     Some(tag) => {
                         ui.log(&format!("Fetching release {tag} information from {source}..."));
-                        source::release_manifest(&source, Some(id.as_str()), Some(tag))?
+                        source::release_manifest(&source, Some(id.as_str()), Some(&tag))?
                     }
                     None => {
+                        // Testers get the newest release, beta or not.
                         ui.log(&format!("Fetching latest release information from {source}..."));
-                        source::release_manifest(&source, Some(id.as_str()), None)?
+                        let (tag, release) =
+                            crate::testers::latest_release(&source, Some(id.as_str()), testers, &mut |m| ui.log(m))?;
+                        release_tag = tag;
+                        release
                     }
                 }
             }
@@ -341,14 +341,11 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                 }
                 // A beta from tester access stays until a newer release:
                 // losing access never downgrades.
-                let parse = |v: &str| semver::Version::parse(v.trim().trim_start_matches(['v', 'V'])).ok();
-                if let (Some(latest), Some(installed)) = (parse(&release.version), parse(&state.version)) {
-                    if latest < installed {
-                        return Ok(format!(
-                            "{} is up to date ({} is newer than the latest release, {}).",
-                            manifest.name, state.version, release.version
-                        ));
-                    }
+                if crate::release::is_older_version(&release.version, &state.version) {
+                    return Ok(format!(
+                        "{} is up to date ({} is newer than the latest release, {}).",
+                        manifest.name, state.version, release.version
+                    ));
                 }
                 ui.log(&format!(
                     "Updating {} {} -> {}.",
@@ -441,7 +438,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     if !opts.no_deps {
         let mut dep_scopes = vec![mod_scope.clone()];
         dep_scopes.extend(base_scopes.iter().cloned());
-        let mut dep_resolver = Resolver { scopes: dep_scopes, fetcher: &mut fetcher, testers: false };
+        let mut dep_resolver = Resolver { scopes: dep_scopes, fetcher: &mut fetcher, unlocked: Vec::new() };
         // Install options belong to the mod; its tools are installed without.
         let mod_options = std::mem::take(&mut ctx.options);
         for dep in &manifest.dependencies {

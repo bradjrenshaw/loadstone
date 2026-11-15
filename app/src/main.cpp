@@ -76,6 +76,17 @@ std::string ToStd(const wxString& s) {
     return std::string(s.utf8_str());
 }
 
+// Put text on the clipboard so it outlives Loadstone: without Flush,
+// Windows drops it when the app exits, which is just when people switch
+// to Steam or a browser to paste.
+bool CopyText(const wxString& text) {
+    if (!wxTheClipboard->Open()) return false;
+    bool ok = wxTheClipboard->SetData(new wxTextDataObject(text));
+    wxTheClipboard->Close();
+    if (ok) wxTheClipboard->Flush();
+    return ok;
+}
+
 #if wxUSE_ACCESSIBILITY
 // Exposes a description through MSAA so screen readers announce it when
 // the control gains keyboard focus. Tooltips alone only surface on mouse
@@ -285,12 +296,7 @@ public:
 
     bool copy_to_clipboard(rust::Str text) override {
         wxString value = FromRust(text);
-        return Ask<bool>(false, [value](LoadstoneFrame*) {
-            if (!wxTheClipboard->Open()) return false;
-            bool ok = wxTheClipboard->SetData(new wxTextDataObject(value));
-            wxTheClipboard->Close();
-            return ok;
-        });
+        return Ask<bool>(false, [value](LoadstoneFrame*) { return CopyText(value); });
     }
 
 private:
@@ -1583,11 +1589,8 @@ bool LoadstoneFrame::RunSignIn() {
 
     auto uri = std::make_shared<wxString>();
     copyBtn->Bind(wxEVT_BUTTON, [code, status](wxCommandEvent&) {
-        if (wxTheClipboard->Open()) {
-            wxTheClipboard->SetData(new wxTextDataObject(code->GetValue()));
-            wxTheClipboard->Close();
+        if (CopyText(code->GetValue()))
             status->SetLabel("Code copied. Open the sign-in page and paste it there.");
-        }
     });
     openBtn->Bind(wxEVT_BUTTON, [uri](wxCommandEvent&) {
         if (!uri->empty()) wxLaunchDefaultBrowser(*uri);

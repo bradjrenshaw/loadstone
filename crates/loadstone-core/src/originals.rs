@@ -13,7 +13,10 @@
 //!    replaced or deleted is recorded as an [`Original`], with the hash of
 //!    what the package left there. One the steps didn't touch needs nothing:
 //!    its copy is dropped (or, if adopted, the original goes back, since the
-//!    file in place was an earlier installer's).
+//!    file in place was an earlier installer's). `settle` itself changes
+//!    nothing on disk; that cleanup waits for [`Settled::finish`], which the
+//!    engine calls only once the install's state is saved. Until then any
+//!    failure can still [`roll_back`] with every backup intact.
 //! 3. [`restore`] runs on update and uninstall. Where the package's version
 //!    is still in place (same hash) or the file is gone, the original comes
 //!    back. Where something else replaced it since (a game update), that
@@ -49,6 +52,61 @@ pub struct Pending {
     /// The backup was already in place (an `as` path an earlier installer
     /// filled), so the file at `path` is not the original.
     pub adopted: bool,
+    /// SHA-256 of the file at `path` before the steps ran.
+    pub before_sha256: String,
+}
+
+/// What [`settle`] decided, applied in two parts: `originals` and `files`
+/// go into the install's state, and [`Settled::finish`] drops the backups
+/// nobody needs once that state is saved.
+#[derive(Debug)]
+pub struct Settled {
+    pub originals: Vec<Original>,
+    /// The steps' writes minus the preserved paths: their originals, not
+    /// plain deletion, undo them.
+    pub files: Vec<PathBuf>,
+    untouched: Vec<Pending>,
+}
+
+/// Whether `a` and `b` name the same file. Archive entries and manifest
+/// paths can differ in case (`lua51_win32.dll` against `lua51_Win32.dll`),
+/// which a case-insensitive file system treats as one file.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let key = |p: &Path| -> Vec<String> {
+            p.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect()
+        };
+        key(a) == key(b)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        false
+    }
+}
+
+fn written_holds(written: &[PathBuf], path: &Path) -> bool {
+    written.iter().any(|w| same_file(w, path))
+}
+
+/// Whether the steps replaced or deleted a preserved file: it is gone, a
+/// step wrote it (under any spelling), or its content changed.
+fn was_replaced(p: &Pending, written: &[PathBuf]) -> Result<bool> {
+    if !p.path.is_file() || written_holds(written, &p.path) {
+        return Ok(true);
+    }
+    Ok(!sha256_file(&p.path)?.eq_ignore_ascii_case(&p.before_sha256))
 }
 
 /// Copy `from` over `to`, replacing a read-only destination.
@@ -92,6 +150,7 @@ pub fn back_up(
                 continue;
             }
             ctx.check_write_allowed(&path)?;
+            let before_sha256 = sha256_file(&path)?;
             match entry.keep_as() {
                 Some(raw) => {
                     let backup = ctx.resolve_path(raw)?;
@@ -101,10 +160,10 @@ pub fn back_up(
                             "Using the original already kept at {}.",
                             backup.display()
                         ));
-                        pending.push(Pending { path, backup, adopted: true });
+                        pending.push(Pending { path, backup, adopted: true, before_sha256 });
                     } else {
                         copy_over(&path, &backup)?;
-                        pending.push(Pending { path, backup, adopted: false });
+                        pending.push(Pending { path, backup, adopted: false, before_sha256 });
                     }
                 }
                 None => {
@@ -112,7 +171,7 @@ pub fn back_up(
                     let backup =
                         backup_dir.join(format!("{}-{}", pending.len(), name.to_string_lossy()));
                     copy_over(&path, &backup)?;
-                    pending.push(Pending { path, backup, adopted: false });
+                    pending.push(Pending { path, backup, adopted: false, before_sha256 });
                 }
             }
         }
@@ -123,44 +182,60 @@ pub fn back_up(
     Ok(pending)
 }
 
-/// Step 2, after the steps succeeded: decide each backup's fate. Preserved
-/// paths leave `written` — their originals, not plain deletion, undo them.
-pub fn settle(
-    pending: &[Pending],
-    written: &mut Vec<PathBuf>,
-    roots: &[PathBuf],
-    ui: &mut dyn EngineUi,
-) -> Result<Vec<Original>> {
+/// Step 2, after the steps succeeded: decide each backup's fate without
+/// touching disk, so a failure here or before the state is saved still
+/// rolls back with every backup in place.
+pub fn settle(pending: &[Pending], written: &[PathBuf]) -> Result<Settled> {
     let mut originals = Vec::new();
+    let mut untouched = Vec::new();
     for p in pending {
-        let replaced = written.contains(&p.path);
-        written.retain(|w| w != &p.path);
-        if replaced || !p.path.exists() {
+        if was_replaced(p, written)? {
             let installed_sha256 = if p.path.is_file() { sha256_file(&p.path)? } else { String::new() };
             originals.push(Original { path: p.path.clone(), backup: p.backup.clone(), installed_sha256 });
-        } else if p.adopted {
-            // This install left the file alone, so what an earlier
-            // installer put there would stay forever: put the original back.
-            copy_over(&p.backup, &p.path)?;
-            remove_backup(&p.backup)?;
-            prune_parent(&p.backup, roots);
-            ui.log(&format!("Restored the original {}.", p.path.display()));
         } else {
-            remove_backup(&p.backup)?;
+            untouched.push(p.clone());
+        }
+    }
+    let files = written
+        .iter()
+        .filter(|w| !pending.iter().any(|p| same_file(w, &p.path)))
+        .cloned()
+        .collect();
+    Ok(Settled { originals, files, untouched })
+}
+
+impl Settled {
+    /// After the state is saved: drop the copies of files the steps left
+    /// alone, putting adopted originals back (the file in place was an
+    /// earlier installer's). Best effort; a leftover backup only costs disk.
+    pub fn finish(self, roots: &[PathBuf], ui: &mut dyn EngineUi) {
+        for p in &self.untouched {
+            if p.adopted {
+                if let Err(e) = copy_over(&p.backup, &p.path) {
+                    ui.log(&format!("Warning: could not restore the original {}: {e:#}", p.path.display()));
+                    continue;
+                }
+                ui.log(&format!("Restored the original {}.", p.path.display()));
+            }
+            if let Err(e) = remove_backup(&p.backup) {
+                ui.log(&format!("Warning: {e:#}"));
+            }
             prune_parent(&p.backup, roots);
         }
     }
-    Ok(originals)
 }
 
 /// Failed install: put back every original whose file the steps already
 /// replaced, and drop the rest of the backups. Best effort.
 pub fn roll_back(pending: &[Pending], written: &[PathBuf], roots: &[PathBuf]) {
     for p in pending {
-        if (written.contains(&p.path) || !p.path.exists()) && copy_over(&p.backup, &p.path).is_err() {
+        // When in doubt (an unreadable file), treat it as replaced: the
+        // original goes back, or its backup is kept.
+        let replaced = was_replaced(p, written).unwrap_or(true);
+        if replaced && copy_over(&p.backup, &p.path).is_err() {
             continue; // keep the backup rather than lose the original
         }
-        if !p.adopted || written.contains(&p.path) {
+        if !p.adopted || replaced {
             let _ = remove_backup(&p.backup);
             prune_parent(&p.backup, roots);
         }

@@ -1,6 +1,7 @@
 //! The edit-ini step (SPEC 9.12): set or remove keys in an INI-style config
 //! file while leaving every other byte of it alone — comments, ordering,
-//! spacing, line endings, a byte-order mark, and the file's encoding.
+//! spacing, line endings, a byte-order mark, and the file's encoding
+//! (UTF-8, UTF-16 with a byte-order mark, or bytes kept as they are).
 //!
 //! Keys and section names compare case-insensitively, as INI readers do.
 //! Without a `section`, an op addresses the first line with that key
@@ -18,6 +19,9 @@ enum Encoding {
     Utf8,
     /// Not valid UTF-8: read byte-per-char so it round-trips unchanged.
     Latin1,
+    /// UTF-16 with a byte-order mark, as Windows programs often write.
+    Utf16Le,
+    Utf16Be,
 }
 
 struct Document {
@@ -29,14 +33,36 @@ struct Document {
 }
 
 impl Document {
-    fn parse(bytes: &[u8]) -> Document {
-        let (bom, body) = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-            Some(rest) => (true, rest),
-            None => (false, bytes),
+    fn parse(bytes: &[u8], file: &Path) -> Result<Document> {
+        let utf16 = |body: &[u8], from: fn([u8; 2]) -> u16| -> Result<String> {
+            let (pairs, odd) = body.as_chunks::<2>();
+            if !odd.is_empty() {
+                bail!("{} starts with a UTF-16 byte-order mark but has an odd length", file.display());
+            }
+            let units: Vec<u16> = pairs.iter().map(|&pair| from(pair)).collect();
+            String::from_utf16(&units).with_context(|| format!("{} is not valid UTF-16", file.display()))
         };
-        let (text, encoding) = match std::str::from_utf8(body) {
-            Ok(t) => (t.to_string(), Encoding::Utf8),
-            Err(_) => (body.iter().map(|&b| b as char).collect(), Encoding::Latin1),
+        let (bom, text, encoding) = if let Some(body) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+            (true, utf16(body, u16::from_le_bytes)?, Encoding::Utf16Le)
+        } else if let Some(body) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+            (true, utf16(body, u16::from_be_bytes)?, Encoding::Utf16Be)
+        } else {
+            let (bom, body) = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+                Some(rest) => (true, rest),
+                None => (false, bytes),
+            };
+            // Text files hold no NUL bytes; these are almost surely UTF-16
+            // without a byte-order mark, which can't be edited safely.
+            if body.contains(&0) {
+                bail!(
+                    "{} looks like UTF-16 text without a byte-order mark; refusing to edit it",
+                    file.display()
+                );
+            }
+            match std::str::from_utf8(body) {
+                Ok(t) => (bom, t.to_string(), Encoding::Utf8),
+                Err(_) => (bom, body.iter().map(|&b| b as char).collect(), Encoding::Latin1),
+            }
         };
         let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
         let trailing_newline = text.is_empty() || text.ends_with('\n');
@@ -47,7 +73,7 @@ impl Document {
         if trailing_newline {
             lines.pop(); // the empty remainder after the final newline
         }
-        Document { bom, encoding, newline, trailing_newline, lines }
+        Ok(Document { bom, encoding, newline, trailing_newline, lines })
     }
 
     fn render(&self) -> Result<Vec<u8>> {
@@ -56,11 +82,20 @@ impl Document {
             text.push_str(self.newline);
         }
         let mut out = Vec::with_capacity(text.len() + 3);
-        if self.bom {
-            out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        match self.encoding {
+            Encoding::Utf8 | Encoding::Latin1 if self.bom => out.extend_from_slice(&[0xEF, 0xBB, 0xBF]),
+            _ => {}
         }
         match self.encoding {
             Encoding::Utf8 => out.extend_from_slice(text.as_bytes()),
+            Encoding::Utf16Le => {
+                out.extend_from_slice(&[0xFF, 0xFE]);
+                out.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+            }
+            Encoding::Utf16Be => {
+                out.extend_from_slice(&[0xFE, 0xFF]);
+                out.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+            }
             Encoding::Latin1 => {
                 for c in text.chars() {
                     let code = c as u32;
@@ -177,9 +212,10 @@ pub fn apply_ops(file: &Path, create_if_missing: bool, ops: &[IniOp]) -> Result<
     let mut doc = if file.exists() {
         Document::parse(
             &std::fs::read(file).with_context(|| format!("failed to read {}", file.display()))?,
-        )
+            file,
+        )?
     } else if create_if_missing {
-        Document::parse(b"")
+        Document::parse(b"", file)?
     } else {
         bail!("{} does not exist", file.display());
     };
@@ -284,6 +320,42 @@ mod tests {
         let mut expected = vec![0xEF, 0xBB, 0xBF];
         expected.extend_from_slice(b"Name = Caf\xE9\n");
         assert_eq!(out, expected);
+    }
+
+    fn utf16le(text: &str) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xFE];
+        out.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        out
+    }
+
+    #[test]
+    fn utf16_files_are_edited_in_their_own_encoding() {
+        let out = edit(
+            &utf16le("[Debug]\r\nLoggingEnabled = 0\r\nName = Café\r\n"),
+            serde_json::json!([
+                { "op": "set", "key": "loggingenabled", "value": 1 },
+                { "op": "set", "key": "New", "value": "x" }
+            ]),
+        );
+        assert_eq!(out, utf16le("[Debug]\r\nLoggingEnabled = 1\r\nName = Café\r\nNew = x\r\n"));
+
+        let mut be = vec![0xFE, 0xFF];
+        be.extend("a = 1\n".encode_utf16().flat_map(u16::to_be_bytes));
+        let out = edit(&be, serde_json::json!([{ "op": "set", "key": "a", "value": 2 }]));
+        let mut expected = vec![0xFE, 0xFF];
+        expected.extend("a = 2\n".encode_utf16().flat_map(u16::to_be_bytes));
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn utf16_without_a_bom_is_refused_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("config.ini");
+        let bytes: Vec<u8> = "a = 1\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        std::fs::write(&f, &bytes).unwrap();
+        let err = apply_ops(&f, false, &ops(serde_json::json!([{ "op": "set", "key": "a", "value": 2 }]))).unwrap_err();
+        assert!(format!("{err:#}").contains("UTF-16"), "{err:#}");
+        assert_eq!(std::fs::read(&f).unwrap(), bytes);
     }
 
     #[test]

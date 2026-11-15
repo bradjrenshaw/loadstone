@@ -271,12 +271,52 @@ fn an_archive_entry_differing_only_in_case_still_counts_as_replacing() {
     assert_eq!(read(&core(&fx)), "stock core");
 }
 
+/// Keeps a file unreadable (antivirus, say) until dropped: no permissions
+/// on Unix, opened without sharing on Windows.
+struct Unreadable {
+    #[cfg(unix)]
+    path: PathBuf,
+    #[cfg(windows)]
+    _held: std::fs::File,
+}
+
+impl Unreadable {
+    fn new(path: &Path) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            Unreadable { path: path.to_path_buf() }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            Unreadable { _held: std::fs::OpenOptions::new().read(true).share_mode(0).open(path).unwrap() }
+        }
+    }
+}
+
 #[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o644));
+    }
+}
+
+/// Keeps a file readable but impossible to replace until dropped, the way
+/// a running game holds its DLLs.
+#[cfg(windows)]
+fn hold_open(path: &Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 1;
+    std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(path).unwrap()
+}
+
 #[test]
 fn a_settle_failure_on_the_second_file_rolls_back_both() {
     use loadstone_core::originals::{roll_back, settle, Pending};
     use loadstone_core::release::sha256_file;
-    use std::os::unix::fs::PermissionsExt as _;
 
     let fx = fixture();
     let lua = fx.game_dir.join("lua51_Win32.dll");
@@ -292,7 +332,7 @@ fn a_settle_failure_on_the_second_file_rolls_back_both() {
     // The steps replaced both; the second can't be read (antivirus, say).
     std::fs::write(&lua, b"proxy").unwrap();
     std::fs::write(core(&fx), b"fork").unwrap();
-    std::fs::set_permissions(core(&fx), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unreadable = Unreadable::new(&core(&fx));
     if std::fs::read(core(&fx)).is_ok() {
         return; // running as root: permissions can't make the file unreadable
     }
@@ -301,7 +341,7 @@ fn a_settle_failure_on_the_second_file_rolls_back_both() {
     assert!(settle(&pending, &written).is_err());
     assert!(kept.is_file() && core_backup.is_file(), "settle removes nothing");
 
-    std::fs::set_permissions(core(&fx), std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(unreadable);
     roll_back(&pending, &written, &[fx.game_dir.clone(), fx.state_root.clone()]);
     assert_eq!(read(&lua), "stock lua");
     assert_eq!(read(&core(&fx)), "stock core");
@@ -340,6 +380,100 @@ fn a_failed_state_save_rolls_back_and_a_retry_keeps_the_real_originals() {
     engine::uninstall(&fx.store, &state, Some(false), &mut SilentUi).unwrap();
     assert_eq!(read(&fx.game_dir.join("lua51_Win32.dll")), "stock lua");
     assert_eq!(read(&core(&fx)), "stock core");
+}
+
+#[test]
+fn a_backup_that_outlived_a_failed_install_is_kept_on_retry() {
+    let fx = fixture();
+    let manifest = civ_mod(serde_json::json!([]));
+    let zip = make_zip(&[
+        ("lua51_Win32.dll", b"proxy"),
+        ("Assets/DLC/Expansion2/CvGameCore_Expansion2.dll", b"fork"),
+    ]);
+    // An install that got as far as replacing the game files and then left
+    // no record: it died before the state was saved, or its rollback could
+    // not put a file back. The mod's files are in place and the backups
+    // still hold the stock ones.
+    install(&fx, &manifest, "1.0.0", &zip).unwrap();
+    fx.store.remove("civ5", "civ-v-access", &fx.game_dir).unwrap();
+    assert_eq!(read(&core(&fx)), "fork");
+    assert_eq!(std::fs::read_dir(backups_dir(&fx)).unwrap().count(), 1);
+
+    // The retry must not take the mod's files for the originals.
+    let state = install(&fx, &manifest, "1.0.0", &zip).unwrap();
+    assert_eq!(std::fs::read_dir(backups_dir(&fx)).unwrap().count(), 1, "the same backup, not a second one");
+    assert_eq!(read(&fx.game_dir.join("lua51_original.dll")), "stock lua");
+    engine::uninstall(&fx.store, &state, Some(false), &mut SilentUi).unwrap();
+    assert_eq!(read(&fx.game_dir.join("lua51_Win32.dll")), "stock lua");
+    assert_eq!(read(&core(&fx)), "stock core");
+    assert!(!backups_dir(&fx).exists());
+}
+
+#[test]
+fn a_leftover_backup_goes_back_when_the_retry_leaves_the_file_alone() {
+    let fx = fixture();
+    let manifest = civ_mod(serde_json::json!([]));
+    let zip = make_zip(&[("Assets/DLC/Expansion2/CvGameCore_Expansion2.dll", b"fork")]);
+    install(&fx, &manifest, "1.0.0", &zip).unwrap();
+    fx.store.remove("civ5", "civ-v-access", &fx.game_dir).unwrap();
+
+    // Retried with a layout that brings no engine DLL: the failed
+    // install's DLL must not stay behind as if it were the game's.
+    let state = install(&fx, &manifest, "1.0.0", &make_zip(&[("Other/file.txt", b"x")])).unwrap();
+    assert_eq!(read(&core(&fx)), "stock core");
+    assert!(state.originals.is_empty());
+    assert!(!backups_dir(&fx).exists());
+}
+
+#[test]
+fn a_glob_does_not_preserve_a_file_twice_or_a_kept_copy() {
+    let fx = fixture();
+    if !case_insensitive(&fx.game_dir) {
+        return; // the two spellings below are two files here
+    }
+    let mut manifest = civ_mod(serde_json::json!([]));
+    // The same DLL named twice, in two spellings, and a glob that also
+    // matches the copy kept under the `as` name.
+    manifest.preserve = serde_json::from_value(serde_json::json!([
+        { "path": "${gameDir}/lua51_win32.dll", "as": "${gameDir}/lua51_original.dll" },
+        "${gameDir}/*.dll"
+    ]))
+    .unwrap();
+    let state = install(&fx, &manifest, "1.0.0", &make_zip(&[("lua51_Win32.dll", b"proxy")])).unwrap();
+    assert_eq!(state.originals.len(), 1, "{:?}", state.originals);
+    assert!(!backups_dir(&fx).exists(), "no second backup of the same file");
+    assert_eq!(read(&fx.game_dir.join("lua51_original.dll")), "stock lua");
+
+    engine::uninstall(&fx.store, &state, Some(false), &mut SilentUi).unwrap();
+    assert_eq!(read(&fx.game_dir.join("lua51_Win32.dll")), "stock lua");
+    assert!(!fx.game_dir.join("lua51_original.dll").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn an_adopted_original_that_cannot_go_back_yet_is_recorded() {
+    let fx = fixture();
+    let lua = fx.game_dir.join("lua51_Win32.dll");
+    let kept = fx.game_dir.join("lua51_original.dll");
+    // An earlier installer's proxy, held open by the running game.
+    std::fs::write(&kept, b"stock lua").unwrap();
+    std::fs::write(&lua, b"old installer proxy").unwrap();
+    let manifest = civ_mod(serde_json::json!([]));
+    let game_running = hold_open(&lua);
+
+    // This layout brings no proxy, so the stock DLL should go back, but
+    // it can't right now. The install still succeeds and remembers it.
+    let state = install(&fx, &manifest, "1.0.0", &make_zip(&[("Other/file.txt", b"x")])).unwrap();
+    assert_eq!(read(&lua), "old installer proxy");
+    assert_eq!(read(&kept), "stock lua", "the original is still kept");
+    assert_eq!(state.originals.len(), 1);
+    let saved = fx.store.load("civ5", "civ-v-access", &fx.game_dir).unwrap().unwrap();
+    assert_eq!(saved.originals, state.originals, "and the record on disk says so");
+
+    drop(game_running);
+    engine::uninstall(&fx.store, &state, Some(false), &mut SilentUi).unwrap();
+    assert_eq!(read(&lua), "stock lua");
+    assert!(!kept.exists());
 }
 
 #[test]

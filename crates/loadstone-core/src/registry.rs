@@ -36,7 +36,12 @@ pub struct ResolvedPackage {
     pub release_source: Option<String>,
     /// Reached through a tester-only link (SPEC 2.3).
     pub testers: bool,
+    /// Tester access to this package, in the registry that lists it
+    /// (SPEC 2.3).
+    pub access: TesterAccess,
 }
+
+pub use crate::testers::TesterAccess;
 
 /// Fetches a registry source into a local directory of package files.
 /// Injectable so tests can map sources to fixture directories.
@@ -264,10 +269,11 @@ fn extract_packages(zip_bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
 pub struct Resolver<'a> {
     pub scopes: Vec<Scope>,
     pub fetcher: &'a mut dyn RegistryFetcher,
-    /// Scopes (by directory) whose testers file accepted the tester
-    /// password (SPEC 2.3): their tester-only links resolve and are listed.
-    /// Each registry's password unlocks only its own listings.
-    pub unlocked: Vec<PathBuf>,
+    /// The tester passwords the user entered (SPEC 2.3). Each is tried
+    /// against the testers file of the registry that lists a package, so a
+    /// password unlocks only what its own registry, or its own package,
+    /// says it does.
+    pub passwords: Vec<String>,
 }
 
 fn read_docs(dir: &Path) -> Result<Vec<(PathBuf, serde_json::Value)>> {
@@ -304,7 +310,7 @@ impl<'a> Resolver<'a> {
         fetcher: &'a mut dyn RegistryFetcher,
     ) -> Result<Self> {
         let mut scopes = Vec::new();
-        let mut resolver = Resolver { scopes: Vec::new(), fetcher, unlocked: Vec::new() };
+        let mut resolver = Resolver { scopes: Vec::new(), fetcher, passwords: Vec::new() };
         for source in sources {
             let dir = resolver.fetcher.fetch(source)?;
             let src = source::is_remote(source).then(|| source.clone());
@@ -314,36 +320,48 @@ impl<'a> Resolver<'a> {
         Ok(resolver)
     }
 
-    /// Unlock the tester-only listings of every scope whose testers file
-    /// accepts `password`. Returns whether any scope accepted it (which
-    /// also unlocks beta versions, SPEC 2.3).
-    pub fn unlock_testers(&mut self, password: Option<&str>) -> bool {
-        self.unlocked = match password {
-            Some(pw) => self
-                .scopes
-                .iter()
-                .filter(|scope| crate::testers::read(&scope.dir).is_some_and(|t| t.accepts(pw)))
-                .map(|scope| scope.dir.clone())
-                .collect(),
-            None => Vec::new(),
-        };
-        !self.unlocked.is_empty()
+    /// Use the tester passwords the user entered (SPEC 2.3). Each is tried
+    /// against the password that covers a package: its own, from its
+    /// package file, or else that of the registry listing it. Returns
+    /// whether one of them is a registry's password here; a package's own
+    /// password only shows once the package is resolved or listed.
+    pub fn unlock_testers(&mut self, passwords: &[String]) -> bool {
+        self.passwords = passwords.to_vec();
+        self.scopes.iter().any(|scope| {
+            crate::testers::read(&scope.dir).is_some_and(|t| passwords.iter().any(|p| t.accepts(p)))
+        })
     }
 
-    fn scope_unlocked(&self, scope: &Scope) -> bool {
-        self.unlocked.contains(&scope.dir)
+    /// What `password` unlocks here: a registry, and the mods whose own
+    /// password it is. Follows the links, tester-only ones included.
+    pub fn unlocks(&mut self, password: &str) -> Result<crate::testers::Unlocks> {
+        let registry_wide =
+            self.scopes.iter().any(|scope| crate::testers::read(&scope.dir).is_some_and(|t| t.accepts(password)));
+        let saved = std::mem::replace(&mut self.passwords, vec![password.to_string()]);
+        let listed = self.list_mods();
+        self.passwords = saved;
+        let mut packages: Vec<String> = listed?
+            .into_iter()
+            .filter(|m| m.manifest.testers.as_ref().is_some_and(|own| own.accepts(password)))
+            .map(|m| m.manifest.id)
+            .collect();
+        packages.sort();
+        Ok(crate::testers::Unlocks { registry_wide, packages })
     }
 
-    /// Whether version pickers show prereleases (SPEC 2.3): with tester
-    /// access, or when no registry gates them behind a testers file (then
-    /// they are simply public).
-    pub fn shows_prereleases(&self) -> bool {
-        !self.unlocked.is_empty() || !self.offers_testers()
-    }
-
-    /// Whether any scope offers tester access at all.
-    pub fn offers_testers(&self) -> bool {
-        self.scopes.iter().any(|scope| crate::testers::read(&scope.dir).is_some())
+    /// Whether there is anything here a tester password could unlock: a
+    /// registry with a testers file, a tester-only link, or a listed mod
+    /// with a password of its own.
+    pub fn offers_testers(&mut self) -> bool {
+        let gated = self.scopes.iter().any(|scope| {
+            crate::testers::read(&scope.dir).is_some()
+                || read_docs(&scope.dir).is_ok_and(|docs| {
+                    docs.iter().any(|(_, doc)| {
+                        doc_kind(doc) == "link" && doc.get("testers").and_then(serde_json::Value::as_bool) == Some(true)
+                    })
+                })
+        });
+        gated || self.list_mods().is_ok_and(|mods| mods.iter().any(|m| m.manifest.testers.is_some()))
     }
 
     /// Find a project package (mod/tool/library) by id: full files across
@@ -357,31 +375,38 @@ impl<'a> Resolver<'a> {
                     let manifest: ProjectManifest = serde_json::from_value(doc)
                         .with_context(|| format!("package \"{id}\" is not a valid project manifest"))?;
                     let release_source = manifest.source.clone().or_else(|| scope.source.clone());
-                    return Ok(ResolvedPackage { manifest, scope: scope.clone(), release_source, testers: false });
+                    let registry = crate::testers::read(&scope.dir);
+                    let access = crate::testers::access(manifest.testers.as_ref(), registry.as_ref(), &self.passwords);
+                    return Ok(ResolvedPackage { manifest, scope: scope.clone(), release_source, testers: false, access });
                 }
             }
         }
 
         // Pass 2: links. Allowlisted links for this id first, then open links.
-        let mut candidates: Vec<(usize, LinkEntry)> = Vec::new();
+        // Each carries the testers file of the registry holding the link.
+        // A tester-only link is followed only when some password is saved:
+        // whether one unlocks the package is known once its file is read,
+        // since the password may be the package's own.
+        let mut candidates: Vec<(usize, LinkEntry, Option<crate::testers::TestersFile>)> = Vec::new();
         for (rank, scope) in self.scopes.iter().enumerate() {
+            let registry = crate::testers::read(&scope.dir);
             for (_, doc) in read_docs(&scope.dir)? {
                 if doc_kind(&doc) == "link" {
                     if let Ok(link) = serde_json::from_value::<LinkEntry>(doc) {
-                        if link.testers && !self.scope_unlocked(scope) {
+                        if link.testers && self.passwords.is_empty() {
                             continue;
                         }
                         let allowlisted = link.packages.iter().any(|p| p == id);
                         let open = link.packages.is_empty();
                         if allowlisted || open {
-                            candidates.push((if allowlisted { rank } else { rank + 1000 }, link));
+                            candidates.push((if allowlisted { rank } else { rank + 1000 }, link, registry.clone()));
                         }
                     }
                 }
             }
         }
-        candidates.sort_by_key(|(rank, _)| *rank);
-        for (_, link) in candidates {
+        candidates.sort_by_key(|(rank, _, _)| *rank);
+        for (_, link, registry) in candidates {
             let fetched = if link.packages.is_empty() {
                 self.fetcher.fetch(&link.source)
             } else {
@@ -395,9 +420,13 @@ impl<'a> Resolver<'a> {
                 if doc_id(&doc) == id && doc_kind(&doc) != "link" && doc_kind(&doc) != "game" {
                     let manifest: ProjectManifest = serde_json::from_value(doc)
                         .with_context(|| format!("package \"{id}\" is not a valid project manifest"))?;
+                    let access = crate::testers::access(manifest.testers.as_ref(), registry.as_ref(), &self.passwords);
+                    if link.testers && access != TesterAccess::Unlocked {
+                        break; // hidden through this link; another may still list it
+                    }
                     let scope = Scope { dir: dir.clone(), source: Some(link.source.clone()) };
                     let release_source = manifest.source.clone().or_else(|| scope.source.clone());
-                    return Ok(ResolvedPackage { manifest, scope, release_source, testers: link.testers });
+                    return Ok(ResolvedPackage { manifest, scope, release_source, testers: link.testers, access });
                 }
             }
         }
@@ -427,6 +456,7 @@ impl<'a> Resolver<'a> {
         let mut out = Vec::new();
         // Full files.
         for scope in self.scopes.clone() {
+            let registry = crate::testers::read(&scope.dir);
             for (_, doc) in read_docs(&scope.dir)? {
                 if doc_kind(&doc) == "mod" && !doc_id(&doc).is_empty() {
                     let id = doc_id(&doc).to_string();
@@ -435,11 +465,17 @@ impl<'a> Resolver<'a> {
                             if manifest.kind == Kind::Mod {
                                 let release_source =
                                     manifest.source.clone().or_else(|| scope.source.clone());
+                                let access = crate::testers::access(
+                                    manifest.testers.as_ref(),
+                                    registry.as_ref(),
+                                    &self.passwords,
+                                );
                                 out.push(ResolvedPackage {
                                     manifest,
                                     scope: scope.clone(),
                                     release_source,
                                     testers: false,
+                                    access,
                                 });
                             }
                         }
@@ -447,20 +483,23 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
-        // Linked repos.
+        // Linked repos. A tester-only link is followed only when some
+        // password is saved; each mod it lists is then checked on its own,
+        // since the password that unlocks it may be the mod's.
         let mut links = Vec::new();
         for scope in &self.scopes {
+            let registry = crate::testers::read(&scope.dir);
             for (_, doc) in read_docs(&scope.dir)? {
                 if doc_kind(&doc) == "link" {
                     if let Ok(link) = serde_json::from_value::<LinkEntry>(doc) {
-                        if !link.testers || self.scope_unlocked(scope) {
-                            links.push(link);
+                        if !link.testers || !self.passwords.is_empty() {
+                            links.push((link, registry.clone()));
                         }
                     }
                 }
             }
         }
-        for link in links {
+        for (link, registry) in links {
             let fetched = if link.packages.is_empty() {
                 self.fetcher.fetch(&link.source)
             } else {
@@ -475,15 +514,19 @@ impl<'a> Resolver<'a> {
                 if !link.packages.is_empty() && !link.packages.iter().any(|p| p == &id) {
                     continue;
                 }
-                if seen.insert(id) {
-                    if let Ok(manifest) = serde_json::from_value::<ProjectManifest>(doc) {
-                        if manifest.kind == Kind::Mod {
-                            let scope = Scope { dir: dir.clone(), source: Some(link.source.clone()) };
-                            let release_source =
-                                manifest.source.clone().or_else(|| scope.source.clone());
-                            out.push(ResolvedPackage { manifest, scope, release_source, testers: link.testers });
-                        }
-                    }
+                if seen.contains(&id) {
+                    continue;
+                }
+                let Ok(manifest) = serde_json::from_value::<ProjectManifest>(doc) else { continue };
+                let access = crate::testers::access(manifest.testers.as_ref(), registry.as_ref(), &self.passwords);
+                if link.testers && access != TesterAccess::Unlocked {
+                    continue; // hidden through this link; another may still list it
+                }
+                seen.insert(id);
+                if manifest.kind == Kind::Mod {
+                    let scope = Scope { dir: dir.clone(), source: Some(link.source.clone()) };
+                    let release_source = manifest.source.clone().or_else(|| scope.source.clone());
+                    out.push(ResolvedPackage { manifest, scope, release_source, testers: link.testers, access });
                 }
             }
         }

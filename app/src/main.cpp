@@ -1346,17 +1346,20 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         sizer->Add(check, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
     }
 
-    // Tester access: one password for tester-only mods and beta versions.
+    // Tester access: passwords for tester-only mods and beta versions, for
+    // a whole registry or for single mods. Each one entered is kept.
     auto* testerBtn = new wxButton(&dlg, wxID_ANY, "Tester &password...");
     AttachDescription(testerBtn,
-                      "For private testers: enter the password you were given to see "
-                      "tester-only mods and get beta versions. Leave it empty to stop.");
+                      "For private testers: enter a password you were given to see "
+                      "tester-only mods and get beta versions. You can add more than "
+                      "one. Leave it empty to stop testing.");
     bool testerChanged = false;
     testerBtn->Bind(wxEVT_BUTTON, [this, &dlg, &testerChanged](wxCommandEvent&) {
         bool saved = loadstone::tester_password_saved(kEmbeddedProfile);
         wxPasswordEntryDialog ask(&dlg,
-                                  saved ? "A tester password is saved. Enter a new one, or "
-                                          "leave this empty to stop testing."
+                                  saved ? "You have saved tester passwords. Enter another one to "
+                                          "add it, or leave this empty to forget them all and "
+                                          "stop testing."
                                         : "Enter the tester password you were given.",
                                   "Tester password");
         if (ask.ShowModal() != wxID_OK) return;

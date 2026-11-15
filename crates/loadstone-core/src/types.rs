@@ -48,6 +48,11 @@ pub struct ProjectManifest {
     /// every platform its game package declares user data for (SPEC 5.2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub platforms: Vec<String>,
+    /// This package's own tester password, as a salted hash (SPEC 2.3):
+    /// its beta versions, and its listing when a registry lists it for
+    /// testers only, answer to this password instead of the registry's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub testers: Option<crate::testers::PasswordHash>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub distributions: BTreeMap<String, DistributionSupport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

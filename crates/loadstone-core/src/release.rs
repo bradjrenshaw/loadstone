@@ -170,9 +170,15 @@ pub fn resolve_artifacts(
         .unwrap_or_default()
 }
 
+/// A version or release tag as semver: surrounding space and a leading
+/// `v` are ignored. The one place tags are read, so the mod page, the
+/// updater and the newest-release lookup always agree.
+pub fn parse_version(version: &str) -> Option<semver::Version> {
+    semver::Version::parse(version.trim().trim_start_matches(['v', 'V'])).ok()
+}
+
 pub fn normalize_version(version: &str) -> Result<String> {
-    let trimmed = version.trim().trim_start_matches(['v', 'V']);
-    let parsed = semver::Version::parse(trimmed)
+    let parsed = parse_version(version)
         .with_context(|| format!("\"{version}\" is not a semver version"))?;
     Ok(parsed.to_string())
 }
@@ -180,18 +186,25 @@ pub fn normalize_version(version: &str) -> Result<String> {
 /// Whether version `a` is older than `b` by semver; false when either
 /// does not parse.
 pub fn is_older_version(a: &str, b: &str) -> bool {
-    let parse = |v: &str| semver::Version::parse(v.trim().trim_start_matches(['v', 'V'])).ok();
-    matches!((parse(a), parse(b)), (Some(a), Some(b)) if a < b)
+    matches!((parse_version(a), parse_version(b)), (Some(a), Some(b)) if a < b)
 }
 
+/// SHA-256 of a file, read in pieces so a large file (a game movie) is
+/// never held in memory whole.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let data = fs::read(path)?;
-    Ok(sha256_bytes(&data))
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hex_digest(hasher))
 }
 
 pub fn sha256_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
+    hex_digest(hasher)
+}
+
+fn hex_digest(hasher: Sha256) -> String {
     let digest = hasher.finalize();
     let mut out = String::with_capacity(64);
     for byte in digest {

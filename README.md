@@ -149,7 +149,8 @@ loadstone uninstall blindfold --game balatro
 
 Mods in private repositories install with an account that can see them
 (SPEC §15). Accounts are global in the manager and separate per standalone
-installer; tokens live in the Windows Credential Manager.
+installer; tokens live in the OS credential store (the Windows Credential
+Manager, or the Keychain on macOS).
 
 ```
 loadstone auth login                       # browser sign-in: shows a code to enter on GitHub

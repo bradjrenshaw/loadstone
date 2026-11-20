@@ -122,6 +122,18 @@ void AttachDescription(wxWindow* win, const wxString& description) {
 #endif
 }
 
+// Where account tokens are kept on this platform (the keyring crate's
+// native store; see crates/loadstone-core/src/secrets.rs).
+const char* CredentialStoreName() {
+#if defined(__WXMSW__)
+    return "the Windows Credential Manager";
+#elif defined(__WXOSX__)
+    return "the macOS Keychain";
+#else
+    return "the system's credential store";
+#endif
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1438,9 +1450,10 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         if (providers.empty()) return;
         wxPasswordEntryDialog ask(&dlg,
                                   wxString::Format("Paste a %s token. It is checked with %s, "
-                                                   "then stored in the Windows Credential Manager.",
+                                                   "then stored in %s.",
                                                    FromRust(providers[0].label),
-                                                   FromRust(providers[0].label)),
+                                                   FromRust(providers[0].label),
+                                                   CredentialStoreName()),
                                   "Add token");
         if (ask.ShowModal() != wxID_OK || ask.GetValue().Trim().empty()) return;
         try {

@@ -13,7 +13,7 @@
 //! [`set_language`], everything is English, so the developer CLI and the
 //! tests are stable whatever the machine's locale.
 
-use std::sync::{OnceLock, RwLock};
+use std::sync::{LazyLock, OnceLock, RwLock};
 
 use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::FluentResource;
@@ -163,9 +163,9 @@ fn best_match<'a>(
 // ---------------------------------------------------------------------------
 // Loadstone's own messages
 
-static BUNDLES: [OnceLock<Option<FluentBundle<FluentResource>>>; 17] =
-    [const { OnceLock::new() }; 17];
-const _: () = assert!(BUNDLES.len() == LANGUAGES.len());
+/// Each language's parsed catalog, built the first time it is used.
+static BUNDLES: LazyLock<Vec<OnceLock<Option<FluentBundle<FluentResource>>>>> =
+    LazyLock::new(|| LANGUAGES.iter().map(|_| OnceLock::new()).collect());
 
 fn bundle(index: usize) -> Option<&'static FluentBundle<FluentResource>> {
     BUNDLES[index]

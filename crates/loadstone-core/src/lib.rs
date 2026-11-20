@@ -13,6 +13,7 @@ pub mod context;
 pub mod detect;
 pub mod engine;
 pub mod fetch;
+pub mod i18n;
 pub mod ini;
 pub mod jsonedit;
 pub mod macho;

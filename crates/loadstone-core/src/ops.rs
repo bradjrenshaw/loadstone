@@ -219,7 +219,9 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         match support.level() {
             SupportLevel::Unsupported => {
                 let reason = match support {
-                    crate::types::DistributionSupport::Detailed { reason: Some(r), .. } => r.clone(),
+                    crate::types::DistributionSupport::Detailed { reason: Some(r), .. } => {
+                        r.get().to_string()
+                    }
                     _ => String::new(),
                 };
                 bail!("the {} copy of {} is not supported. {}", distribution, game.name, reason);
@@ -312,8 +314,12 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         strip_top_level = true;
     } else {
         let release: ReleaseManifest = match &opts.local_release {
-            Some(release_path) => serde_json::from_value(load_json(release_path)?)
-                .with_context(|| format!("{} is not a release manifest", release_path.display()))?,
+            Some(release_path) => {
+                let doc = load_json(release_path)?;
+                crate::types::check_manifest_version(&doc)?;
+                serde_json::from_value(doc)
+                    .with_context(|| format!("{} is not a release manifest", release_path.display()))?
+            }
             None => {
                 let source = release_source
                     .clone()
@@ -386,7 +392,8 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         // downloading anything. Releases without notes install directly.
         if let Some(notes) = release
             .release_notes
-            .as_deref()
+            .as_ref()
+            .map(|n| n.get())
             .filter(|n| !n.trim().is_empty())
         {
             let message = format!(

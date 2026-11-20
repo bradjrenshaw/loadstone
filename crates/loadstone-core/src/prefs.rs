@@ -52,7 +52,13 @@ pub enum PrefType {
     /// Structured JSON (lists, maps) edited by a dedicated UI — never
     /// rendered by a generic form.
     Structured,
+    /// An interface language tag from [`crate::i18n::LANGUAGES`], or empty
+    /// for the system's language.
+    Language,
 }
+
+/// The interface language (empty: follow the system).
+pub const PREF_LANGUAGE: &str = "language";
 
 /// One declared preference.
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +67,7 @@ pub struct PrefDef {
     pub kind: PrefType,
     /// Default as JSON text, parsed on use (`"true"`, `"\"\""`, `"[]"`).
     pub default: &'static str,
+    /// Message ids (`locales/*.ftl`) of the label and description.
     pub label: &'static str,
     pub description: &'static str,
     pub applies: Applies,
@@ -88,6 +95,9 @@ impl PrefDef {
                 .as_str()
                 .is_some_and(|v| options.iter().any(|(o, _)| *o == v)),
             PrefType::Structured => true,
+            PrefType::Language => value
+                .as_str()
+                .is_some_and(|v| v.is_empty() || crate::i18n::is_supported(v)),
         }
     }
 }
@@ -95,46 +105,51 @@ impl PrefDef {
 /// Every Loadstone preference.
 pub static DEFINITIONS: &[PrefDef] = &[
     PrefDef {
+        key: PREF_LANGUAGE,
+        kind: PrefType::Language,
+        default: "\"\"",
+        label: "pref-language",
+        description: "pref-language-description",
+        applies: Applies::Global,
+    },
+    PrefDef {
         key: crate::auth::PREF_ACCOUNTS,
         kind: PrefType::Structured,
         default: "[]",
-        label: "Accounts",
-        description: "Sign-ins used to download mods from private repositories.",
+        label: "pref-accounts",
+        description: "pref-accounts-description",
         applies: Applies::Global,
     },
     PrefDef {
         key: crate::auth::PREF_RULES,
         kind: PrefType::Structured,
         default: "[]",
-        label: "Account rules",
-        description: "Which account to use for a repository or owner.",
+        label: "pref-account-rules",
+        description: "pref-account-rules-description",
         applies: Applies::Global,
     },
     PrefDef {
         key: crate::auth::PREF_TRY_OTHERS,
         kind: PrefType::Bool,
         default: "true",
-        label: "Try my other accounts when a download is refused",
-        description: "If a repository isn't found or access is refused, try the other accounts \
-                      for that site before giving up.",
+        label: "pref-try-other-accounts",
+        description: "pref-try-other-accounts-description",
         applies: Applies::Global,
     },
     PrefDef {
         key: crate::testers::PREF_TESTER_PASSWORD,
         kind: PrefType::Structured,
         default: "[]",
-        label: "Tester passwords",
-        description: "Unlock tester-only mods and beta versions, for a registry or for single mods. \
-                      Set from the tester password button.",
+        label: "pref-tester-passwords",
+        description: "pref-tester-passwords-description",
         applies: Applies::Global,
     },
     PrefDef {
         key: crate::auth::PREF_MOD_ACCOUNT,
         kind: PrefType::AccountPicker,
         default: "\"\"",
-        label: "Download account",
-        description: "The account used to download this mod. Automatic uses your account rules \
-                      and default account.",
+        label: "pref-download-account",
+        description: "pref-download-account-description",
         applies: Applies::Mod,
     },
 ];

@@ -44,6 +44,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "rust/cxx.h"
@@ -74,6 +75,34 @@ wxString FromRust(rust::Str s) {
 
 std::string ToStd(const wxString& s) {
     return std::string(s.utf8_str());
+}
+
+// TRANSLATION RULE: every string the user sees comes from T(), which looks
+// the message up in the Rust core's catalogs (crates/loadstone-core/
+// locales/*.ftl) in the interface language. Arguments are named:
+//   T("catalog-loaded", {{"count", entryIds_.size()}})
+// Numbers stay numbers so translations can pick plural forms. Never build
+// a sentence by joining translated pieces; give the whole sentence an id.
+struct TArg {
+    TArg(const char* name, const wxString& value) : name(name), value(value) {}
+    TArg(const char* name, const char* value) : name(name), value(value) {}
+    TArg(const char* name, const rust::String& value) : name(name), value(FromRust(value)) {}
+    template <typename N, typename = std::enable_if_t<std::is_arithmetic_v<N>>>
+    TArg(const char* name, N value)
+        : name(name), value(wxString::Format("%lld", static_cast<long long>(value))),
+          number(true) {}
+    const char* name;
+    wxString value;
+    bool number = false;
+};
+
+wxString T(const char* id, std::initializer_list<TArg> args = {}) {
+    std::vector<loadstone::TrArg> rustArgs;
+    rustArgs.reserve(args.size());
+    for (const auto& a : args)
+        rustArgs.push_back(loadstone::TrArg{a.name, ToStd(a.value), a.number});
+    return FromRust(loadstone::tr(
+        id, rust::Slice<const loadstone::TrArg>(rustArgs.data(), rustArgs.size())));
 }
 
 // Put text on the clipboard so it outlives Loadstone: without Flush,
@@ -172,6 +201,8 @@ private:
     // Loadstone's own settings: accounts, account rules, global options.
     // Changes save immediately.
     void ShowLoadstoneSettings();
+    // Replace this window with a new one (after the language changes).
+    void Rebuild();
     // Browser sign-in (device code). True when an account was saved.
     bool RunSignIn();
     // After a failure that signing in might fix: explain and offer to
@@ -1333,12 +1364,43 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
             return false;
         }
     };
+    bool languageChanged = false;
     for (const auto& g : globals) {
-        if (FromRust(g.kind) != "boolean") continue; // the only global kind so far
+        wxString key = FromRust(g.id);
+        if (FromRust(g.kind) == "choice") {
+            auto* row = new wxBoxSizer(wxHORIZONTAL);
+            row->Add(new wxStaticText(&dlg, wxID_ANY, FromRust(g.label) + ":"), 0,
+                     wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            auto* choice = new wxChoice(&dlg, wxID_ANY);
+            std::vector<wxString> values;
+            for (const auto& o : g.options) {
+                choice->Append(FromRust(o.label));
+                values.push_back(FromRust(o.value));
+                if (o.value == g.value) choice->SetSelection(choice->GetCount() - 1);
+            }
+            if (choice->GetSelection() == wxNOT_FOUND && !values.empty()) choice->SetSelection(0);
+            choice->SetName(FromRust(g.label));
+            AttachDescription(choice, FromRust(g.description));
+            int previous = choice->GetSelection();
+            choice->Bind(wxEVT_CHOICE, [choice, key, values, saveGlobal, previous,
+                                        &languageChanged](wxCommandEvent&) mutable {
+                int i = choice->GetSelection();
+                if (i < 0 || i >= static_cast<int>(values.size())) return;
+                if (!saveGlobal(key, values[i])) {
+                    choice->SetSelection(previous);
+                    return;
+                }
+                previous = i;
+                if (key == "language") languageChanged = true;
+            });
+            row->Add(choice, 1);
+            sizer->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+            continue;
+        }
+        if (FromRust(g.kind) != "boolean") continue;
         auto* check = new wxCheckBox(&dlg, wxID_ANY, FromRust(g.label));
         check->SetValue(FromRust(g.value) == "true");
         AttachDescription(check, FromRust(g.description));
-        wxString key = FromRust(g.id);
         check->Bind(wxEVT_CHECKBOX, [check, key, saveGlobal](wxCommandEvent&) {
             if (!saveGlobal(key, check->GetValue() ? "true" : "false"))
                 check->SetValue(!check->GetValue());
@@ -1527,8 +1589,28 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
     dlg.CentreOnParent();
     accountList->SetFocus();
     dlg.ShowModal();
+    // A new language: rebuild the window in it (every label was made in
+    // the old one). Deferred so this dialog's frame is gone first.
+    if (languageChanged) {
+        CallAfter([this] { Rebuild(); });
+        return;
+    }
     // Tester access changes which mods and versions exist.
     if (testerChanged) StartCatalogFetch();
+}
+
+void LoadstoneFrame::Rebuild() {
+    loadstone::UiProfile profile = profile_;
+    try {
+        profile = loadstone::ui_profile(kEmbeddedProfile);
+    } catch (const std::exception&) {
+    }
+    auto* fresh = new LoadstoneFrame(std::move(profile), coreVersion_);
+    fresh->SetSize(GetRect());
+    if (IsMaximized()) fresh->Maximize();
+    fresh->Show(true);
+    fresh->Raise();
+    Destroy();
 }
 
 // ---------------------------------------------------------------------------
@@ -1746,11 +1828,19 @@ private:
 class LoadstoneApp : public wxApp {
 public:
     bool OnInit() override;
+    // Windows created after the language is chosen mirror for a
+    // right-to-left language.
+    wxLayoutDirection GetLayoutDirection() const override {
+        return loadstone::ui_is_rtl() ? wxLayout_RightToLeft : wxLayout_LeftToRight;
+    }
 };
 
 wxIMPLEMENT_APP(LoadstoneApp);
 
 bool LoadstoneApp::OnInit() {
+    // Before any window or message exists: the saved language, else the
+    // system's.
+    loadstone::init_language(kEmbeddedProfile);
     rust::String version;
     loadstone::UiProfile profile;
     std::string error;

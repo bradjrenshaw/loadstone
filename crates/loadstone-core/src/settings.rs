@@ -93,7 +93,7 @@ pub fn set(settings: &Settings, file: &Path, key: &str, raw: &str) -> Result<Opt
     let mut values = read_values(file)?;
     values.insert(key.to_string(), value);
     write_values(file, &values)?;
-    Ok(settings.note.clone())
+    Ok(settings.note.as_ref().map(|n| n.get().to_string()))
 }
 
 #[cfg(test)]

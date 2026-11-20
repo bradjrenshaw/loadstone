@@ -449,7 +449,7 @@ pub fn resolve_steps(ctx: &InstallContext, steps: &[crate::types::Step]) -> Resu
                 *to = ctx.substitute(to)?;
             }
             Step::Notice { message, clipboard, .. } => {
-                *message = ctx.substitute(message)?;
+                *message = message.try_map(|m| ctx.substitute(m))?;
                 if let Some(text) = clipboard {
                     *text = ctx.substitute(text)?;
                 }

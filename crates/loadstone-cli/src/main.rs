@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use loadstone_core::release::{build_release_manifest, resolve_artifacts, ReleaseOptions};
-use loadstone_core::types::{GameManifest, ProjectManifest};
+use loadstone_core::types::{GameManifest, LocalizedText, ProjectManifest};
 use loadstone_core::validate::{validate_value, Severity, ValidationContext};
 
 mod auth_cmd;
@@ -83,9 +83,11 @@ enum Command {
         /// Release notes text.
         #[arg(long, conflicts_with = "notes_file")]
         notes: Option<String>,
-        /// Read release notes from a file.
-        #[arg(long)]
-        notes_file: Option<PathBuf>,
+        /// Read release notes from a file. Repeat as `--notes-file fr=notes.fr.md`
+        /// to add a translation per language; a file without `LANG=` is the
+        /// English (or only) text.
+        #[arg(long = "notes-file", value_name = "[LANG=]FILE")]
+        notes_file: Vec<String>,
         /// Outer-scope directories of package files, for checking ${game.*} tokens.
         #[arg(long = "scope")]
         scopes: Vec<PathBuf>,
@@ -503,6 +505,44 @@ fn discover_manifest() -> Result<PathBuf> {
     }
 }
 
+/// Release notes from `--notes-file` values: one plain file, or files per
+/// language (`fr=notes.fr.md`), where a file without a language is English.
+fn read_notes_files(values: &[String]) -> Result<Option<LocalizedText>> {
+    let mut variants: Vec<(String, String)> = Vec::new();
+    let mut plain: Option<String> = None;
+    for value in values {
+        let (lang, file) = match value.split_once('=') {
+            Some((lang, file)) if loadstone_core::i18n::is_valid_tag(lang) => (Some(lang), file),
+            _ => (None, value.as_str()),
+        };
+        let text = std::fs::read_to_string(file)
+            .with_context(|| format!("failed to read {file}"))?
+            .trim_end()
+            .to_string();
+        match lang {
+            Some(lang) if variants.iter().any(|(t, _)| t == lang) => {
+                bail!("release notes for \"{lang}\" are given twice")
+            }
+            Some(lang) => variants.push((lang.to_string(), text)),
+            None if plain.is_some() => bail!("more than one --notes-file has no language"),
+            None => plain = Some(text),
+        }
+    }
+    Ok(match (plain, variants.is_empty()) {
+        (None, true) => None,
+        (Some(text), true) => Some(LocalizedText::Plain(text)),
+        (plain, false) => {
+            if let Some(text) = plain {
+                if variants.iter().any(|(t, _)| t == "en") {
+                    bail!("release notes for \"en\" are given twice");
+                }
+                variants.insert(0, ("en".to_string(), text));
+            }
+            Some(LocalizedText::Translated(variants))
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_package(
     manifest_arg: Option<&Path>,
@@ -511,7 +551,7 @@ fn cmd_package(
     installers: Vec<PathBuf>,
     out: &Path,
     notes: Option<String>,
-    notes_file: Option<PathBuf>,
+    notes_file: Vec<String>,
     scopes: &[PathBuf],
 ) -> Result<bool> {
     let manifest_path = match manifest_arg {
@@ -540,15 +580,9 @@ fn cmd_package(
         }
     }
 
-    let release_notes = match (notes, notes_file) {
-        (Some(text), _) => Some(text),
-        (None, Some(file)) => Some(
-            std::fs::read_to_string(&file)
-                .with_context(|| format!("failed to read {}", file.display()))?
-                .trim_end()
-                .to_string(),
-        ),
-        (None, None) => None,
+    let release_notes = match notes {
+        Some(text) => Some(LocalizedText::Plain(text)),
+        None => read_notes_files(&notes_file)?,
     };
 
     for path in &installers {

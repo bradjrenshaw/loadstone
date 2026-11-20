@@ -331,17 +331,17 @@ pub fn resolve_options(
             values.insert(option.id.clone(), option.choices[i].value.clone());
             continue;
         }
-        let mut prompt = option.label.clone();
+        let mut prompt = option.label.get().to_string();
         if let Some(desc) = &option.description {
             prompt.push('\n');
-            prompt.push_str(desc);
+            prompt.push_str(desc.get());
         }
         let labels: Vec<String> = option
             .choices
             .iter()
             .map(|c| match &c.description {
                 Some(d) => format!("{}: {d}", c.label),
-                None => c.label.clone(),
+                None => c.label.get().to_string(),
             })
             .collect();
         let preselect = previous.unwrap_or_else(|| option.default_index());
@@ -371,10 +371,10 @@ fn initialize_settings(
         let mut value = entry.default.clone().unwrap_or(serde_json::Value::Null);
         if fresh && entry.prompt_on_install {
             if entry.entry_type == SettingType::Boolean {
-                let mut message = entry.label.clone();
+                let mut message = entry.label.get().to_string();
                 if let Some(desc) = &entry.description {
-                    message.push_str("\n");
-                    message.push_str(desc);
+                    message.push('\n');
+                    message.push_str(desc.get());
                 }
                 value = serde_json::Value::Bool(ui.confirm(&message));
             } else {
@@ -619,7 +619,7 @@ fn run_steps_inner(
                 if ctx.condition_matches(&req.condition)? {
                     break;
                 }
-                let message = req.on_missing.clone().unwrap_or_else(|| {
+                let message = req.on_missing.as_ref().map(|m| m.get().to_string()).unwrap_or_else(|| {
                     match &req.condition.file_exists {
                         Some(path) => format!("Required file not found: {path}"),
                         None => format!("A requirement of step {} is not met.", step.name()),
@@ -743,7 +743,7 @@ fn run_steps_inner(
                 crate::track::prune_empty_dirs(dirs, &roots);
             }
             Step::PickDirectory { id, prompt, suggest, .. } => {
-                match ui.pick_directory(id, prompt, suggest.as_deref()) {
+                match ui.pick_directory(id, prompt.get(), suggest.as_deref()) {
                     Some(dir) => {
                         ctx.vars.insert(id.clone(), dir);
                     }
@@ -761,7 +761,7 @@ fn run_steps_inner(
                 // Informational only: a follow-up the user has to do by hand
                 // (set Steam launch options, restart the game). It lands in
                 // the activity log, which every frontend reads out.
-                ui.log(&ctx.substitute(message)?);
+                ui.log(&ctx.substitute(message.get())?);
                 if let Some(text) = clipboard {
                     let text = ctx.substitute(text)?;
                     // Without a clipboard the text still reaches the log, so

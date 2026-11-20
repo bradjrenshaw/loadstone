@@ -210,9 +210,30 @@ mod ffi {
         account_label: String,
     }
 
+    /// One named argument for `tr`.
+    struct TrArg {
+        name: String,
+        value: String,
+        /// A number (selects plural forms); `value` is its decimal text.
+        number: bool,
+    }
+
     extern "Rust" {
         /// Core library version (for the about line and smoke tests).
         fn core_version() -> String;
+
+        // ── Language ───────────────────────────────────────────────────
+
+        /// Apply the saved interface language, or the system's. Call once
+        /// at startup, before building any window.
+        fn init_language(embedded: &str);
+        /// The interface language's tag ("en", "pt-BR", ...).
+        fn ui_language() -> String;
+        /// Whether the interface language is written right to left.
+        fn ui_is_rtl() -> bool;
+        /// Loadstone's message `id` (locales/*.ftl) in the interface
+        /// language. Every string the GUI shows comes from here.
+        fn tr(id: &str, args: &[TrArg]) -> String;
 
         // ── Accounts and Loadstone settings ───────────────────────────
         // All take the embedded profile: it picks the scope (the manager,
@@ -468,6 +489,11 @@ impl loadstone_core::engine::EngineUi for GuiUi<'_> {
     }
 }
 
+/// Optional package text for the user's language ("" when absent).
+fn opt_text(text: &Option<loadstone_core::types::LocalizedText>) -> String {
+    text.as_ref().map(|t| t.get().to_string()).unwrap_or_default()
+}
+
 fn opt_path(s: &str) -> Option<PathBuf> {
     if s.is_empty() {
         None
@@ -649,7 +675,7 @@ pub fn run_mod_action(
         .actions
         .iter()
         .find(|a| a.id == action_id)
-        .map(|a| a.label.clone())
+        .map(|a| a.label.get().to_string())
         .unwrap_or_else(|| action_id.to_string());
     loadstone_core::engine::run_action(&store, &state, action_id, &mut GuiUi(ui))?;
     Ok(format!("{label} completed."))
@@ -951,9 +977,9 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
             name: if m.testers {
                 format!("{} (tester preview)", m.manifest.name)
             } else {
-                m.manifest.name.clone()
+                m.manifest.name.get().to_string()
             },
-            summary: first_line(&m.manifest.description),
+            summary: first_line(&m.manifest.description.as_ref().map(|d| d.get().to_string())),
             game: installs
                 .first()
                 .map(|s| s.game.clone())
@@ -1013,8 +1039,8 @@ fn setting_items(
                 .unwrap_or_default();
             SettingItem {
                 id: entry.id.clone(),
-                label: entry.label.clone(),
-                description: entry.description.clone().unwrap_or_default(),
+                label: entry.label.get().to_string(),
+                description: opt_text(&entry.description),
                 kind: match entry.entry_type {
                     SettingType::Boolean => "boolean",
                     SettingType::String => "string",
@@ -1031,7 +1057,7 @@ fn setting_items(
                             serde_json::Value::String(s) => s.clone(),
                             other => other.to_string(),
                         },
-                        label: o.label.clone(),
+                        label: o.label.get().to_string(),
                     })
                     .collect(),
             }
@@ -1044,8 +1070,8 @@ fn action_items(actions: &[loadstone_core::types::Action]) -> Vec<ActionItem> {
         .iter()
         .map(|a| ActionItem {
             id: a.id.clone(),
-            label: a.label.clone(),
-            description: a.description.clone().unwrap_or_default(),
+            label: a.label.get().to_string(),
+            description: opt_text(&a.description),
         })
         .collect()
 }
@@ -1100,7 +1126,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                     for id in dep_ids {
                         let name = r
                             .resolve_project(&id)
-                            .map(|d| d.manifest.name.clone())
+                            .map(|d| d.manifest.name.get().to_string())
                             .unwrap_or_else(|_| id.clone());
                         dep_infos.push((id, name));
                     }
@@ -1168,7 +1194,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
 
     let game_name = game_manifest
         .as_ref()
-        .map(|g| g.name.clone())
+        .map(|g| g.name.get().to_string())
         .or_else(|| any_state.map(|s| s.game.clone()))
         .unwrap_or_default();
 
@@ -1252,7 +1278,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                 let values = core_settings::read_values(file).unwrap_or_default();
                 settings = setting_items(schema, &values);
                 settings_editable = true;
-                settings_note = schema.note.clone().unwrap_or_default();
+                settings_note = opt_text(&schema.note);
             }
         } else if let Some(r) = &resolved {
             if let Some(schema) = &r.manifest.settings {
@@ -1377,8 +1403,8 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
 
     let (name, description, authors, game) = match &resolved {
         Some(r) => (
-            r.manifest.name.clone(),
-            r.manifest.description.clone().unwrap_or_default(),
+            r.manifest.name.get().to_string(),
+            opt_text(&r.manifest.description),
             r.manifest.authors.join(", "),
             r.manifest.game.clone().unwrap_or_default(),
         ),

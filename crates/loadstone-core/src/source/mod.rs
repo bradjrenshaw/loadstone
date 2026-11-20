@@ -309,7 +309,10 @@ pub fn default_branch_file(source: &str, path: &str) -> Result<Vec<u8>> {
 /// Parse release-manifest bytes downloaded from `source`.
 pub(crate) fn parse_release_manifest(bytes: Vec<u8>, source: &str) -> Result<ReleaseManifest> {
     let text = String::from_utf8(bytes).context("loadstone-release.json is not UTF-8")?;
-    serde_json::from_str(text.trim_start_matches('\u{feff}'))
+    let doc: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .with_context(|| format!("loadstone-release.json from {source} does not parse"))?;
+    crate::types::check_manifest_version(&doc)?;
+    serde_json::from_value(doc)
         .with_context(|| format!("loadstone-release.json from {source} does not parse"))
 }
 

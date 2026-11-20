@@ -133,16 +133,173 @@ fn warn_unknown_keys(doc: &Value, known: &[&str], diags: &mut Vec<Diagnostic>) {
 }
 
 fn check_manifest_version(doc: &Value, required: bool, diags: &mut Vec<Diagnostic>) {
-    match doc.get("manifestVersion").and_then(Value::as_u64) {
-        Some(v) if v as u32 == MANIFEST_VERSION => {}
+    let version = doc.get("manifestVersion").and_then(Value::as_u64);
+    match version {
+        Some(v) if (1..=u64::from(MANIFEST_VERSION)).contains(&v) => {}
         Some(v) => diags.push(Diagnostic::error(
             "manifestVersion",
-            format!("unsupported manifestVersion {v}; this tool understands {MANIFEST_VERSION}"),
+            format!("unsupported manifestVersion {v}; this tool understands 1 to {MANIFEST_VERSION}"),
         )),
         None if required => {
             diags.push(Diagnostic::error("manifestVersion", "missing required field"))
         }
         None => {}
+    }
+    check_translations(doc, version.unwrap_or(1), diags);
+}
+
+// ---------------------------------------------------------------------------
+// Translated text (SPEC 18)
+
+/// Fields whose value is text shown to the user, which may be translated.
+const TEXT_KEYS: &[&str] = &[
+    "name", "description", "label", "prompt", "message", "onMissing", "reason", "note",
+    "releaseNotes",
+];
+
+/// Subtrees holding data rather than package text: values written into the
+/// game's own files, setting defaults, detection data, dev-only blocks.
+const DATA_KEYS: &[&str] = &["value", "default", "detect", "packaging", "testers", "env", "paths", "userData"];
+
+/// Text fields that are usually names, never warned about for lacking
+/// translations.
+const NAME_KEYS: &[&str] = &["name"];
+
+struct TextField<'a> {
+    location: String,
+    key: &'a str,
+    value: &'a Value,
+}
+
+fn collect_text_fields<'a>(value: &'a Value, location: &str, out: &mut Vec<TextField<'a>>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let loc = if location.is_empty() { key.clone() } else { format!("{location}/{key}") };
+                if DATA_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
+                if TEXT_KEYS.contains(&key.as_str()) && (child.is_string() || is_translation_map(child)) {
+                    out.push(TextField { location: loc, key, value: child });
+                } else {
+                    collect_text_fields(child, &loc, out);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                let loc = if location.is_empty() { i.to_string() } else { format!("{location}/{i}") };
+                collect_text_fields(item, &loc, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An object of strings: translated text (an empty object counts, so it
+/// is reported rather than skipped).
+fn is_translation_map(value: &Value) -> bool {
+    value.as_object().is_some_and(|m| m.values().all(Value::is_string))
+}
+
+/// The `${...}` tokens in a text, sorted, for comparing translations.
+fn text_tokens(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else { break };
+        tokens.push(after[..end].to_string());
+        rest = &after[end + 1..];
+    }
+    tokens.sort();
+    tokens
+}
+
+fn check_translations(doc: &Value, version: u64, diags: &mut Vec<Diagnostic>) {
+    let mut fields = Vec::new();
+    collect_text_fields(doc, "", &mut fields);
+    let translated: Vec<&TextField> = fields.iter().filter(|f| f.value.is_object()).collect();
+    let Some(first) = translated.first() else { return };
+    if version < 2 {
+        diags.push(Diagnostic::error(
+            "manifestVersion",
+            format!(
+                "translated text (first at {}) needs \"manifestVersion\": 2",
+                first.location
+            ),
+        ));
+    }
+
+    // Every language any text in the file is translated into, in order of
+    // first appearance.
+    let mut languages: Vec<String> = Vec::new();
+    for field in &translated {
+        for tag in field.value.as_object().into_iter().flat_map(|m| m.keys()) {
+            if crate::i18n::is_valid_tag(tag) && !languages.iter().any(|l| l.eq_ignore_ascii_case(tag)) {
+                languages.push(tag.clone());
+            }
+        }
+    }
+
+    for field in &fields {
+        let Some(map) = field.value.as_object() else {
+            if !NAME_KEYS.contains(&field.key) {
+                diags.push(Diagnostic::warning(
+                    &field.location,
+                    format!(
+                        "not translated; other text in this file is in {}",
+                        languages.join(", ")
+                    ),
+                ));
+            }
+            continue;
+        };
+        if map.is_empty() {
+            diags.push(Diagnostic::error(&field.location, "has no translations"));
+            continue;
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for (tag, text) in map {
+            let at = format!("{}/{tag}", field.location);
+            if !crate::i18n::is_valid_tag(tag) {
+                diags.push(Diagnostic::error(
+                    &at,
+                    format!("\"{tag}\" is not a language tag (use BCP 47, like \"fr\", \"pt-BR\" or \"zh-Hans\")"),
+                ));
+            } else if seen.iter().any(|s| s.eq_ignore_ascii_case(tag)) {
+                diags.push(Diagnostic::error(&at, format!("\"{tag}\" is translated twice")));
+            }
+            seen.push(tag.clone());
+            if text.as_str().is_some_and(|t| t.trim().is_empty()) {
+                diags.push(Diagnostic::error(&at, "must not be empty"));
+            }
+        }
+        // Tokens are filled in per translation, so each must keep the
+        // same ones.
+        let mut texts = map.iter().filter_map(|(tag, t)| t.as_str().map(|t| (tag, t)));
+        if let Some((first_tag, first_text)) = texts.next() {
+            let expected = text_tokens(first_text);
+            for (tag, text) in texts {
+                if text_tokens(text) != expected {
+                    diags.push(Diagnostic::error(
+                        format!("{}/{tag}", field.location),
+                        format!("uses different ${{...}} tokens from the \"{first_tag}\" text"),
+                    ));
+                }
+            }
+        }
+        let missing: Vec<&str> = languages
+            .iter()
+            .filter(|l| !map.keys().any(|k| k.eq_ignore_ascii_case(l)))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            diags.push(Diagnostic::warning(
+                &field.location,
+                format!("no translation for {}", missing.join(", ")),
+            ));
+        }
     }
 }
 
@@ -255,13 +412,13 @@ fn validate_project(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
     };
 
     check_id(&manifest.id, "id", diags);
-    if manifest.name.trim().is_empty() {
+    if manifest.name.is_blank() {
         diags.push(Diagnostic::error("name", "must not be empty"));
     }
     if manifest.authors.is_empty() {
         diags.push(Diagnostic::warning("authors", "no authors listed"));
     }
-    if manifest.description.as_deref().unwrap_or("").trim().is_empty() {
+    if manifest.description.as_ref().is_none_or(|d| d.is_blank()) {
         diags.push(Diagnostic::warning("description", "missing description"));
     }
 
@@ -431,7 +588,7 @@ fn validate_project(doc: &Value, ctx: &ValidationContext, diags: &mut Vec<Diagno
         if !action_ids.insert(action.id.clone()) {
             diags.push(Diagnostic::error(&loc, format!("duplicate action id \"{}\"", action.id)));
         }
-        if action.label.trim().is_empty() {
+        if action.label.is_blank() {
             diags.push(Diagnostic::error(format!("{loc}/label"), "must not be empty"));
         }
         if action.steps.is_empty() {
@@ -495,10 +652,12 @@ fn validate_steps(
 
         match step {
             Step::Notice { message, clipboard, .. } => {
-                if message.trim().is_empty() {
+                if message.is_blank() {
                     diags.push(Diagnostic::error(format!("{loc}/message"), "must not be empty"));
                 } else {
-                    check_path(message, &format!("{loc}/message"), &scope, diags);
+                    for text in message.texts() {
+                        check_path(text, &format!("{loc}/message"), &scope, diags);
+                    }
                 }
                 if let Some(text) = clipboard {
                     if text.trim().is_empty() {
@@ -645,7 +804,7 @@ fn validate_steps(
             }
             Step::PickDirectory { id, prompt, .. } => {
                 check_var_id(id, &format!("{loc}/id"), diags);
-                if prompt.trim().is_empty() {
+                if prompt.is_blank() {
                     diags.push(Diagnostic::error(format!("{loc}/prompt"), "must not be empty"));
                 }
                 vars.insert(id.clone());
@@ -657,7 +816,7 @@ fn validate_steps(
                 for (c, check) in checks.iter().enumerate() {
                     let cloc = format!("{loc}/checks/{c}");
                     validate_condition_in(&check.condition, &cloc, &scope, diags);
-                    if check.message.trim().is_empty() {
+                    if check.message.is_blank() {
                         diags.push(Diagnostic::error(
                             format!("{cloc}/message"),
                             "expect checks must carry a user-facing message",
@@ -782,7 +941,7 @@ fn validate_options(options: &[InstallOption], diags: &mut Vec<Diagnostic>) {
         if !ids.insert(option.id.as_str()) {
             diags.push(Diagnostic::error(format!("{loc}/id"), format!("duplicate option id \"{}\"", option.id)));
         }
-        if option.label.trim().is_empty() {
+        if option.label.is_blank() {
             diags.push(Diagnostic::error(format!("{loc}/label"), "must not be empty"));
         }
         if option.choices.is_empty() {
@@ -796,7 +955,7 @@ fn validate_options(options: &[InstallOption], diags: &mut Vec<Diagnostic>) {
             } else if !values.insert(choice.value.as_str()) {
                 diags.push(Diagnostic::error(format!("{cloc}/value"), format!("duplicate value \"{}\"", choice.value)));
             }
-            if choice.label.trim().is_empty() {
+            if choice.label.is_blank() {
                 diags.push(Diagnostic::error(format!("{cloc}/label"), "must not be empty"));
             }
         }
@@ -947,7 +1106,7 @@ fn validate_settings(
         if !ids.insert(entry.id.clone()) {
             diags.push(Diagnostic::error(&loc, format!("duplicate setting id \"{}\"", entry.id)));
         }
-        if entry.label.trim().is_empty() {
+        if entry.label.is_blank() {
             diags.push(Diagnostic::error(format!("{loc}/label"), "must not be empty"));
         }
         match entry.entry_type {
@@ -1068,7 +1227,7 @@ fn validate_game(game: &GameManifest, prefix: &str, _standalone: bool, diags: &m
         if prefix.is_empty() { field.to_string() } else { format!("{prefix}/{field}") }
     };
     check_id(&game.id, &at("id"), diags);
-    if game.name.trim().is_empty() {
+    if game.name.is_blank() {
         diags.push(Diagnostic::error(at("name"), "must not be empty"));
     }
     if game.detect.markers.is_empty() {

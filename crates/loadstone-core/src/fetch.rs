@@ -17,7 +17,7 @@ pub struct HttpError {
 
 impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "download of {} returned HTTP {}", self.url, self.status)
+        f.write_str(&crate::t!("core-fetch-http-status", url = &self.url, status = self.status))
     }
 }
 
@@ -47,9 +47,9 @@ pub fn post_form(url: &str, headers: &[(&str, &str)], form: &[(&str, &str)]) -> 
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
-    let resp = request.send().with_context(|| format!("request failed: {url}"))?;
+    let resp = request.send().with_context(|| crate::t!("core-fetch-request-failed", url = url))?;
     let status = resp.status();
-    let body = resp.bytes().context("read error")?.to_vec();
+    let body = resp.bytes().with_context(|| crate::t!("core-fetch-read-error"))?.to_vec();
     if !status.is_success() && body.is_empty() {
         return Err(HttpError { url: url.to_string(), status: status.as_u16() }.into());
     }
@@ -68,7 +68,7 @@ pub fn get(url: &str, headers: &[(&str, &str)], mut progress: impl FnMut(u32)) -
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
-    let resp = request.send().with_context(|| format!("download failed: {url}"))?;
+    let resp = request.send().with_context(|| crate::t!("core-fetch-download-failed", url = url))?;
     if !resp.status().is_success() {
         return Err(HttpError { url: url.to_string(), status: resp.status().as_u16() }.into());
     }
@@ -79,7 +79,7 @@ pub fn get(url: &str, headers: &[(&str, &str)], mut progress: impl FnMut(u32)) -
     let mut done: u64 = 0;
     use std::io::Read;
     loop {
-        let n = reader.read(&mut chunk).context("read error during download")?;
+        let n = reader.read(&mut chunk).with_context(|| crate::t!("core-fetch-read-error-download"))?;
         if n == 0 {
             break;
         }

@@ -182,7 +182,7 @@ pub fn save_signed_in(ctx: &AuthContext, provider: &str, label: &str, token: &st
 pub fn add_token_account(ctx: &AuthContext, provider: &str, label: &str, token: &str) -> Result<Account> {
     let token = token.trim();
     if token.is_empty() {
-        bail!("no token given");
+        bail!("{}", crate::t!("core-sign-in-no-token"));
     }
     save_signed_in(ctx, provider, label, token)
 }
@@ -210,12 +210,12 @@ pub fn sign_in(
         let wake = std::time::Instant::now() + std::time::Duration::from_secs(interval);
         while std::time::Instant::now() < wake {
             if cancelled() {
-                bail!("Sign-in cancelled.");
+                bail!("{}", crate::t!("core-sign-in-cancelled"));
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         if std::time::Instant::now() > deadline {
-            bail!("The sign-in code expired before it was entered. Please start again.");
+            bail!("{}", crate::t!("core-sign-in-expired"));
         }
         match p.poll_sign_in(&challenge)? {
             SignInPoll::Pending => {}
@@ -278,7 +278,7 @@ pub fn set_rule(ctx: &AuthContext, pattern: &str, account_id: &str) -> Result<()
         bail!("no account with id \"{account_id}\"");
     }
     if pattern_owner_and_repo(pattern).is_none() {
-        bail!("\"{pattern}\" is not a source (github:owner/repo) or owner wildcard (github:owner/*)");
+        bail!("{}", crate::t!("core-account-rule-bad-pattern", pattern = pattern));
     }
     let mut list = rules(&ctx.prefs)?;
     list.retain(|r| r.pattern != pattern);

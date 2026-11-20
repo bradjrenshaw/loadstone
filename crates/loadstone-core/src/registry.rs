@@ -102,8 +102,8 @@ impl RegistryFetcher for HttpFetcher {
                 return Ok(dir);
             }
             bail!(
-                "registry \"{source}\" is neither {} nor an existing directory",
-                source::formats()
+                "{}",
+                crate::t!("core-registry-not-found", source = source, formats = source::formats())
             );
         }
 
@@ -113,7 +113,7 @@ impl RegistryFetcher for HttpFetcher {
         match fetch_packages_zipball(source) {
             Ok(files) => {
                 if files.is_empty() {
-                    bail!("{source} has no loadstone-packages directory");
+                    bail!("{}", crate::t!("core-registry-no-packages", source = source));
                 }
                 if cache.exists() {
                     std::fs::remove_dir_all(&cache)?;
@@ -126,12 +126,14 @@ impl RegistryFetcher for HttpFetcher {
             }
             Err(e) => {
                 if cache.is_dir() {
-                    (self.log)(&format!(
-                        "Could not refresh {source} ({e}); using the cached copy."
+                    (self.log)(&crate::t!(
+                        "core-registry-using-cache",
+                        source = source,
+                        error = e.to_string()
                     ));
                     Ok(cache)
                 } else {
-                    Err(e).with_context(|| format!("failed to fetch registry {source}"))
+                    Err(e).with_context(|| crate::t!("core-registry-fetch-failed", source = source))
                 }
             }
         }
@@ -372,6 +374,7 @@ impl<'a> Resolver<'a> {
         for scope in &self.scopes {
             for (_, doc) in read_docs(&scope.dir)? {
                 if doc_id(&doc) == id && doc_kind(&doc) != "link" && doc_kind(&doc) != "game" {
+                    crate::types::check_manifest_version(&doc)?;
                     let manifest: ProjectManifest = serde_json::from_value(doc)
                         .with_context(|| format!("package \"{id}\" is not a valid project manifest"))?;
                     let release_source = manifest.source.clone().or_else(|| scope.source.clone());
@@ -418,6 +421,7 @@ impl<'a> Resolver<'a> {
             };
             for (_, doc) in read_docs(&dir)? {
                 if doc_id(&doc) == id && doc_kind(&doc) != "link" && doc_kind(&doc) != "game" {
+                    crate::types::check_manifest_version(&doc)?;
                     let manifest: ProjectManifest = serde_json::from_value(doc)
                         .with_context(|| format!("package \"{id}\" is not a valid project manifest"))?;
                     let access = crate::testers::access(manifest.testers.as_ref(), registry.as_ref(), &self.passwords);
@@ -430,7 +434,7 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
-        bail!("package \"{id}\" not found in any registry")
+        bail!("{}", crate::t!("core-registry-package-not-found", id = id))
     }
 
     /// Resolve a game id through the chain for a package found in
@@ -441,6 +445,7 @@ impl<'a> Resolver<'a> {
         for dir in dirs {
             for (_, doc) in read_docs(&dir)? {
                 if doc_id(&doc) == id && doc_kind(&doc) == "game" {
+                    crate::types::check_manifest_version(&doc)?;
                     return serde_json::from_value(doc)
                         .with_context(|| format!("\"{id}\" is not a valid game package"));
                 }
@@ -618,7 +623,7 @@ mod tests {
 
         // Innermost (the mod repo's own game file) wins over the registry's.
         let game = resolver.resolve_game("balatro", &resolved.scope).unwrap();
-        assert_eq!(game.name, "Repo Copy");
+        assert_eq!(game.name.get(), "Repo Copy");
 
         // Full files beat link-following: a tool hosted in the registry
         // resolves without any fetch.
@@ -681,6 +686,6 @@ mod tests {
         .unwrap();
         let mods = resolver.list_mods().unwrap();
         assert_eq!(mods.len(), 1);
-        assert_eq!(mods[0].manifest.name, "Inner");
+        assert_eq!(mods[0].manifest.name.get(), "Inner");
     }
 }

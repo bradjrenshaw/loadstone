@@ -73,7 +73,11 @@ artifacts (with no `--manifest`, the single mod/tool/library file in
 ```
 loadstone package --version v0.5.0 --artifact dist/MyMod.zip
 loadstone package --version v0.5.0 --notes-file changes-latest.md
+loadstone package --version v0.5.0 --notes-file changes.md --notes-file fr=changes.fr.md
 ```
+
+Repeat `--notes-file LANG=FILE` to translate the release notes (SPEC 18);
+the file without a language is the English text.
 
 Artifacts can come from the command line (`--artifact`, repeatable) or from a
 dev-only `packaging` block in the project manifest, which also lets artifacts
@@ -295,6 +299,26 @@ runtime linked statically throughout (no Visual C++ Redistributable needed),
 Known toolchain note: very new MSVC releases (VS 18 preview era) can throw
 nondeterministic internal compiler errors building wxWidgets at high
 parallelism; building wx with `-- -j 4` and retrying gets past it.
+
+## Translations
+
+Loadstone's own text lives in Fluent catalogs, one per language, at
+`crates/loadstone-core/locales/<tag>.ftl`, compiled into the binary.
+English (`en.ftl`) is the source; a message missing from another catalog
+falls back to it. Rust code asks for a message with `t!("id", name = value)`,
+the GUI with `T("id", {{"name", value}})`; never build a sentence from
+translated pieces.
+
+`cargo test -p loadstone-core --test catalogs` checks that every id the code
+uses exists in English, that English has nothing unused, and that every other
+catalog has exactly English's messages with the same arguments and `&`
+shortcut markers. To add a language, add `<tag>.ftl` and a line to
+`LANGUAGES` in `crates/loadstone-core/src/i18n.rs`.
+
+The Language setting (Loadstone settings) picks the language; it defaults to
+the system's. Set `LOADSTONE_LANGUAGE=<tag>` to preview a translation without
+changing the setting. Package text that mod authors translate in their
+manifests is SPEC 18.
 
 ## Not yet built
 

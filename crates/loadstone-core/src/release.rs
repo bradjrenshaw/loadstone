@@ -19,7 +19,8 @@ pub struct ReleaseOptions {
     /// Version as given (leading `v`/`V` tolerated); normalized before use.
     pub version: String,
     pub artifacts: Vec<ArtifactInput>,
-    pub release_notes: Option<String>,
+    /// One text, or one per language (SPEC 18).
+    pub release_notes: Option<LocalizedText>,
     /// The installer/manager builds shipped with this release: a Windows
     /// `.exe` and/or a macOS `.zip` holding one `.app`. Their hashes and this
     /// tool's own Loadstone version are stamped into the manifest so running
@@ -116,8 +117,18 @@ pub fn build_release_manifest(
         artifacts.push(ReleaseArtifact { file: file_name, sha256, id: input.id.clone(), when: input.when.clone() });
     }
 
+    // Translated text needs version 2; anything else keeps the project's
+    // version so older clients still read the release.
+    let translated_notes = options.release_notes.as_ref().is_some_and(|n| n.is_translated());
+    let manifest_version = if translated_notes {
+        project.manifest_version.max(2)
+    } else {
+        project.manifest_version
+    }
+    .min(MANIFEST_VERSION);
+
     Ok(ReleaseManifest {
-        manifest_version: MANIFEST_VERSION,
+        manifest_version,
         id: project.id.clone(),
         version,
         game: project.game.clone(),

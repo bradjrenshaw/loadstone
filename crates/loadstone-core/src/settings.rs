@@ -47,20 +47,20 @@ pub fn parse_value(entry: &SettingEntry, raw: &str) -> Result<Value> {
         SettingType::Boolean => match raw.to_lowercase().as_str() {
             "true" | "yes" | "on" | "1" => Value::Bool(true),
             "false" | "no" | "off" | "0" => Value::Bool(false),
-            _ => bail!("\"{key}\" is a boolean; use true or false"),
+            _ => bail!("{}", crate::t!("core-setting-not-boolean", key = key)),
         },
         SettingType::Number => {
             let n: f64 = raw
                 .parse()
-                .with_context(|| format!("\"{key}\" needs a number"))?;
+                .with_context(|| crate::t!("core-setting-not-number", key = key))?;
             if let Some(min) = entry.min {
                 if n < min {
-                    bail!("\"{key}\" must be at least {min}");
+                    bail!("{}", crate::t!("core-setting-too-small", key = key, min = min));
                 }
             }
             if let Some(max) = entry.max {
                 if n > max {
-                    bail!("\"{key}\" must be at most {max}");
+                    bail!("{}", crate::t!("core-setting-too-large", key = key, max = max));
                 }
             }
             serde_json::json!(n)
@@ -71,7 +71,7 @@ pub fn parse_value(entry: &SettingEntry, raw: &str) -> Result<Value> {
             if !entry.options.iter().any(|o| o.value == value) {
                 let options: Vec<String> =
                     entry.options.iter().map(|o| o.value.to_string()).collect();
-                bail!("\"{key}\" must be one of: {}", options.join(", "));
+                bail!("{}", crate::t!("core-setting-not-an-option", key = key, options = options.join(", ")));
             }
             value
         }
@@ -93,7 +93,7 @@ pub fn set(settings: &Settings, file: &Path, key: &str, raw: &str) -> Result<Opt
     let mut values = read_values(file)?;
     values.insert(key.to_string(), value);
     write_values(file, &values)?;
-    Ok(settings.note.clone())
+    Ok(settings.note.as_ref().map(|n| n.get().to_string()))
 }
 
 #[cfg(test)]

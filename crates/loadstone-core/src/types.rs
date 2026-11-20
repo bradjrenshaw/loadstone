@@ -1,11 +1,26 @@
-﻿//! Serde types for the package formats defined in SPEC.md (manifestVersion 1).
+﻿//! Serde types for the package formats defined in SPEC.md (manifestVersion 2).
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const MANIFEST_VERSION: u32 = 1;
+pub use crate::i18n::LocalizedText;
+
+/// The newest manifest version this build understands. Version 2 added
+/// translated text (SPEC 18); everything else reads the same in both.
+pub const MANIFEST_VERSION: u32 = 2;
+
+/// Refuse a package file written for a newer Loadstone (SPEC 17), before
+/// parsing it: its fields may not mean what this build thinks.
+pub fn check_manifest_version(doc: &Value) -> anyhow::Result<()> {
+    match doc.get("manifestVersion").and_then(Value::as_u64) {
+        Some(v) if v > u64::from(MANIFEST_VERSION) => {
+            anyhow::bail!("{}", crate::t!("error-manifest-too-new"))
+        }
+        _ => Ok(()),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -26,9 +41,9 @@ pub struct ProjectManifest {
     #[serde(default)]
     pub kind: Kind,
     pub id: String,
-    pub name: String,
+    pub name: LocalizedText,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<LocalizedText>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,7 +117,7 @@ pub struct GameManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<Kind>,
     pub id: String,
-    pub name: String,
+    pub name: LocalizedText,
     #[serde(default)]
     pub detect: Detect,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -131,7 +146,7 @@ pub struct ReleaseManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_notes: Option<String>,
+    pub release_notes: Option<LocalizedText>,
     pub artifacts: Vec<ReleaseArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<Dependency>,
@@ -243,7 +258,7 @@ pub enum DistributionSupport {
     Detailed {
         level: SupportLevel,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
+        reason: Option<LocalizedText>,
     },
 }
 
@@ -338,7 +353,7 @@ pub enum Step {
     },
     PickDirectory {
         id: String,
-        prompt: String,
+        prompt: LocalizedText,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         suggest: Option<String>,
         #[serde(flatten)]
@@ -350,7 +365,7 @@ pub enum Step {
         common: StepCommon,
     },
     Notice {
-        message: String,
+        message: LocalizedText,
         /// Text the frontend puts on the clipboard (e.g. a launch option
         /// line the user has to paste somewhere).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -539,7 +554,7 @@ pub struct Requires {
     #[serde(flatten)]
     pub condition: Condition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_missing: Option<String>,
+    pub on_missing: Option<LocalizedText>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retryable: bool,
 }
@@ -558,7 +573,7 @@ pub struct Check {
     /// Any condition (the same keys as `when`).
     #[serde(flatten)]
     pub condition: Condition,
-    pub message: String,
+    pub message: LocalizedText,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -609,9 +624,9 @@ pub enum IniOpKind {
 #[serde(rename_all = "camelCase")]
 pub struct InstallOption {
     pub id: String,
-    pub label: String,
+    pub label: LocalizedText,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<LocalizedText>,
     pub choices: Vec<OptionChoice>,
     /// The preselected choice's value; the first choice when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -630,16 +645,16 @@ impl InstallOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptionChoice {
     pub value: String,
-    pub label: String,
+    pub label: LocalizedText,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<LocalizedText>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub storage: SettingsStorage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
+    pub note: Option<LocalizedText>,
     pub entries: Vec<SettingEntry>,
 }
 
@@ -658,9 +673,9 @@ pub struct SettingEntry {
     pub entry_type: SettingType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
-    pub label: String,
+    pub label: LocalizedText,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<LocalizedText>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prompt_on_install: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -683,16 +698,16 @@ pub enum SettingType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChoiceOption {
     pub value: Value,
-    pub label: String,
+    pub label: LocalizedText,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Action {
     pub id: String,
-    pub label: String,
+    pub label: LocalizedText,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<LocalizedText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_when: Option<Condition>,
     pub steps: Vec<Step>,

@@ -16,6 +16,7 @@ use crate::engine::{self, EngineUi, InstallPlan, NamedArtifact};
 use crate::profile::Profile;
 use crate::registry::{HttpFetcher, ResolvedPackage, Resolver};
 use crate::source;
+use crate::t;
 use crate::track::StateStore;
 use crate::types::{Kind, ReleaseManifest};
 
@@ -132,7 +133,7 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     let game_id = manifest.game.clone().context("mod declares no game")?;
     let game = resolver.resolve_game(&game_id, &mod_scope)?;
     if let Err(why) = crate::context::platform_support(&manifest.platforms, Some(&game)) {
-        bail!("{} can't be installed on this computer. {why}", manifest.name);
+        bail!("{}", t!("engine-cannot-install-here", name = &manifest.name, reason = why));
     }
     let base_scopes = resolver.scopes.clone();
     drop(resolver);
@@ -150,22 +151,18 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
             0 => None,
             1 => {
                 let r = &records[0];
-                ui.log(&format!(
-                    "Updating the {} copy at {}.",
-                    r.distribution,
-                    r.game_dir.display()
+                ui.log(&t!(
+                    "engine-updating-copy",
+                    distribution = &r.distribution,
+                    path = r.game_dir.display().to_string()
                 ));
                 Some((r.game_dir.clone(), r.distribution.clone()))
             }
             _ => {
-                let dirs: Vec<String> = records
-                    .iter()
-                    .map(|r| format!("{} ({})", r.game_dir.display(), r.distribution))
-                    .collect();
+                let dirs: Vec<String> = records.iter().map(copy_entry).collect();
                 bail!(
-                    "\"{id}\" is installed for more than one copy of {}: {}. Pass --game-dir to say which copy to update.",
-                    game.name,
-                    dirs.join(", ")
+                    "{}",
+                    t!("engine-update-many-copies", id = &id, game = &game.name, copies = dirs.join(", "))
                 );
             }
         }
@@ -177,34 +174,26 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         (Some(dir), None) => {
             if !detect::validate_game_dir(&game, dir) {
                 bail!(
-                    "{} does not look like a {} folder (none of the expected files found)",
-                    dir.display(),
-                    game.name
+                    "{}",
+                    t!("engine-not-game-folder", path = dir.display().to_string(), game = &game.name)
                 );
             }
             (dir.clone(), detect::infer_distribution(dir))
         }
         (None, None) => match detect::detect(&game)? {
             Some(found) => {
-                ui.log(&format!("Found {} at {}", game.name, found.game_dir.display()));
+                ui.log(&t!("engine-game-found", game = &game.name, path = found.game_dir.display().to_string()));
                 (found.game_dir, found.distribution)
             }
             None => {
-                ui.log(&format!("Could not find {} automatically.", game.name));
+                ui.log(&t!("engine-game-not-found", game = &game.name));
                 let picked = ui
-                    .pick_directory(
-                        "gameDir",
-                        &format!("Where is {} installed?", game.name),
-                        None,
-                    )
-                    .with_context(|| {
-                        format!("could not find {} automatically; pass --game-dir or pick its folder", game.name)
-                    })?;
+                    .pick_directory("gameDir", &t!("engine-game-where", game = &game.name), None)
+                    .with_context(|| t!("engine-game-not-picked", game = &game.name))?;
                 if !detect::validate_game_dir(&game, &picked) {
                     bail!(
-                        "{} does not look like a {} folder (none of the expected files found)",
-                        picked.display(),
-                        game.name
+                        "{}",
+                        t!("engine-not-game-folder", path = picked.display().to_string(), game = &game.name)
                     );
                 }
                 let distribution = detect::infer_distribution(&picked);
@@ -219,16 +208,23 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         match support.level() {
             SupportLevel::Unsupported => {
                 let reason = match support {
-                    crate::types::DistributionSupport::Detailed { reason: Some(r), .. } => r.clone(),
+                    crate::types::DistributionSupport::Detailed { reason: Some(r), .. } => {
+                        r.get().to_string()
+                    }
                     _ => String::new(),
                 };
-                bail!("the {} copy of {} is not supported. {}", distribution, game.name, reason);
+                bail!(
+                    "{}",
+                    t!(
+                        "engine-distribution-unsupported",
+                        distribution = &distribution,
+                        game = &game.name,
+                        reason = reason,
+                    )
+                );
             }
             SupportLevel::Untested => {
-                ui.log(&format!(
-                    "Note: the {} copy of {} is untested with this mod.",
-                    distribution, game.name
-                ));
+                ui.log(&t!("engine-distribution-untested", distribution = &distribution, game = &game.name));
             }
             SupportLevel::Supported => {}
         }
@@ -283,19 +279,14 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         if opts.update_mode {
             if let Some(state) = store.load(&game_id, &id, &ctx.game_dir)? {
                 if state.version == version && sha != "unknown" {
-                    return Ok(format!("{} is up to date ({version}).", manifest.name));
+                    return Ok(t!("engine-up-to-date", name = &manifest.name, version = &version));
                 }
             }
         }
         // Branch installs are unpinned, so this is a question, not a log
         // line: the user should knowingly accept the trust trade-off.
-        if !ui.confirm(&format!(
-            "Install {} from the tip of the {branch} branch ({version})?\n\n\
-             Development builds are not hash-pinned; you are trusting the \
-             repository's current contents.",
-            manifest.name
-        )) {
-            return Ok("Install cancelled.".to_string());
+        if !ui.confirm(&t!("engine-branch-confirm", name = &manifest.name, branch = &branch, version = &version)) {
+            return Ok(t!("engine-install-cancelled"));
         }
         ctx.options = settle_options(&store, &ctx, &game_id, &id, &manifest.options, opts, ui)?;
         artifact = source::archive(&source, Some(id.as_str()), source::ArchiveRef::Branch(&branch), |p| {
@@ -312,21 +303,25 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         strip_top_level = true;
     } else {
         let release: ReleaseManifest = match &opts.local_release {
-            Some(release_path) => serde_json::from_value(load_json(release_path)?)
-                .with_context(|| format!("{} is not a release manifest", release_path.display()))?,
+            Some(release_path) => {
+                let doc = load_json(release_path)?;
+                crate::types::check_manifest_version(&doc)?;
+                serde_json::from_value(doc)
+                    .with_context(|| format!("{} is not a release manifest", release_path.display()))?
+            }
             None => {
                 let source = release_source
                     .clone()
                     .context("no --local-release given and no source repo is known for this package")?;
                 match release_tag.clone() {
                     Some(tag) => {
-                        ui.log(&format!("Fetching release {tag} information from {source}..."));
+                        ui.log(&t!("engine-fetching-release", tag = &tag, source = source.to_string()));
                         source::release_manifest(&source, Some(id.as_str()), Some(&tag))?
                     }
                     None => {
                         // Testers get the newest release, beta or not. Looked
                         // up afresh: an install acts on what is published now.
-                        ui.log(&format!("Fetching latest release information from {source}..."));
+                        ui.log(&t!("engine-fetching-latest", source = source.to_string()));
                         let (tag, release) = crate::testers::latest_release(
                             &source,
                             Some(id.as_str()),
@@ -349,12 +344,13 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
             if let Some(state) = store.load(&game_id, &id, &ctx.game_dir)? {
                 if crate::release::is_older_version(&release.version, &state.version) {
                     bail!(
-                        "{} {} is installed, which is newer than the latest release available \
-                         to you now ({}). Nothing was changed. To install an older version, \
-                         choose that version explicitly.",
-                        manifest.name,
-                        state.version,
-                        release.version
+                        "{}",
+                        t!(
+                            "engine-installed-newer",
+                            name = &manifest.name,
+                            installed = &state.version,
+                            latest = &release.version,
+                        )
                     );
                 }
             }
@@ -365,19 +361,23 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                     .map(|v| v == state.version)
                     .unwrap_or(release.version == state.version);
                 if same {
-                    return Ok(format!("{} is up to date ({}).", manifest.name, state.version));
+                    return Ok(t!("engine-up-to-date", name = &manifest.name, version = &state.version));
                 }
                 // A beta from tester access stays until a newer release:
                 // losing access never downgrades.
                 if crate::release::is_older_version(&release.version, &state.version) {
-                    return Ok(format!(
-                        "{} is up to date ({} is newer than the latest release, {}).",
-                        manifest.name, state.version, release.version
+                    return Ok(t!(
+                        "engine-up-to-date-newer",
+                        name = &manifest.name,
+                        installed = &state.version,
+                        latest = &release.version,
                     ));
                 }
-                ui.log(&format!(
-                    "Updating {} {} -> {}.",
-                    manifest.name, state.version, release.version
+                ui.log(&t!(
+                    "engine-updating",
+                    name = &manifest.name,
+                    from = &state.version,
+                    to = &release.version,
                 ));
             }
         }
@@ -386,17 +386,18 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
         // downloading anything. Releases without notes install directly.
         if let Some(notes) = release
             .release_notes
-            .as_deref()
+            .as_ref()
+            .map(|n| n.get())
             .filter(|n| !n.trim().is_empty())
         {
-            let message = format!(
-                "Release notes for {} {}:\n\n{}\n\nInstall now?",
-                manifest.name,
-                release.version,
-                notes.trim()
+            let message = t!(
+                "engine-release-notes-confirm",
+                name = &manifest.name,
+                version = &release.version,
+                notes = notes.trim(),
             );
             if !ui.confirm(&message) {
-                return Ok("Install cancelled.".to_string());
+                return Ok(t!("engine-install-cancelled"));
             }
         }
         // Options first: artifacts may be chosen by them.
@@ -413,17 +414,17 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
                         Some(p) => p.to_path_buf(),
                         None => release_path.parent().unwrap_or(Path::new(".")).join(file),
                     };
-                    ui.log(&format!("Using local artifact {}", artifact_path.display()));
+                    ui.log(&t!("engine-using-local-artifact", path = artifact_path.display().to_string()));
                     std::fs::read(&artifact_path)
                         .with_context(|| format!("failed to read {}", artifact_path.display()))
                 }
                 None => {
                     if let Some(data) = cache.get(sha256) {
-                        ui.log(&format!("Using the already downloaded {file}."));
+                        ui.log(&t!("engine-using-cached", file = file));
                         return Ok(data);
                     }
                     let source = release_source.clone().unwrap();
-                    ui.log(&format!("Downloading {file}..."));
+                    ui.log(&t!("engine-downloading", file = file));
                     let data = source::release_asset(&source, Some(id.as_str()), release_tag.as_deref(), file, |p| {
                         ui.progress(p)
                     })?;
@@ -508,10 +509,10 @@ pub fn install(opts: &InstallOptions, ui: &mut dyn EngineUi) -> Result<String> {
     if let Some(hashes) = &release_hashes {
         let keep: Vec<&str> = hashes.iter().map(String::as_str).collect();
         if let Err(e) = crate::cache::ArtifactCache::for_package(store.root(), &id).retain(&keep) {
-            ui.log(&format!("Warning: {e:#}"));
+            ui.log(&t!("engine-warning", message = format!("{e:#}")));
         }
     }
-    Ok(format!("{} {} installed.", manifest.name, version))
+    Ok(t!("engine-installed", name = &manifest.name, version = &version))
 }
 
 /// This install's option values: flags, else the copy's previous install,
@@ -560,7 +561,7 @@ fn pick_artifacts<'a>(
     }
     match primary {
         Some(p) => Ok((p, extras)),
-        None => bail!("no release artifact matches this platform/architecture/distribution"),
+        None => bail!("{}", t!("engine-no-matching-artifact")),
     }
 }
 
@@ -578,7 +579,7 @@ fn install_dependency(
             state.dependents.push(dependent.to_string());
             store.save(&state)?;
         }
-        ui.log(&format!("Dependency {dep_id} {} already installed.", state.version));
+        ui.log(&t!("engine-dependency-present", id = dep_id, version = &state.version));
         return Ok(());
     }
 
@@ -600,13 +601,18 @@ fn install_dependency(
         .tag
         .clone()
         .unwrap_or_else(|| format!("v{}", pinned.version));
-    ui.log(&format!("Installing dependency {} {} ({})...", tool.name, pinned.version, entry.file));
+    ui.log(&t!(
+        "engine-installing-dependency",
+        name = &tool.name,
+        version = &pinned.version,
+        file = &entry.file,
+    ));
     let artifact = source::release_asset(source, Some(dep_id), Some(&tag), &entry.file, |p| {
         ui.progress(p)
     })?;
     let mut extra_artifacts = Vec::new();
     for extra in extras {
-        ui.log(&format!("Downloading {}...", extra.file));
+        ui.log(&t!("engine-downloading", file = &extra.file));
         extra_artifacts.push(NamedArtifact {
             id: extra.id.clone().unwrap_or_default(),
             data: source::release_asset(source, Some(dep_id), Some(&tag), &extra.file, |p| {
@@ -653,7 +659,7 @@ pub fn launch(
     let store = StateStore::open(state_dir)?;
     let state = find_installed(&store, game, id, game_dir)?;
     engine::launch(&store, &state, ui)?;
-    Ok(format!("{} launched.", state.id))
+    Ok(t!("engine-launched", id = &state.id))
 }
 
 /// The install of `id` for `game`, addressed by copy: an explicit game
@@ -668,21 +674,17 @@ pub fn find_installed(
     if let Some(dir) = game_dir {
         return store
             .load(game, id, dir)?
-            .with_context(|| format!("\"{id}\" is not installed for the {game} copy at {}", dir.display()));
+            .with_context(|| {
+                t!("engine-not-installed-copy", id = id, game = game, path = dir.display().to_string())
+            });
     }
     let mut records = store.find_all(game, id)?;
     match records.len() {
-        0 => bail!("\"{id}\" is not installed for {game}"),
+        0 => bail!("{}", t!("engine-not-installed", id = id, game = game)),
         1 => Ok(records.remove(0)),
         _ => {
-            let dirs: Vec<String> = records
-                .iter()
-                .map(|r| format!("{} ({})", r.game_dir.display(), r.distribution))
-                .collect();
-            bail!(
-                "\"{id}\" is installed for more than one copy of {game}: {}. Pass --game-dir to say which copy.",
-                dirs.join(", ")
-            );
+            let dirs: Vec<String> = records.iter().map(copy_entry).collect();
+            bail!("{}", t!("engine-many-copies", id = id, game = game, copies = dirs.join(", ")));
         }
     }
 }
@@ -750,13 +752,16 @@ pub fn uninstall(
             dep_state.dependents.retain(|d| d != id);
             store.save(&dep_state)?;
             if dep_state.dependents.is_empty() {
-                ui.log(&format!(
-                    "{dep_id} is no longer needed by any installed mod; you can uninstall it too."
-                ));
+                ui.log(&t!("engine-dependency-unneeded", id = dep_id));
             }
         }
     }
-    Ok(format!("{} {} uninstalled.", state.id, state.version))
+    Ok(t!("engine-uninstalled", id = &state.id, version = &state.version))
+}
+
+/// One game copy in a list of them: its folder and store.
+fn copy_entry(record: &crate::track::InstalledState) -> String {
+    t!("engine-copy-entry", path = record.game_dir.display().to_string(), distribution = &record.distribution)
 }
 
 #[cfg(test)]

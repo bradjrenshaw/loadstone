@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 
+use crate::t;
 use crate::types::{Condition, GameManifest, StringOrList};
 
 #[derive(Debug, Clone)]
@@ -81,25 +82,37 @@ pub fn platform_support_on(
                 .into_iter()
                 .collect();
             return Err(if narrowed {
-                let wanted: Vec<&str> = platforms
+                // Only the other architecture is ever wanted here (the
+                // current one would fit), so this is the first match.
+                let wanted = platforms
                     .iter()
                     .filter_map(|p| p.split_once('/'))
-                    .filter(|(os, _)| *os == platform)
-                    .map(|(_, a)| match (platform, a) {
-                        ("macos", "arm64") => "an Apple Silicon processor",
-                        (_, "arm64") => "an ARM processor",
-                        _ => "an Intel or AMD processor",
-                    })
-                    .collect();
-                format!("On {}, this mod needs {}.", platform_name(platform), wanted.join(" or "))
+                    .find(|(os, _)| *os == platform)
+                    .map_or("", |(_, a)| a);
+                let name = platform_name(platform);
+                match (platform, wanted) {
+                    ("macos", "arm64") => t!("engine-platform-needs-apple-silicon", platform = name),
+                    (_, "arm64") => t!("engine-platform-needs-arm", platform = name),
+                    _ => t!("engine-platform-needs-x64", platform = name),
+                }
             } else {
-                format!("This mod is available on {} only.", on.join(" and "))
+                match on.as_slice() {
+                    [one] => t!("engine-platform-only-one", platform = *one),
+                    [first, second] => t!("engine-platform-only-two", first = *first, second = *second),
+                    [first, second, rest @ ..] => t!(
+                        "engine-platform-only-three",
+                        first = *first,
+                        second = *second,
+                        third = rest.join(" and "),
+                    ),
+                    [] => String::new(),
+                }
             });
         }
     }
     if let Some(game) = game {
         if !game.user_data.contains_key(platform) {
-            return Err(format!("{} isn't supported on {} here.", game.name, platform_name(platform)));
+            return Err(t!("engine-game-platform-unsupported", game = &game.name, platform = platform_name(platform)));
         }
     }
     Ok(())
@@ -449,7 +462,7 @@ pub fn resolve_steps(ctx: &InstallContext, steps: &[crate::types::Step]) -> Resu
                 *to = ctx.substitute(to)?;
             }
             Step::Notice { message, clipboard, .. } => {
-                *message = ctx.substitute(message)?;
+                *message = message.try_map(|m| ctx.substitute(m))?;
                 if let Some(text) = clipboard {
                     *text = ctx.substitute(text)?;
                 }

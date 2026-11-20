@@ -11,8 +11,8 @@ use std::sync::Once;
 use anyhow::{bail, Context as _, Result};
 use serde_json::Value;
 
-use loadstone_core::auth;
 use loadstone_core::prefs::{PrefStore, PrefType, Scope};
+use loadstone_core::{auth, i18n, t};
 use loadstone_core::profile::Profile;
 use loadstone_core::source::{self, SignInChallenge, SignInPoll};
 
@@ -45,7 +45,7 @@ pub fn last_error_needs_sign_in() -> bool {
 
 fn with_ctx<T>(embedded: &str, f: impl FnOnce(&auth::AuthContext) -> Result<T>) -> Result<T> {
     crate::load_profile(embedded)?;
-    auth::with_context(|ctx| f(ctx.context("account storage is unavailable")?))
+    auth::with_context(|ctx| f(ctx.with_context(|| t!("page-error-account-storage"))?))
 }
 
 pub fn account_list(embedded: &str) -> Result<Vec<AccountItem>> {
@@ -193,17 +193,31 @@ fn pref_items(ctx: &auth::AuthContext, scope: &Scope) -> Result<Vec<SettingItem>
                     .map(|(v, l)| ChoiceItem { value: v.to_string(), label: l.to_string() })
                     .collect(),
             ),
+            PrefType::Language => {
+                let mut opts =
+                    vec![ChoiceItem { value: String::new(), label: t!("language-system") }];
+                opts.extend(i18n::LANGUAGES.iter().map(|l| ChoiceItem {
+                    value: l.tag.to_string(),
+                    label: l.name.to_string(),
+                }));
+                ("choice", opts)
+            }
             PrefType::AccountPicker => {
                 let mut opts = vec![ChoiceItem {
                     value: String::new(),
-                    label: "Automatic (account rules, then the default account)".into(),
+                    label: t!("pref-download-account-automatic"),
                 }];
                 for a in auth::accounts(store)? {
                     let site = source::provider(&a.provider)
                         .map(|p| p.display_name())
                         .unwrap_or("");
                     opts.push(ChoiceItem {
-                        label: format!("{} ({} on {site})", a.label, a.username),
+                        label: t!(
+                            "page-account-choice",
+                            label = &a.label,
+                            username = &a.username,
+                            site = site
+                        ),
                         value: a.id,
                     });
                 }
@@ -213,8 +227,8 @@ fn pref_items(ctx: &auth::AuthContext, scope: &Scope) -> Result<Vec<SettingItem>
         };
         out.push(SettingItem {
             id: def.key.to_string(),
-            label: def.label.to_string(),
-            description: def.description.to_string(),
+            label: i18n::message(def.label, None),
+            description: i18n::message(def.description, None),
             kind: kind.to_string(),
             value: match &value {
                 Value::String(s) => s.clone(),
@@ -239,15 +253,77 @@ fn set_pref(ctx: &auth::AuthContext, scope: &Scope, key: &str, raw: &str) -> Res
             _ => bail!("\"{raw}\" is not true or false"),
         },
         PrefType::Number => serde_json::Number::from_f64(
-            raw.trim().parse::<f64>().with_context(|| format!("\"{raw}\" is not a number"))?,
+            raw.trim().parse::<f64>().with_context(|| t!("page-error-not-a-number", value = raw))?,
         )
         .map(Value::Number)
-        .context("not a finite number")?,
-        PrefType::AccountPicker if raw.is_empty() => return ctx.prefs.unset(scope, key),
+        .with_context(|| t!("page-error-not-finite"))?,
+        PrefType::AccountPicker | PrefType::Language if raw.is_empty() => {
+            ctx.prefs.unset(scope, key)?;
+            if def.kind == PrefType::Language {
+                i18n::set_language("");
+            }
+            return Ok(());
+        }
+        PrefType::Language => {
+            if !i18n::is_supported(raw) {
+                bail!("\"{raw}\" is not a language Loadstone is translated into");
+            }
+            ctx.prefs.set(scope, key, Value::from(raw))?;
+            i18n::set_language(raw);
+            return Ok(());
+        }
         PrefType::String | PrefType::Choice(_) | PrefType::AccountPicker => Value::from(raw),
         PrefType::Structured => bail!("\"{key}\" can't be edited as text"),
     };
     ctx.prefs.set(scope, key, value)
+}
+
+/// Apply the saved language (or the system's). Call once at startup,
+/// before building any window.
+/// `LOADSTONE_LANGUAGE` overrides the setting, so a translation can be
+/// previewed without changing it.
+pub fn init_language(embedded: &str) {
+    if let Some(tag) = std::env::var("LOADSTONE_LANGUAGE").ok().filter(|t| !t.trim().is_empty()) {
+        i18n::set_language(&tag);
+        return;
+    }
+    let saved = with_ctx(embedded, |ctx| ctx.prefs.get(loadstone_core::prefs::PREF_LANGUAGE, None));
+    let choice = match saved {
+        Ok(Value::String(tag)) => tag,
+        _ => String::new(),
+    };
+    i18n::set_language(&choice);
+}
+
+/// The interface language's tag ("en", "pt-BR", ...).
+pub fn ui_language() -> String {
+    i18n::current().tag.to_string()
+}
+
+/// Whether the interface language is written right to left.
+pub fn ui_is_rtl() -> bool {
+    i18n::current().rtl
+}
+
+/// Loadstone's message `id` in the interface language, for the GUI. Text
+/// arguments are passed as text; numbers as numbers, so plural forms work.
+pub fn tr(id: &str, args: &[crate::ffi::TrArg]) -> String {
+    if args.is_empty() {
+        return i18n::message(id, None);
+    }
+    let mut fluent = i18n::FluentArgs::new();
+    for arg in args {
+        let value = if arg.number {
+            match arg.value.parse::<f64>() {
+                Ok(n) => i18n::FluentValue::from(n),
+                Err(_) => i18n::FluentValue::from(arg.value.clone()),
+            }
+        } else {
+            i18n::FluentValue::from(arg.value.clone())
+        };
+        fluent.set(arg.name.clone(), value);
+    }
+    i18n::message(id, Some(&fluent))
 }
 
 pub fn global_prefs(embedded: &str) -> Result<Vec<SettingItem>> {

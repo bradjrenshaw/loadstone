@@ -14,6 +14,7 @@ use crate::archive;
 use crate::context::{resolve_steps, InstallContext};
 use crate::jsonedit;
 use crate::release::sha256_bytes;
+use crate::t;
 use crate::track::{remove_tracked_files, InstalledState, StateStore};
 use crate::types::{Kind, ProjectManifest, Step};
 
@@ -123,22 +124,26 @@ pub fn install(
         let actual = sha256_bytes(plan.artifact);
         if !actual.eq_ignore_ascii_case(expected) {
             bail!(
-                "artifact hash mismatch for {}: expected {expected}, got {actual}. \
-                 Refusing to install.",
-                plan.manifest.id
+                "{}",
+                t!("engine-hash-mismatch", id = &plan.manifest.id, expected = expected, actual = actual)
             );
         }
-        ui.log("Artifact hash verified.");
+        ui.log(&t!("engine-hash-verified"));
     } else {
-        ui.log("No hash to verify for this source (local or development install).");
+        ui.log(&t!("engine-hash-none"));
     }
     for extra in plan.extra_artifacts {
         let actual = sha256_bytes(&extra.data);
         if !actual.eq_ignore_ascii_case(&extra.expected_sha256) {
             bail!(
-                "artifact hash mismatch for {} ({}): expected {}, got {actual}. \
-                 Refusing to install.",
-                plan.manifest.id, extra.id, extra.expected_sha256
+                "{}",
+                t!(
+                    "engine-hash-mismatch-named",
+                    id = &plan.manifest.id,
+                    artifact = &extra.id,
+                    expected = &extra.expected_sha256,
+                    actual = actual,
+                )
             );
         }
     }
@@ -157,14 +162,10 @@ pub fn install(
     if let Some(prior) = &prior {
         refuse_links_over(&prior.files, &prior.roots)?;
         refuse_links_over(&original_paths(prior), &prior.roots)?;
-        ui.log(&format!(
-            "Removing previously installed version {} ({} file(s)).",
-            prior.version,
-            prior.files.len()
-        ));
+        ui.log(&t!("engine-removing-previous", version = &prior.version, count = prior.files.len()));
         let errors = remove_tracked_files(&prior.files, &roots_of(ctx));
         for e in &errors {
-            ui.log(&format!("Warning: {e}"));
+            ui.log(&t!("engine-warning", message = e));
         }
         // The previous version's replaced game files go back to their
         // originals; this version keeps them afresh below.
@@ -275,13 +276,13 @@ pub fn install(
             if !deferred.is_empty() {
                 state.originals.extend(deferred);
                 if let Err(e) = store.save(&state) {
-                    ui.log(&format!("Warning: could not record the originals still to restore: {e:#}"));
+                    ui.log(&t!("engine-warning-record-originals", error = format!("{e:#}")));
                 }
             }
             Ok(state)
         }
         Err(e) => {
-            ui.log("Install failed; removing files written so far.");
+            ui.log(&t!("engine-install-failed-rolling-back"));
             let _ = remove_tracked_files(&written, &roots_of(ctx));
             if let Some(path) = new_settings {
                 let _ = std::fs::remove_file(path);
@@ -309,10 +310,10 @@ pub fn resolve_options(
     for id in explicit.keys() {
         if !declared.iter().any(|o| &o.id == id) {
             let known: Vec<&str> = declared.iter().map(|o| o.id.as_str()).collect();
-            bail!(
-                "\"{id}\" is not an install option of this mod (options: {})",
-                if known.is_empty() { "none".to_string() } else { known.join(", ") }
-            );
+            if known.is_empty() {
+                bail!("{}", t!("engine-option-unknown-none", id = id));
+            }
+            bail!("{}", t!("engine-option-unknown", id = id, options = known.join(", ")));
         }
     }
     let mut values = BTreeMap::new();
@@ -321,7 +322,10 @@ pub fn resolve_options(
         if let Some(value) = explicit.get(&option.id) {
             if position(value).is_none() {
                 let allowed: Vec<&str> = option.choices.iter().map(|c| c.value.as_str()).collect();
-                bail!("\"{value}\" is not a choice for {} (choices: {})", option.id, allowed.join(", "));
+                bail!(
+                    "{}",
+                    t!("engine-option-bad-choice", value = value, option = &option.id, choices = allowed.join(", "))
+                );
             }
             values.insert(option.id.clone(), value.clone());
             continue;
@@ -340,16 +344,16 @@ pub fn resolve_options(
             .choices
             .iter()
             .map(|c| match &c.description {
-                Some(d) => format!("{}: {d}", c.label),
+                Some(d) => t!("engine-option-choice-described", label = &c.label, description = d),
                 None => c.label.get().to_string(),
             })
             .collect();
         let preselect = previous.unwrap_or_else(|| option.default_index());
         let picked = ui
             .choose(&option.id, &prompt, &labels, preselect)
-            .context("cancelled: no choice made")?;
+            .with_context(|| t!("engine-option-cancelled"))?;
         let choice = option.choices.get(picked).context("the frontend picked a choice that does not exist")?;
-        ui.log(&format!("{}: {}", option.label, choice.label));
+        ui.log(&t!("engine-option-chosen", option = &option.label, choice = &choice.label));
         values.insert(option.id.clone(), choice.value.clone());
     }
     Ok(values)
@@ -378,10 +382,7 @@ fn initialize_settings(
                 }
                 value = serde_json::Value::Bool(ui.confirm(&message));
             } else {
-                ui.log(&format!(
-                    "Setting \"{}\" starts at its default; change it later with the settings command.",
-                    entry.label
-                ));
+                ui.log(&t!("engine-setting-default", label = &entry.label));
             }
         }
         values.insert(entry.id.clone(), value);
@@ -392,7 +393,7 @@ fn initialize_settings(
     }
     std::fs::write(path, serde_json::to_string_pretty(&serde_json::Value::Object(values))?)
         .with_context(|| format!("failed to write {}", path.display()))?;
-    ui.log(&format!("Wrote settings to {}.", path.display()));
+    ui.log(&t!("engine-settings-written", path = path.display().to_string()));
     Ok(())
 }
 
@@ -424,22 +425,19 @@ pub fn run_action(
         .find(|a| a.id == action_id)
         .with_context(|| {
             let available: Vec<&str> = state.actions.iter().map(|a| a.id.as_str()).collect();
-            format!(
-                "\"{action_id}\" is not an action of {} (available: {})",
-                state.id,
-                if available.is_empty() { "none".to_string() } else { available.join(", ") }
-            )
+            if available.is_empty() {
+                t!("engine-action-unknown-none", action = action_id, id = &state.id)
+            } else {
+                t!("engine-action-unknown", action = action_id, id = &state.id, available = available.join(", "))
+            }
         })?;
     let mut ctx = context_from_state(state);
     if let Some(cond) = &action.enabled_when {
         if !ctx.condition_matches(cond)? {
-            bail!(
-                "\"{}\" is not available right now (its precondition doesn't hold)",
-                action.label
-            );
+            bail!("{}", t!("engine-action-unavailable", label = &action.label));
         }
     }
-    ui.log(&format!("Running \"{}\"...", action.label));
+    ui.log(&t!("engine-action-running", label = &action.label));
     let mut written = Vec::new();
     let result = run_steps(&mut ctx, &action.steps, &Artifacts::default(), false, &mut written, ui);
     if !written.is_empty() {
@@ -448,7 +446,7 @@ pub fn run_action(
         store.save(&updated)?;
     }
     result?;
-    ui.log(&format!("\"{}\" finished.", action.label));
+    ui.log(&t!("engine-action-finished", label = &action.label));
     Ok(())
 }
 
@@ -457,7 +455,7 @@ pub fn run_action(
 /// write is still tracked so uninstall stays complete.
 pub fn launch(store: &StateStore, state: &InstalledState, ui: &mut dyn EngineUi) -> Result<()> {
     if state.launch.is_empty() {
-        bail!("{} declares no launch steps for this platform", state.id);
+        bail!("{}", t!("engine-no-launch-steps", id = &state.id));
     }
     let mut ctx = context_from_state(state);
     let mut written = Vec::new();
@@ -483,12 +481,7 @@ fn refuse_links_over(files: &[PathBuf], roots: &[PathBuf]) -> Result<()> {
     parents.dedup();
     for parent in parents {
         if let Some(link) = crate::context::find_link_ancestor(parent, roots) {
-            bail!(
-                "{} is a link into a development checkout; refusing to modify or \
-                 remove files through it. Remove the link first if you really \
-                 want a managed install here.",
-                link.display()
-            );
+            bail!("{}", t!("engine-link-refused", link = link.display().to_string()));
         }
     }
     Ok(())
@@ -524,15 +517,15 @@ fn remove_legacy_paths(
             continue; // already gone
         };
         if !ctx.is_under_allowed_root(path) || roots.iter().any(|r| r == path) {
-            ui.log(&format!("Not removing {}: outside the mod's folders.", path.display()));
+            ui.log(&t!("engine-legacy-outside", path = path.display().to_string()));
             continue;
         }
         if crate::context::find_link_ancestor(path.parent().unwrap_or(path), &roots).is_some() {
-            ui.log(&format!("Not removing {}: it is reached through a link.", path.display()));
+            ui.log(&t!("engine-legacy-link", path = path.display().to_string()));
             continue;
         }
         if others.iter().any(|f| f.starts_with(path)) {
-            ui.log(&format!("Not removing {}: another installed package uses it.", path.display()));
+            ui.log(&t!("engine-legacy-shared", path = path.display().to_string()));
             continue;
         }
         let result = if meta.is_dir() {
@@ -541,8 +534,12 @@ fn remove_legacy_paths(
             std::fs::remove_file(path)
         };
         match result {
-            Ok(()) => ui.log(&format!("Removed leftover {}", path.display())),
-            Err(e) => ui.log(&format!("Warning: could not remove {}: {e}", path.display())),
+            Ok(()) => ui.log(&t!("engine-legacy-removed", path = path.display().to_string())),
+            Err(e) => ui.log(&t!(
+                "engine-legacy-remove-failed",
+                path = path.display().to_string(),
+                error = e.to_string()
+            )),
         }
     }
 }
@@ -571,11 +568,7 @@ fn restore_originals(store: &StateStore, state: &InstalledState, ui: &mut dyn En
     kept.originals = failed.iter().map(|(o, _)| o.clone()).collect();
     store.save(&kept)?;
     let reasons: Vec<String> = failed.into_iter().map(|(_, reason)| reason).collect();
-    bail!(
-        "could not put back {} original game file(s); close the game and try again.\n{}",
-        reasons.len(),
-        reasons.join("\n")
-    )
+    bail!("{}\n{}", t!("engine-restore-failed", count = reasons.len()), reasons.join("\n"))
 }
 
 fn roots_of(ctx: &InstallContext) -> Vec<PathBuf> {
@@ -621,8 +614,8 @@ fn run_steps_inner(
                 }
                 let message = req.on_missing.as_ref().map(|m| m.get().to_string()).unwrap_or_else(|| {
                     match &req.condition.file_exists {
-                        Some(path) => format!("Required file not found: {path}"),
-                        None => format!("A requirement of step {} is not met.", step.name()),
+                        Some(path) => t!("engine-required-file-missing", path = path),
+                        None => t!("engine-requirement-not-met", step = step.name()),
                     }
                 });
                 if !req.retryable {
@@ -631,10 +624,10 @@ fn run_steps_inner(
                 match ui.retry_skip_cancel(&message) {
                     RetryChoice::Retry => continue,
                     RetryChoice::Skip => {
-                        ui.log(&format!("Skipped step {}.", step.name()));
+                        ui.log(&t!("engine-step-skipped", step = step.name()));
                         continue 'steps;
                     }
-                    RetryChoice::Cancel => bail!("cancelled at step {}", step.name()),
+                    RetryChoice::Cancel => bail!("{}", t!("engine-cancelled-at-step", step = step.name())),
                 }
             }
         }
@@ -642,15 +635,12 @@ fn run_steps_inner(
         match step {
             Step::ExtractArchive { routes, artifact, .. } => {
                 let data = artifacts.get(artifact.as_deref())?;
-                ui.log("Extracting files...");
+                ui.log(&t!("engine-extracting"));
                 let outcome =
                     archive::extract_routed(ctx, data, routes, keep_existing, strip_top_level)?;
-                ui.log(&format!("Placed {} file(s).", outcome.written.len()));
+                ui.log(&t!("engine-placed-files", count = outcome.written.len()));
                 for kept in &outcome.kept_existing {
-                    ui.log(&format!(
-                        "Kept existing {} (not overwritten; it may be newer).",
-                        kept.display()
-                    ));
+                    ui.log(&t!("engine-kept-existing", path = kept.display().to_string()));
                 }
                 written.extend(outcome.written);
             }
@@ -693,7 +683,7 @@ fn run_steps_inner(
                         let path = ctx.resolve_path(file)?;
                         ctx.check_write_allowed(&path)?;
                         jsonedit::apply_ops(&path, true, ops)?;
-                        ui.log(&format!("Created and updated {}.", path.display()));
+                        ui.log(&t!("engine-file-created", path = path.display().to_string()));
                     } else {
                         bail!("edit-json: no file matches {file}");
                     }
@@ -701,7 +691,7 @@ fn run_steps_inner(
                     for path in matches {
                         ctx.check_write_allowed(&path)?;
                         jsonedit::apply_ops(&path, *create_if_missing, ops)?;
-                        ui.log(&format!("Updated {}.", path.display()));
+                        ui.log(&t!("engine-file-updated", path = path.display().to_string()));
                     }
                 }
             }
@@ -718,7 +708,7 @@ fn run_steps_inner(
                 for path in matches {
                     ctx.check_write_allowed(&path)?;
                     if crate::ini::apply_ops(&path, *create_if_missing, ops)? {
-                        ui.log(&format!("Updated {}.", path.display()));
+                        ui.log(&t!("engine-file-updated", path = path.display().to_string()));
                     }
                 }
             }
@@ -736,7 +726,7 @@ fn run_steps_inner(
                 }
                 let roots = roots_of(ctx);
                 for e in remove_tracked_files(&files, &roots) {
-                    ui.log(&format!("Warning: {e}"));
+                    ui.log(&t!("engine-warning", message = e));
                 }
                 // A matched directory goes too once it is empty (a loader's
                 // bare folder an archive created but no file filled).
@@ -747,7 +737,7 @@ fn run_steps_inner(
                     Some(dir) => {
                         ctx.vars.insert(id.clone(), dir);
                     }
-                    None => bail!("cancelled: no directory chosen for \"{prompt}\""),
+                    None => bail!("{}", t!("engine-directory-cancelled", prompt = prompt)),
                 }
             }
             Step::Expect { checks, .. } => {
@@ -767,7 +757,7 @@ fn run_steps_inner(
                     // Without a clipboard the text still reaches the log, so
                     // the user can copy it by hand.
                     if ui.copy_to_clipboard(&text) {
-                        ui.log(&format!("Copied to the clipboard: {text}"));
+                        ui.log(&t!("engine-copied-to-clipboard", text = &text));
                     } else {
                         ui.log(&text);
                     }
@@ -797,18 +787,15 @@ fn run_steps_inner(
                 // copy already in place (another manager's, or newer) is
                 // left alone.
                 if keep_existing && dest.exists() && !written.contains(&dest) {
-                    ui.log(&format!(
-                        "Kept existing {} (not overwritten; it may be newer).",
-                        dest.display()
-                    ));
+                    ui.log(&t!("engine-kept-existing", path = dest.display().to_string()));
                 } else {
                     std::fs::write(&dest, &fat)
                         .with_context(|| format!("failed to write {}", dest.display()))?;
                     written.push(dest.clone());
-                    ui.log(&format!(
-                        "Combined {} architectures into {}.",
-                        inputs.len(),
-                        dest.file_name().unwrap_or_default().to_string_lossy()
+                    ui.log(&t!(
+                        "engine-merged-architectures",
+                        count = inputs.len(),
+                        file = dest.file_name().unwrap_or_default().to_string_lossy().into_owned()
                     ));
                 }
             }
@@ -816,7 +803,7 @@ fn run_steps_inner(
                 let exe = ctx.resolve_path(program)?;
                 ctx.check_run_allowed(&exe)?;
                 if !exe.is_file() {
-                    bail!("cannot launch: {} is missing", exe.display());
+                    bail!("{}", t!("engine-program-missing", path = exe.display().to_string()));
                 }
                 let mut cmd = std::process::Command::new(&exe);
                 for a in args {
@@ -835,8 +822,8 @@ fn run_steps_inner(
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
                 cmd.spawn()
-                    .with_context(|| format!("failed to start {}", exe.display()))?;
-                ui.log(&format!("Started {}.", exe.display()));
+                    .with_context(|| t!("engine-program-start-failed", path = exe.display().to_string()))?;
+                ui.log(&t!("engine-program-started", path = exe.display().to_string()));
             }
             Step::OpenUrl { url, .. } => {
                 let url = ctx.substitute(url)?;
@@ -847,7 +834,7 @@ fn run_steps_inner(
                     );
                 }
                 open_url(&url)?;
-                ui.log(&format!("Opened {url}."));
+                ui.log(&t!("engine-url-opened", url = &url));
             }
         }
     }
@@ -892,7 +879,7 @@ fn open_url(url: &str) -> Result<()> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    cmd.spawn().with_context(|| format!("failed to open {url}"))?;
+    cmd.spawn().with_context(|| t!("engine-url-open-failed", url = url))?;
     Ok(())
 }
 
@@ -905,19 +892,15 @@ pub fn uninstall(
     ui: &mut dyn EngineUi,
 ) -> Result<()> {
     if state.kind == "tool" && !state.dependents.is_empty() {
-        bail!(
-            "{} is still needed by: {}. Uninstall those first.",
-            state.id,
-            state.dependents.join(", ")
-        );
+        bail!("{}", t!("engine-still-needed", id = &state.id, dependents = state.dependents.join(", ")));
     }
 
     refuse_links_over(&state.files, &state.roots)?;
     refuse_links_over(&original_paths(state), &state.roots)?;
-    ui.log(&format!("Removing {} file(s).", state.files.len()));
+    ui.log(&t!("engine-removing-files", count = state.files.len()));
     let errors = remove_tracked_files(&state.files, &state.roots);
     for e in &errors {
-        ui.log(&format!("Warning: {e}"));
+        ui.log(&t!("engine-warning", message = e));
     }
     restore_originals(store, state, ui)?;
 
@@ -936,7 +919,7 @@ pub fn uninstall(
     if !state.user_data_paths.is_empty() {
         let purge = match purge_user_data {
             Some(v) => v,
-            None => ui.confirm("Also remove saved settings and preferences?"),
+            None => ui.confirm(&t!("engine-purge-question")),
         };
         if purge {
             let mut files = Vec::new();
@@ -948,9 +931,9 @@ pub fn uninstall(
                 }
             }
             for e in remove_tracked_files(&files, &state.roots) {
-                ui.log(&format!("Warning: {e}"));
+                ui.log(&t!("engine-warning", message = e));
             }
-            ui.log("Removed saved settings.");
+            ui.log(&t!("engine-purge-done"));
         }
     }
 

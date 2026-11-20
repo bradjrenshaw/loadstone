@@ -40,13 +40,13 @@ impl SecretStore for KeyringSecrets {
     fn set(&self, account_id: &str, secret: &str) -> Result<()> {
         self.entry(account_id)
             .and_then(|e| e.set_password(secret))
-            .context("couldn't save the token in the system credential store")
+            .with_context(|| crate::t!("core-secrets-save-failed"))
     }
 
     fn delete(&self, account_id: &str) -> Result<()> {
         match self.entry(account_id).and_then(|e| e.delete_credential()) {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e).context("couldn't remove the token from the system credential store"),
+            Err(e) => Err(e).with_context(|| crate::t!("core-secrets-remove-failed")),
         }
     }
 }

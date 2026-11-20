@@ -175,7 +175,7 @@ pub fn extract_routed(
         resolved.push((from, to));
     }
     if resolved.is_empty() {
-        bail!("no extraction route applies on this platform/distribution");
+        bail!("{}", crate::t!("core-archive-no-route"));
     }
 
     // A destination inside a linked development checkout must never be
@@ -188,11 +188,7 @@ pub fn extract_routed(
     };
     for (_, to) in &resolved {
         if let Some(link) = crate::context::find_link_ancestor(to, &roots) {
-            bail!(
-                "{} is a link into a development checkout. Update that checkout with \
-                 git instead, or remove the link before installing.",
-                link.display()
-            );
+            bail!("{}", crate::t!("core-archive-dev-link", path = link.display().to_string()));
         }
     }
 
@@ -212,7 +208,7 @@ pub fn extract_routed(
             .is_some_and(|name| matches!(route_entry(ctx, &resolved, &name), Target::File(_)))
     });
     if !any_match {
-        bail!("this archive doesn't contain the expected payload (no entry matches any route)");
+        bail!("{}", crate::t!("core-archive-no-payload"));
     }
 
     let mut outcome = ExtractOutcome { written: Vec::new(), kept_existing: Vec::new() };

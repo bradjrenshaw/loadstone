@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::InstallContext;
 use crate::engine::EngineUi;
 use crate::release::sha256_file;
+use crate::t;
 use crate::track::{make_writable, prune_empty_dirs};
 use crate::types::PreserveEntry;
 
@@ -198,7 +199,7 @@ pub fn back_up(
             // a fresh one; anything else is an original to adopt.
             let adopted = backup.is_file() && !sha256_file(&backup)?.eq_ignore_ascii_case(&before_sha256);
             if adopted {
-                ui.log(&format!("Using the original already kept at {}.", backup.display()));
+                ui.log(&t!("engine-original-adopted", path = backup.display().to_string()));
             } else if !backup.is_file() {
                 copy_over(&path, &backup)?;
             }
@@ -206,7 +207,7 @@ pub fn back_up(
         }
     }
     if !pending.is_empty() {
-        ui.log(&format!("Kept a copy of {} original game file(s).", pending.len()));
+        ui.log(&t!("engine-originals-kept", count = pending.len()));
     }
     Ok(pending)
 }
@@ -248,10 +249,10 @@ impl Settled {
         for p in &self.untouched {
             if p.adopted {
                 if let Err(e) = copy_over(&p.backup, &p.path) {
-                    ui.log(&format!(
-                        "Warning: could not restore the original {} now ({e:#}). \
-                         It will be put back when this mod is updated or uninstalled.",
-                        p.path.display()
+                    ui.log(&t!(
+                        "engine-original-restore-deferred",
+                        path = p.path.display().to_string(),
+                        error = format!("{e:#}"),
                     ));
                     deferred.push(Original {
                         path: p.path.clone(),
@@ -260,10 +261,10 @@ impl Settled {
                     });
                     continue;
                 }
-                ui.log(&format!("Restored the original {}.", p.path.display()));
+                ui.log(&t!("engine-original-restored", path = p.path.display().to_string()));
             }
             if let Err(e) = remove_backup(&p.backup) {
-                ui.log(&format!("Warning: {e:#}"));
+                ui.log(&t!("engine-warning", message = format!("{e:#}")));
             }
             prune_parent(&p.backup, roots);
         }
@@ -298,10 +299,10 @@ pub fn restore(
     let mut failed = Vec::new();
     for o in originals {
         if !o.backup.is_file() {
-            ui.log(&format!(
-                "Warning: the original of {} is missing ({}); leaving the file as it is.",
-                o.path.display(),
-                o.backup.display()
+            ui.log(&t!(
+                "engine-original-missing",
+                path = o.path.display().to_string(),
+                backup = o.backup.display().to_string(),
             ));
             continue;
         }
@@ -321,18 +322,15 @@ pub fn restore(
                 continue;
             }
         } else {
-            ui.log(&format!(
-                "{} changed since this mod was installed (a game update?); keeping the newer file.",
-                o.path.display()
-            ));
+            ui.log(&t!("engine-original-changed", path = o.path.display().to_string()));
         }
         if let Err(e) = remove_backup(&o.backup) {
-            ui.log(&format!("Warning: {e:#}"));
+            ui.log(&t!("engine-warning", message = format!("{e:#}")));
         }
         prune_parent(&o.backup, roots);
     }
     if !originals.is_empty() && failed.is_empty() {
-        ui.log(&format!("Restored {} original game file(s).", originals.len()));
+        ui.log(&t!("engine-originals-restored", count = originals.len()));
     }
     failed
 }

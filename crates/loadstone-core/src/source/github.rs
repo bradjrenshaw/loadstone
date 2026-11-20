@@ -103,12 +103,9 @@ fn api_release_asset(
         })
         .and_then(|a| a.get("url"))
         .and_then(serde_json::Value::as_str)
-        .with_context(|| {
-            format!(
-                "release {} of {} has no {file} asset",
-                tag.unwrap_or("latest"),
-                repo.source
-            )
+        .with_context(|| match tag {
+            Some(tag) => crate::t!("core-github-no-asset", tag = tag, source = &repo.source, file = file),
+            None => crate::t!("core-github-no-asset-latest", source = &repo.source, file = file),
         })?
         .to_string();
     api_get(&asset_url, Some(cred), "application/octet-stream", progress)
@@ -146,9 +143,7 @@ impl Provider for GitHub {
     ) -> Result<ReleaseManifest> {
         let bytes = self.release_asset(repo, cred, tag, "loadstone-release.json", &mut |_| {});
         let bytes = match tag {
-            Some(tag) => bytes.with_context(|| {
-                format!("release {tag} has no loadstone-release.json asset (or it is unreachable)")
-            })?,
+            Some(tag) => bytes.with_context(|| crate::t!("core-github-no-release-manifest", tag = tag))?,
             None => bytes?,
         };
         super::parse_release_manifest(bytes, &repo.source)
@@ -295,21 +290,20 @@ impl Provider for GitHub {
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(challenge.interval_secs + 5),
             )),
-            "expired_token" => bail!("The sign-in code expired before it was entered. Please start again."),
-            "access_denied" => bail!("Sign-in was cancelled on GitHub."),
-            _ => bail!(
-                "GitHub refused the sign-in: {}",
-                doc.get("error_description")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(if error.is_empty() { "no details given" } else { error })
-            ),
+            "expired_token" => bail!("{}", crate::t!("core-sign-in-expired")),
+            "access_denied" => bail!("{}", crate::t!("core-github-sign-in-cancelled")),
+            _ => match doc.get("error_description").and_then(serde_json::Value::as_str) {
+                Some(details) => bail!("{}", crate::t!("core-github-sign-in-refused", details = details)),
+                None if error.is_empty() => bail!("{}", crate::t!("core-github-sign-in-refused-no-details")),
+                None => bail!("{}", crate::t!("core-github-sign-in-refused", details = error)),
+            },
         }
     }
 
     fn account_name(&self, token: &str) -> Result<String> {
         let cred = Credential { token: token.to_string(), origin: String::new(), explicit: true };
         let doc = api_json(&format!("{API}/user"), Some(&cred))
-            .context("GitHub didn't accept the token")?;
+            .with_context(|| crate::t!("core-github-token-rejected"))?;
         doc.get("login")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)

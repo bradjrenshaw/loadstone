@@ -105,15 +105,15 @@ pub trait Provider: Sync {
     /// Begin a browser sign-in: the user visits `verification_uri` and
     /// enters `user_code`.
     fn start_sign_in(&self) -> Result<SignInChallenge> {
-        anyhow::bail!("{} doesn't support signing in", self.display_name())
+        anyhow::bail!("{}", crate::t!("core-source-no-sign-in", site = self.display_name()))
     }
     /// Check once whether the user has finished signing in.
     fn poll_sign_in(&self, _challenge: &SignInChallenge) -> Result<SignInPoll> {
-        anyhow::bail!("{} doesn't support signing in", self.display_name())
+        anyhow::bail!("{}", crate::t!("core-source-no-sign-in", site = self.display_name()))
     }
     /// The account name a token belongs to; fails if the token is refused.
     fn account_name(&self, _token: &str) -> Result<String> {
-        anyhow::bail!("{} doesn't support signing in", self.display_name())
+        anyhow::bail!("{}", crate::t!("core-source-no-sign-in", site = self.display_name()))
     }
 }
 
@@ -183,10 +183,10 @@ pub fn formats() -> String {
 /// Resolve a source string to its provider and parsed location.
 pub fn parse(source: &str) -> Result<(&'static dyn Provider, Repo)> {
     let (provider, location) = provider_for(source)
-        .with_context(|| format!("\"{source}\" is not a {} source", formats()))?;
+        .with_context(|| crate::t!("core-source-bad-format", source = source, format = formats()))?;
     let segments = provider
         .parse_location(location)
-        .with_context(|| format!("\"{source}\" is not a {} source", provider.format()))?;
+        .with_context(|| crate::t!("core-source-bad-format", source = source, format = provider.format()))?;
     Ok((provider, Repo { source: source.to_string(), segments }))
 }
 
@@ -211,12 +211,7 @@ pub struct MaybePrivate {
 
 impl std::fmt::Display for MaybePrivate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} wasn't found. If it's a private repository, sign in with an account that can \
-             see it (Loadstone settings), or set GH_TOKEN",
-            self.source
-        )
+        f.write_str(&crate::t!("core-source-maybe-private", source = &self.source))
     }
 }
 
@@ -254,12 +249,9 @@ fn with_credentials<T>(
     let (err, used) = last.expect("candidates is never empty");
     Err(match (crate::fetch::http_status(&err), &used) {
         (Some(404), None) => err.context(MaybePrivate { source: source.to_string() }),
-        (Some(401), Some(c)) => err.context(format!(
-            "the token from {} was refused; it may have expired or been revoked",
-            c.origin
-        )),
+        (Some(401), Some(c)) => err.context(crate::t!("core-source-token-refused", account = &c.origin)),
         (Some(403 | 404), Some(c)) => {
-            err.context(format!("{source} isn't reachable with the token from {}", c.origin))
+            err.context(crate::t!("core-source-token-unreachable", source = source, account = &c.origin))
         }
         _ => err,
     })

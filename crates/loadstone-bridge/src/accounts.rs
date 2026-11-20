@@ -45,7 +45,7 @@ pub fn last_error_needs_sign_in() -> bool {
 
 fn with_ctx<T>(embedded: &str, f: impl FnOnce(&auth::AuthContext) -> Result<T>) -> Result<T> {
     crate::load_profile(embedded)?;
-    auth::with_context(|ctx| f(ctx.context("account storage is unavailable")?))
+    auth::with_context(|ctx| f(ctx.with_context(|| t!("page-error-account-storage"))?))
 }
 
 pub fn account_list(embedded: &str) -> Result<Vec<AccountItem>> {
@@ -212,7 +212,12 @@ fn pref_items(ctx: &auth::AuthContext, scope: &Scope) -> Result<Vec<SettingItem>
                         .map(|p| p.display_name())
                         .unwrap_or("");
                     opts.push(ChoiceItem {
-                        label: format!("{} ({} on {site})", a.label, a.username),
+                        label: t!(
+                            "page-account-choice",
+                            label = &a.label,
+                            username = &a.username,
+                            site = site
+                        ),
                         value: a.id,
                     });
                 }
@@ -248,10 +253,10 @@ fn set_pref(ctx: &auth::AuthContext, scope: &Scope, key: &str, raw: &str) -> Res
             _ => bail!("\"{raw}\" is not true or false"),
         },
         PrefType::Number => serde_json::Number::from_f64(
-            raw.trim().parse::<f64>().with_context(|| format!("\"{raw}\" is not a number"))?,
+            raw.trim().parse::<f64>().with_context(|| t!("page-error-not-a-number", value = raw))?,
         )
         .map(Value::Number)
-        .context("not a finite number")?,
+        .with_context(|| t!("page-error-not-finite"))?,
         PrefType::AccountPicker | PrefType::Language if raw.is_empty() => {
             ctx.prefs.unset(scope, key)?;
             if def.kind == PrefType::Language {

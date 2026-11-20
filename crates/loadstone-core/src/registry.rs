@@ -102,8 +102,8 @@ impl RegistryFetcher for HttpFetcher {
                 return Ok(dir);
             }
             bail!(
-                "registry \"{source}\" is neither {} nor an existing directory",
-                source::formats()
+                "{}",
+                crate::t!("core-registry-not-found", source = source, formats = source::formats())
             );
         }
 
@@ -113,7 +113,7 @@ impl RegistryFetcher for HttpFetcher {
         match fetch_packages_zipball(source) {
             Ok(files) => {
                 if files.is_empty() {
-                    bail!("{source} has no loadstone-packages directory");
+                    bail!("{}", crate::t!("core-registry-no-packages", source = source));
                 }
                 if cache.exists() {
                     std::fs::remove_dir_all(&cache)?;
@@ -126,12 +126,14 @@ impl RegistryFetcher for HttpFetcher {
             }
             Err(e) => {
                 if cache.is_dir() {
-                    (self.log)(&format!(
-                        "Could not refresh {source} ({e}); using the cached copy."
+                    (self.log)(&crate::t!(
+                        "core-registry-using-cache",
+                        source = source,
+                        error = e.to_string()
                     ));
                     Ok(cache)
                 } else {
-                    Err(e).with_context(|| format!("failed to fetch registry {source}"))
+                    Err(e).with_context(|| crate::t!("core-registry-fetch-failed", source = source))
                 }
             }
         }
@@ -432,7 +434,7 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
-        bail!("package \"{id}\" not found in any registry")
+        bail!("{}", crate::t!("core-registry-package-not-found", id = id))
     }
 
     /// Resolve a game id through the chain for a package found in

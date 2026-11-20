@@ -82,9 +82,8 @@ pub fn apply(info: &UpdateInfo, progress: impl FnMut(u32)) -> Result<PathBuf> {
     let actual = sha256_bytes(&bytes);
     if !actual.eq_ignore_ascii_case(&info.sha256) {
         bail!(
-            "the downloaded update failed hash verification (expected {}, got {actual}); \
-             not installed",
-            info.sha256
+            "{}",
+            crate::t!("core-update-hash-mismatch", expected = &info.sha256, actual = &actual)
         );
     }
     match bundle {
@@ -113,11 +112,7 @@ fn replaceable_bundle(exe: &Path) -> Result<PathBuf> {
     // Gatekeeper runs a quarantined app that was never moved from a
     // read-only, randomized copy; nothing there can be replaced.
     if bundle.to_string_lossy().contains("/AppTranslocation/") {
-        bail!(
-            "macOS is running this app from a temporary read-only copy, so it can't \
-             update itself. Move it into your Applications folder, open it from there, \
-             and update again."
-        );
+        bail!("{}", crate::t!("core-update-translocated"));
     }
     // Try the write the swap will need. A read-only spot is usually the
     // disk image the app came in, opened and run without copying it out.
@@ -125,16 +120,9 @@ fn replaceable_bundle(exe: &Path) -> Result<PathBuf> {
     let _ = std::fs::remove_dir_all(&probe);
     if std::fs::create_dir(&probe).is_err() {
         if bundle.starts_with("/Volumes") {
-            bail!(
-                "this app is running from its disk image, so it can't update itself. \
-                 Copy it into your Applications folder, open it from there, and update again."
-            );
+            bail!("{}", crate::t!("core-update-on-disk-image"));
         }
-        bail!(
-            "can't write next to {} (no permission?), so the app can't update itself. \
-             Download the new version from the release page instead.",
-            bundle.display()
-        );
+        bail!("{}", crate::t!("core-update-no-write", path = bundle.display().to_string()));
     }
     let _ = std::fs::remove_dir(&probe);
     Ok(bundle)
@@ -156,13 +144,8 @@ fn staging_dir(bundle: &Path) -> Result<PathBuf> {
 pub fn swap_in_bundle(bundle: &Path, bytes: &[u8], asset: &str) -> Result<()> {
     let staging = staging_dir(bundle)?;
     let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir(&staging).with_context(|| {
-        format!(
-            "can't write next to {} (no permission?). Download the new version from \
-             the release page instead",
-            bundle.display()
-        )
-    })?;
+    std::fs::create_dir(&staging)
+        .with_context(|| crate::t!("core-update-no-staging", path = bundle.display().to_string()))?;
     let unpacked = staging.join("new");
     std::fs::create_dir(&unpacked)?;
     if asset.to_lowercase().ends_with(".dmg") {
@@ -179,14 +162,14 @@ pub fn swap_in_bundle(bundle: &Path, bytes: &[u8], asset: &str) -> Result<()> {
     let want = bundle_id(bundle)?;
     let got = bundle_id(&new_bundle)?;
     if want != got {
-        bail!("the update is a different app ({got}, expected {want}); not installed");
+        bail!("{}", crate::t!("core-update-wrong-app", got = &got, expected = &want));
     }
 
     let previous = staging.join("previous.app");
-    std::fs::rename(bundle, &previous).context("could not move the current app aside")?;
+    std::fs::rename(bundle, &previous).with_context(|| crate::t!("core-update-move-aside-app"))?;
     if let Err(e) = std::fs::rename(&new_bundle, bundle) {
         let _ = std::fs::rename(&previous, bundle); // restore
-        return Err(e).context("could not move the new app into place");
+        return Err(e).with_context(|| crate::t!("core-update-move-in-app"));
     }
     let _ = std::fs::remove_dir_all(&unpacked);
     Ok(())
@@ -335,11 +318,11 @@ pub fn swap_in(exe: &Path, new_bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("could not write {}", staged.display()))?;
     let _ = std::fs::remove_file(&old);
     std::fs::rename(exe, &old)
-        .context("could not move the current executable aside")?;
+        .with_context(|| crate::t!("core-update-move-aside-exe"))?;
     if let Err(e) = std::fs::rename(&staged, exe) {
         let _ = std::fs::rename(&old, exe); // restore
         let _ = std::fs::remove_file(&staged);
-        return Err(e).context("could not move the new executable into place");
+        return Err(e).with_context(|| crate::t!("core-update-move-in-exe"));
     }
     Ok(())
 }

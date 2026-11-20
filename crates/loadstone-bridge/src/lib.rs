@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use loadstone_core::profile::{Profile, ProfileMode};
+use loadstone_core::t;
 use loadstone_core::registry::{HttpFetcher, ResolvedPackage, Resolver};
 use loadstone_core::settings as core_settings;
 use loadstone_core::track::{InstalledState, StateStore};
@@ -539,7 +540,7 @@ pub fn list_mod_releases(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntr
 fn list_mod_releases_inner(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEntry>> {
     let profile = load_profile(embedded)?;
     if profile.registries.is_empty() {
-        anyhow::bail!("no registries are configured");
+        anyhow::bail!(t!("page-error-no-registries"));
     }
     let notes = Rc::new(RefCell::new(Vec::new()));
     let (mut fetcher, sources) = build_resolver(&profile.registries, notes)?;
@@ -552,20 +553,19 @@ fn list_mod_releases_inner(embedded: &str, mod_id: &str) -> Result<Vec<ReleaseEn
     let show_prereleases = resolved.access.shows_prereleases();
     let source = resolved
         .release_source
-        .with_context(|| format!("no source repo is known for \"{mod_id}\""))?;
+        .with_context(|| t!("page-error-no-source-repo", id = mod_id))?;
     let releases = loadstone_core::source::list_releases(&source, Some(mod_id))?;
     Ok(releases
         .into_iter()
         .filter(|r| show_prereleases || !r.prerelease)
         .map(|r| {
-            let mut label = r.tag.clone();
-            if !r.name.is_empty() && r.name != r.tag {
-                label.push_str(", ");
-                label.push_str(&r.name);
-            }
-            if r.prerelease {
-                label.push_str(" (pre-release)");
-            }
+            let named = !r.name.is_empty() && r.name != r.tag;
+            let label = match (named, r.prerelease) {
+                (true, true) => t!("page-release-named-prerelease", tag = &r.tag, title = &r.name),
+                (true, false) => t!("page-release-named", tag = &r.tag, title = &r.name),
+                (false, true) => t!("page-release-prerelease", tag = &r.tag),
+                (false, false) => r.tag.clone(),
+            };
             ReleaseEntry { tag: r.tag, label, prerelease: r.prerelease }
         })
         .collect())
@@ -631,9 +631,9 @@ pub fn apply_self_update(
         source: update.source.clone(),
     };
     let mut gui = GuiUi(ui);
-    gui.log(&format!("Downloading {}...", info.file));
+    gui.log(&t!("page-self-update-downloading", file = &info.file));
     let exe = loadstone_core::selfupdate::apply(&info, |p| gui.progress(p))?;
-    gui.log("Update verified and installed.");
+    gui.log(&t!("page-self-update-installed"));
     Ok(exe.display().to_string())
 }
 
@@ -678,7 +678,7 @@ pub fn run_mod_action(
         .map(|a| a.label.get().to_string())
         .unwrap_or_else(|| action_id.to_string());
     loadstone_core::engine::run_action(&store, &state, action_id, &mut GuiUi(ui))?;
-    Ok(format!("{label} completed."))
+    Ok(t!("page-action-completed", action = label))
 }
 
 pub fn run_launch(
@@ -744,11 +744,11 @@ pub fn set_tester_password(embedded: &str, password: &str) -> Result<String> {
     let prefs = loadstone_core::prefs::PrefStore::open(&profile, None)?;
     if password.is_empty() {
         loadstone_core::testers::forget_passwords(&prefs)?;
-        return Ok("Tester passwords removed. Tester-only mods and beta versions are hidden again.".into());
+        return Ok(t!("page-tester-passwords-removed"));
     }
     let unlocks = loadstone_core::testers::check_password(&profile.registries, password)?;
     if !unlocks.any() {
-        anyhow::bail!("That isn't a tester password for any of your registries or their mods.");
+        anyhow::bail!(t!("page-error-tester-password-wrong"));
     }
     loadstone_core::testers::add_password(&prefs, password)?;
     Ok(unlocks.describe())
@@ -778,7 +778,7 @@ pub fn resolve_profile(embedded: &str) -> Result<String> {
 pub fn profile_title(embedded: &str) -> Result<String> {
     Ok(load_profile(embedded)?
         .title
-        .unwrap_or_else(|| "Loadstone Mod Manager".to_string()))
+        .unwrap_or_else(|| t!("page-default-title")))
 }
 
 pub fn ui_profile(embedded: &str) -> Result<UiProfile> {
@@ -790,7 +790,7 @@ pub fn ui_profile(embedded: &str) -> Result<UiProfile> {
         },
         title: p
             .title
-            .unwrap_or_else(|| "Loadstone Mod Manager".to_string()),
+            .unwrap_or_else(|| t!("page-default-title")),
         mod_id: p.mod_id.unwrap_or_default(),
         lock_registries: p.lock_registries,
         registries: p.registries,
@@ -817,23 +817,23 @@ pub fn installed_json(state_dir: &str) -> Result<String> {
 
 fn installed_status(state: &InstalledState) -> String {
     if state.channel == "stable" {
-        format!("Installed {}", state.version)
+        t!("page-catalog-installed", version = &state.version)
     } else {
-        format!("Installed {} ({} channel)", state.version, state.channel)
+        t!("page-catalog-installed-channel", version = &state.version, channel = &state.channel)
     }
 }
 
 /// Catalog status across every game copy a mod is installed in.
 fn aggregate_status(states: &[&InstalledState]) -> String {
     match states {
-        [] => "Not installed".to_string(),
+        [] => t!("page-catalog-not-installed"),
         [one] => installed_status(one),
         many => {
             let first = &many[0].version;
             if many.iter().all(|s| &s.version == first) {
-                format!("Installed {} for {} copies", first, many.len())
+                t!("page-catalog-installed-copies", version = first, count = many.len())
             } else {
-                format!("Installed for {} copies (versions differ)", many.len())
+                t!("page-catalog-installed-copies-differ", count = many.len())
             }
         }
     }
@@ -847,7 +847,7 @@ fn distribution_title(distribution: &str) -> String {
         "gog" => "GOG".to_string(),
         "gamepass" => "Game Pass".to_string(),
         "itch" => "itch.io".to_string(),
-        "standalone" => "Standalone".to_string(),
+        "standalone" => t!("page-distribution-standalone"),
         other => {
             let mut chars = other.chars();
             match chars.next() {
@@ -886,7 +886,7 @@ fn build_resolver(
 /// signing in might help, say so — the catalog still lists installed mods,
 /// and the GUI offers to sign in on top.
 fn registry_failed(e: &anyhow::Error, notes: &Rc<RefCell<Vec<String>>>, hint: &mut String) {
-    let text = format!("Could not load registries: {e:#}");
+    let text = t!("page-registries-failed", error = format!("{e:#}"));
     if loadstone_core::source::is_maybe_private(e) {
         *hint = text.clone();
     }
@@ -912,7 +912,7 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
     if profile.registries.is_empty() {
         notes
             .borrow_mut()
-            .push("No registries are configured; showing installed mods only.".to_string());
+            .push(t!("page-catalog-no-registries"));
     } else {
         let (mut fetcher, sources) = build_resolver(&profile.registries, notes.clone())?;
         match Resolver::from_sources(&sources, &mut fetcher) {
@@ -933,11 +933,7 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
                     });
                     let hidden = before - list.len();
                     if hidden > 0 {
-                        notes.borrow_mut().push(format!(
-                            "{hidden} mod{} not available for this computer {} hidden.",
-                            if hidden == 1 { "" } else { "s" },
-                            if hidden == 1 { "is" } else { "are" }
-                        ));
+                        notes.borrow_mut().push(t!("page-catalog-hidden-mods", count = hidden));
                     }
                     for m in &list {
                         if installed.iter().any(|s| s.id == m.manifest.id) {
@@ -975,7 +971,7 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
         entries.push(CatalogEntry {
             id: m.manifest.id.clone(),
             name: if m.testers {
-                format!("{} (tester preview)", m.manifest.name)
+                t!("page-catalog-tester-preview", name = &m.manifest.name)
             } else {
                 m.manifest.name.get().to_string()
             },
@@ -987,7 +983,7 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
                 .unwrap_or_default(),
             installed_version: installs.first().map(|s| s.version.clone()).unwrap_or_default(),
             status: if installs.is_empty() && foreign_ids.contains(&m.manifest.id) {
-                "Installed outside Loadstone".to_string()
+                t!("page-catalog-installed-outside")
             } else {
                 aggregate_status(&installs)
             },
@@ -1011,7 +1007,7 @@ fn fetch_catalog_inner(embedded: &str, state_dir: &str) -> Result<Catalog> {
         entries.push(CatalogEntry {
             id: state.id.clone(),
             name: state.id.clone(),
-            summary: "Installed, but not listed by the configured registries.".to_string(),
+            summary: t!("page-catalog-unlisted-summary"),
             game: state.game.clone(),
             installed_version: state.version.clone(),
             status: aggregate_status(&copies),
@@ -1135,27 +1131,31 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                 Err(e) => {
                     notes
                         .borrow_mut()
-                        .push(format!("Not found in the configured registries: {e:#}"));
+                        .push(t!("page-note-not-found", error = format!("{e:#}")));
                     resolve_err = Some(e);
                 }
             },
             Err(e) => {
-                notes.borrow_mut().push(format!("Could not load registries: {e:#}"));
+                notes.borrow_mut().push(t!("page-registries-failed", error = format!("{e:#}")));
                 resolve_err = Some(e);
             }
         }
     } else if records.is_empty() {
-        anyhow::bail!("\"{mod_id}\" is not installed and no registries are configured");
+        anyhow::bail!(t!("page-error-not-installed-no-registries", id = mod_id));
     }
     if resolved.is_none() && records.is_empty() {
         // Keep the underlying error in the chain: if it says the registry
         // may be private, the GUI offers to sign in and retry.
         return Err(match resolve_err {
             Some(e) => {
-                let msg = format!("\"{mod_id}\" is not installed and could not be resolved: {e:#}");
+                let msg = t!(
+                    "page-error-not-installed-unresolved-detail",
+                    id = mod_id,
+                    error = format!("{e:#}")
+                );
                 e.context(msg)
             }
-            None => anyhow::anyhow!("\"{mod_id}\" is not installed and could not be resolved"),
+            None => anyhow::anyhow!(t!("page-error-not-installed-unresolved", id = mod_id)),
         });
     }
 
@@ -1182,11 +1182,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                             loadstone_core::release::normalize_version(&release.version)
                                 .unwrap_or(release.version);
                     }
-                    Err(_) => notes.borrow_mut().push(
-                        "The latest published release has no Loadstone metadata yet, so the \
-                         newest version could not be determined."
-                            .to_string(),
-                    ),
+                    Err(_) => notes.borrow_mut().push(t!("page-note-no-release-metadata")),
                 }
             }
         }
@@ -1199,9 +1195,11 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
         .unwrap_or_default();
 
     // One CopyPage per known game copy, in the installers' familiar voice.
+    // `another_folder` builds the "Another folder..." slot.
     let build_copy = |state: Option<&InstalledState>,
                       distribution: String,
-                      game_dir: String|
+                      game_dir: String,
+                      another_folder: bool|
      -> CopyPage {
         let installed_version = state.map(|s| s.version.clone()).unwrap_or_default();
         // A mod that can't run here can't be installed here (SPEC 5.2).
@@ -1233,40 +1231,47 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                 _ => false,
             };
 
-        let mut status = match state {
-            Some(s) if s.channel == "dev" => {
-                format!("Installed {} (dev channel).", s.version)
-            }
+        // The "Another folder..." slot (`another_folder`) leads with how to
+        // fill it in; with no folder yet, the status says it wasn't found.
+        let status = match state {
+            Some(s) if s.channel == "dev" => t!("page-status-dev", version = &s.version),
             Some(s) if !latest_version.is_empty() && latest_version == s.version => {
-                format!("Up to date (version {}).", s.version)
+                t!("page-status-up-to-date", version = &s.version)
             }
             // Updates never move to an older version (SPEC 2.3): a beta
             // stays until a newer release than it comes out.
-            Some(s) if loadstone_core::release::is_older_version(&latest_version, &s.version) => format!(
-                "Up to date (version {}, newer than the latest release, {latest_version}).",
-                s.version
+            Some(s) if loadstone_core::release::is_older_version(&latest_version, &s.version) => t!(
+                "page-status-newer-than-latest",
+                version = &s.version,
+                latest = &latest_version
             ),
             Some(s) if !latest_version.is_empty() => {
-                format!("Update available: {} to {}.", s.version, latest_version)
+                t!("page-status-update-available", version = &s.version, latest = &latest_version)
             }
-            Some(s) => format!("Installed {}.", s.version),
-            None if foreign && !latest_version.is_empty() => format!(
-                "Installed outside Loadstone (version unknown). Install version \
-                 {latest_version} to let Loadstone manage this copy."
-            ),
-            None if foreign => "Installed outside Loadstone (version unknown). Install to \
-                                let Loadstone manage this copy."
-                .to_string(),
-            None if !latest_version.is_empty() => {
-                format!("Ready to install version {latest_version}.")
-            }
-            None => "Not installed.".to_string(),
+            Some(s) => t!("page-status-installed", version = &s.version),
+            None => match &unsupported {
+                Some(why) if another_folder => {
+                    t!("page-status-another-folder-unavailable", reason = why)
+                }
+                Some(why) => t!("page-status-unavailable", reason = why),
+                None if game_dir.is_empty() => match (another_folder, latest_version.is_empty()) {
+                    (true, false) => {
+                        t!("page-status-another-folder-ready", latest = &latest_version)
+                    }
+                    (true, true) => t!("page-status-another-folder-not-installed"),
+                    (false, false) => t!("page-status-ready-no-folder", latest = &latest_version),
+                    (false, true) => t!("page-status-not-installed-no-folder"),
+                },
+                None if foreign && !latest_version.is_empty() => {
+                    t!("page-status-foreign-latest", latest = &latest_version)
+                }
+                None if foreign => t!("page-status-foreign"),
+                None if !latest_version.is_empty() => {
+                    t!("page-status-ready", latest = &latest_version)
+                }
+                None => t!("page-status-not-installed"),
+            },
         };
-        if let (Some(why), None) = (&unsupported, state) {
-            status = format!("Not available on this computer. {why}");
-        } else if game_dir.is_empty() && state.is_none() {
-            status.push_str(" Game directory not found; use Browse to select it.");
-        }
 
         // Settings: the schema frozen in state when installed (editable),
         // else the manifest's defaults as a preview.
@@ -1283,7 +1288,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
         } else if let Some(r) = &resolved {
             if let Some(schema) = &r.manifest.settings {
                 settings = setting_items(schema, &serde_json::Map::new());
-                settings_note = "Settings become editable after install.".to_string();
+                settings_note = t!("page-settings-after-install");
             }
         }
 
@@ -1296,13 +1301,6 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
         };
 
         // The list line: which copy, its state, where it lives.
-        let short = if !installed_version.is_empty() {
-            format!("installed {installed_version}")
-        } else if foreign {
-            "installed outside Loadstone".to_string()
-        } else {
-            "not installed".to_string()
-        };
         // A game that also ships as a second Steam app (a demo) names it:
         // "Steam demo copy".
         let mut dist_title = distribution_title(&distribution);
@@ -1312,15 +1310,32 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                 .and_then(|g| loadstone_core::detect::steam_entry_for_dir(g, std::path::Path::new(&game_dir)))
                 .and_then(|e| e.name)
             {
-                dist_title = format!("{dist_title} {name}");
+                dist_title = t!("page-distribution-app", distribution = dist_title, app = name);
             }
         }
-        let label = if game_dir.is_empty() {
-            "No copy found yet; use Browse to select the game folder.".to_string()
+        let label = if another_folder {
+            t!("page-copy-another-folder")
+        } else if game_dir.is_empty() {
+            t!("page-copy-none-found")
         } else if dist_title.is_empty() {
-            format!("Copy at {game_dir}, {short}")
+            if !installed_version.is_empty() {
+                t!("page-copy-at-installed", folder = &game_dir, version = &installed_version)
+            } else if foreign {
+                t!("page-copy-at-foreign", folder = &game_dir)
+            } else {
+                t!("page-copy-at-not-installed", folder = &game_dir)
+            }
+        } else if !installed_version.is_empty() {
+            t!(
+                "page-copy-installed",
+                distribution = &dist_title,
+                version = &installed_version,
+                folder = &game_dir
+            )
+        } else if foreign {
+            t!("page-copy-foreign", distribution = &dist_title, folder = &game_dir)
         } else {
-            format!("{dist_title} copy, {short}, {game_dir}")
+            t!("page-copy-not-installed", distribution = &dist_title, folder = &game_dir)
         };
 
         CopyPage {
@@ -1353,6 +1368,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
             Some(s),
             s.distribution.clone(),
             s.game_dir.display().to_string(),
+            false,
         ));
     }
     if let Some(g) = &game_manifest {
@@ -1366,6 +1382,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
                 None,
                 found.distribution,
                 found.game_dir.display().to_string(),
+                false,
             ));
         }
     }
@@ -1374,12 +1391,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
     // a copy detection missed (a demo switched for the full game, another
     // library) even once some copy is installed.
     let any_found = !copies.is_empty();
-    let mut slot = build_copy(None, String::new(), String::new());
-    if any_found {
-        slot.label = "Another folder...".to_string();
-        slot.status = format!("Use Browse to select the folder. {}", slot.status);
-    }
-    copies.push(slot);
+    copies.push(build_copy(None, String::new(), String::new(), any_found));
     let selected_copy = copies
         .iter()
         .position(|c| !c.installed_version.is_empty())
@@ -1391,12 +1403,7 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
     if copies.len() > 1 {
         if let Some(g) = &game_manifest {
             if g.paths.values().any(|p| p.contains("${userData}")) {
-                notes.borrow_mut().push(format!(
-                    "Note: copies of {} share one mods folder. Installing or \
-                     uninstalling a mod for one copy affects the others; only the \
-                     mod loader is separate per copy.",
-                    g.name
-                ));
+                notes.borrow_mut().push(t!("page-note-shared-mods-folder", game = &g.name));
             }
         }
     }
@@ -1427,11 +1434,8 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
             .iter()
             .find(|d| d.id == *id && (page_game.is_empty() || d.game == page_game));
         notes.borrow_mut().push(match dep_state {
-            Some(d) => format!(
-                "Requires {dep_name} (installed automatically, currently {}).",
-                d.version
-            ),
-            None => format!("Requires {dep_name} (installed automatically)."),
+            Some(d) => t!("page-note-requires-installed", name = dep_name, version = &d.version),
+            None => t!("page-note-requires", name = dep_name),
         });
     }
 
@@ -1442,10 +1446,8 @@ fn fetch_mod_page_inner(embedded: &str, state_dir: &str, mod_id: &str) -> Result
         for (cid, decl) in &r.manifest.channels {
             if decl.source == loadstone_core::types::ChannelSource::Branch {
                 let label = match &decl.branch {
-                    Some(branch) => {
-                        format!("{cid} channel (latest from the {branch} branch)")
-                    }
-                    None => format!("{cid} channel (development build)"),
+                    Some(branch) => t!("page-channel-branch", channel = cid, branch = branch),
+                    None => t!("page-channel-development", channel = cid),
                 };
                 channels.push(ChannelEntry { id: cid.clone(), label });
             }

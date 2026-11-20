@@ -285,9 +285,10 @@ public:
     std::uint8_t retry_skip_cancel(rust::Str message) override {
         wxString text = FromRust(message);
         return Ask<std::uint8_t>(2, [text](LoadstoneFrame* f) -> std::uint8_t {
-            wxMessageDialog dlg(f, text, "Problem during the operation",
+            wxMessageDialog dlg(f, text, T("gui-problem-title"),
                                 wxYES_NO | wxCANCEL | wxICON_WARNING);
-            dlg.SetYesNoCancelLabels("&Retry", "&Skip", "&Cancel");
+            dlg.SetYesNoCancelLabels(T("gui-button-retry"), T("gui-button-skip"),
+                                     T("gui-button-cancel-problem"));
             switch (dlg.ShowModal()) {
                 case wxID_YES: return 0; // retry
                 case wxID_NO: return 1;  // skip
@@ -317,7 +318,7 @@ public:
         return Ask<std::int32_t>(-1, [text, items, preselect](LoadstoneFrame* f) -> std::int32_t {
             // A plain list of choices: arrow keys move, Enter picks, and a
             // screen reader reads the prompt then the selected choice.
-            wxSingleChoiceDialog dlg(f, text, "Install options", items);
+            wxSingleChoiceDialog dlg(f, text, T("gui-install-options-title"), items);
             if (preselect >= 0 && preselect < static_cast<int>(items.size()))
                 dlg.SetSelection(preselect);
             if (dlg.ShowModal() != wxID_OK) return -1;
@@ -374,20 +375,19 @@ LoadstoneFrame::LoadstoneFrame(loadstone::UiProfile profile, wxString coreVersio
     // loaded (a standalone installer whose mod lives in a private
     // repository shows nothing until the user signs in).
     auto* tools = new wxMenu;
-    tools->Append(wxID_PREFERENCES, "&Loadstone settings...\tCtrl+,",
-                  "Accounts for private repositories, and Loadstone options");
+    tools->Append(wxID_PREFERENCES, T("gui-menu-loadstone-settings") + "\tCtrl+,",
+                  T("gui-menu-loadstone-settings-help"));
     tools->AppendSeparator();
-    tools->Append(wxID_EXIT, "E&xit");
+    tools->Append(wxID_EXIT, T("gui-menu-exit"));
     auto* menuBar = new wxMenuBar;
-    menuBar->Append(tools, "&Tools");
+    menuBar->Append(tools, T("gui-menu-tools"));
     SetMenuBar(menuBar);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { ShowLoadstoneSettings(); }, wxID_PREFERENCES);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, wxID_EXIT);
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& ev) {
         if (opInFlight_ && ev.CanVeto()) {
-            if (wxMessageBox("An operation is still running. Closing now may leave "
-                             "it unfinished. Close anyway?",
-                             "Operation in progress", wxYES_NO | wxICON_WARNING,
+            if (wxMessageBox(T("gui-close-while-running"),
+                             T("gui-close-while-running-title"), wxYES_NO | wxICON_WARNING,
                              this) != wxYES) {
                 ev.Veto();
                 return;
@@ -403,7 +403,7 @@ LoadstoneFrame::LoadstoneFrame(loadstone::UiProfile profile, wxString coreVersio
 
     if (singleMod_) {
         // The standalone-installer shape: straight to the one mod's page.
-        SetStatusText("Loading...");
+        SetStatusText(T("gui-status-loading"));
         OpenMod(FromRust(profile_.mod_id));
     } else {
         BuildCatalogPanel();
@@ -420,10 +420,10 @@ void LoadstoneFrame::BuildCatalogPanel() {
 
     auto* heading = new wxStaticText(
         catalogPanel_, wxID_ANY,
-        wxString::Format("%s (core %s)", FromRust(profile_.title), coreVersion_));
+        T("gui-catalog-heading", {{"title", profile_.title}, {"version", coreVersion_}}));
     sizer->Add(heading, 0, wxALL, 8);
 
-    auto* listLabel = new wxStaticText(catalogPanel_, wxID_ANY, "&Mods:");
+    auto* listLabel = new wxStaticText(catalogPanel_, wxID_ANY, T("gui-catalog-mods-label"));
     sizer->Add(listLabel, 0, wxLEFT | wxRIGHT, 8);
 
     modList_ = new wxListBox(catalogPanel_, wxID_ANY);
@@ -434,15 +434,15 @@ void LoadstoneFrame::BuildCatalogPanel() {
     });
 
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
-    detailsBtn_ = new wxButton(catalogPanel_, wxID_ANY, "&Details");
+    detailsBtn_ = new wxButton(catalogPanel_, wxID_ANY, T("gui-button-details"));
     detailsBtn_->SetDefault(); // Enter in the list opens the selected mod
     detailsBtn_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         if (modList_->GetSelection() != wxNOT_FOUND)
             OpenMod(entryIds_[modList_->GetSelection()]);
     });
-    refreshBtn_ = new wxButton(catalogPanel_, wxID_ANY, "&Refresh");
+    refreshBtn_ = new wxButton(catalogPanel_, wxID_ANY, T("gui-button-refresh"));
     refreshBtn_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { StartCatalogFetch(); });
-    auto* loadstoneBtn = new wxButton(catalogPanel_, wxID_ANY, "Loadstone settin&gs...");
+    auto* loadstoneBtn = new wxButton(catalogPanel_, wxID_ANY, T("gui-button-loadstone-settings"));
     loadstoneBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowLoadstoneSettings(); });
     buttons->Add(detailsBtn_, 0, wxRIGHT, 8);
     buttons->Add(refreshBtn_, 0, wxRIGHT, 8);
@@ -458,13 +458,13 @@ void LoadstoneFrame::BuildCatalogPanel() {
 void LoadstoneFrame::StartCatalogFetch() {
     if (fetchInFlight_) return;
     fetchInFlight_ = true;
-    SetStatusText("Fetching the mod catalog...");
+    SetStatusText(T("gui-status-fetching-catalog"));
     detailsBtn_->Enable(false);
     refreshBtn_->Enable(false);
     // Placeholder so the list never reads as empty while the fetch runs.
     modList_->Clear();
     entryIds_.clear();
-    modList_->Append("Loading mod list...");
+    modList_->Append(T("gui-catalog-loading"));
 
     auto alive = alive_;
     std::thread([alive, this] {
@@ -482,14 +482,14 @@ void LoadstoneFrame::StartCatalogFetch() {
                 fetchInFlight_ = false;
                 refreshBtn_->Enable(true);
                 modList_->Clear();
-                modList_->Append("Could not load the mod list. Press Refresh to retry.");
-                SetStatusText("Catalog fetch failed.");
+                modList_->Append(T("gui-catalog-load-failed"));
+                SetStatusText(T("gui-status-catalog-failed"));
                 wxString text = wxString::FromUTF8(msg.c_str());
                 if (needsSignIn) {
                     if (OfferSignIn(text)) StartCatalogFetch();
                     return;
                 }
-                wxMessageBox(text, "Could not load the mod catalog", wxOK | wxICON_ERROR, this);
+                wxMessageBox(text, T("gui-catalog-error-title"), wxOK | wxICON_ERROR, this);
             });
         }
     }).detach();
@@ -503,10 +503,12 @@ void LoadstoneFrame::OnCatalog(const loadstone::Catalog& catalog) {
     entryIds_.clear();
     for (const auto& e : catalog.entries) {
         entryIds_.push_back(FromRust(e.id));
-        wxString line =
-            wxString::Format("%s, %s", FromRust(e.name), FromRust(e.status));
         wxString summary = FromRust(e.summary);
-        if (!summary.empty()) line += ", " + summary;
+        wxString line =
+            summary.empty()
+                ? T("gui-catalog-entry", {{"name", e.name}, {"status", e.status}})
+                : T("gui-catalog-entry-with-summary",
+                    {{"name", e.name}, {"status", e.status}, {"summary", summary}});
         modList_->Append(line);
     }
     bool any = !entryIds_.empty();
@@ -514,7 +516,7 @@ void LoadstoneFrame::OnCatalog(const loadstone::Catalog& catalog) {
     if (any) {
         modList_->SetSelection(0);
     } else {
-        modList_->Append("No mods available.");
+        modList_->Append(T("gui-catalog-empty"));
     }
 
     wxString notes;
@@ -526,7 +528,7 @@ void LoadstoneFrame::OnCatalog(const loadstone::Catalog& catalog) {
     catalogNotes_->Wrap(GetClientSize().GetWidth() - 32);
     catalogPanel_->Layout();
 
-    SetStatusText(wxString::Format("Catalog loaded: %zu mods.", entryIds_.size()));
+    SetStatusText(T("gui-status-catalog-loaded", {{"count", entryIds_.size()}}));
     // Only steal focus when the catalog view is what's showing.
     if (!pagePanel_) modList_->SetFocus();
 
@@ -542,7 +544,7 @@ void LoadstoneFrame::OnCatalog(const loadstone::Catalog& catalog) {
 void LoadstoneFrame::OpenMod(const wxString& id) {
     if (fetchInFlight_ || opInFlight_) return;
     fetchInFlight_ = true;
-    SetStatusText(wxString::Format("Loading %s...", id));
+    SetStatusText(T("gui-status-loading-mod", {{"mod_id", id}}));
 
     auto alive = alive_;
     std::string modId = ToStd(id);
@@ -560,13 +562,13 @@ void LoadstoneFrame::OpenMod(const wxString& id) {
             wxTheApp->CallAfter([alive, this, msg, needsSignIn, retryId] {
                 if (!alive->load()) return;
                 fetchInFlight_ = false;
-                SetStatusText("Could not load the mod page.");
+                SetStatusText(T("gui-status-mod-load-failed"));
                 wxString text = wxString::FromUTF8(msg.c_str());
                 if (needsSignIn) {
                     if (OfferSignIn(text)) OpenMod(retryId);
                     return;
                 }
-                wxMessageBox(text, "Could not load mod", wxOK | wxICON_ERROR, this);
+                wxMessageBox(text, T("gui-mod-error-title"), wxOK | wxICON_ERROR, this);
             });
         }
     }).detach();
@@ -646,8 +648,8 @@ void LoadstoneFrame::BuildModPage() {
         wxString gameName = FromRust(page.game_name);
         wxString listLabel =
             gameName.empty()
-                ? wxString("&Copy of the game to manage:")
-                : wxString::Format("&Copy of %s to manage:", gameName);
+                ? T("gui-copies-label")
+                : T("gui-copies-label-named", {{"game", gameName}});
         sizer->Add(new wxStaticText(pagePanel_, wxID_ANY, listLabel), 0,
                    wxLEFT | wxRIGHT | wxTOP, 8);
         copiesList_ = new wxListBox(pagePanel_, wxID_ANY);
@@ -688,15 +690,16 @@ void LoadstoneFrame::BuildDetail() {
     auto* sizer = new wxBoxSizer(wxVERTICAL);
 
     if (!singleMod_) {
-        auto* back = new wxButton(detailPanel_, wxID_ANY, "&Back to mod list");
+        auto* back = new wxButton(detailPanel_, wxID_ANY, T("gui-button-back"));
         back->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { GoBack(); });
         pageControls_.push_back(back);
         sizer->Add(back, 0, wxALL, 8);
     }
 
-    wxString headingText = FromRust(page.name);
     wxString authors = FromRust(page.authors);
-    if (!authors.empty()) headingText += " by " + authors;
+    wxString headingText =
+        authors.empty() ? FromRust(page.name)
+                        : T("gui-mod-heading-by", {{"name", page.name}, {"authors", authors}});
     auto* heading = new wxStaticText(detailPanel_, wxID_ANY, headingText);
     heading->SetFont(heading->GetFont().MakeBold().Scaled(1.2f));
     sizer->Add(heading, 0, wxALL, 8);
@@ -709,8 +712,8 @@ void LoadstoneFrame::BuildDetail() {
     // before installing.
     wxString gameName = FromRust(page.game_name);
     wxString dirLabelText =
-        gameName.empty() ? wxString("&Game directory:")
-                         : wxString::Format("&%s directory:", gameName);
+        gameName.empty() ? T("gui-game-dir-label")
+                         : T("gui-game-dir-label-named", {{"game", gameName}});
     auto* dirRow = new wxBoxSizer(wxHORIZONTAL);
     dirRow->Add(new wxStaticText(detailPanel_, wxID_ANY, dirLabelText), 0,
                 wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
@@ -718,12 +721,12 @@ void LoadstoneFrame::BuildDetail() {
     // Installed: the folder is fixed in state; show it read-only.
     gameDirCtrl_->Enable(!copy.can_uninstall);
     dirRow->Add(gameDirCtrl_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-    auto* browse = new wxButton(detailPanel_, wxID_ANY, "Bro&wse...");
+    auto* browse = new wxButton(detailPanel_, wxID_ANY, T("gui-button-browse"));
     browse->Enable(!copy.can_uninstall);
     browse->Bind(wxEVT_BUTTON, [this, gameName](wxCommandEvent&) {
         wxString prompt = gameName.empty()
-                              ? wxString("Select the game folder")
-                              : wxString::Format("Select the %s folder", gameName);
+                              ? T("gui-browse-game-prompt")
+                              : T("gui-browse-game-prompt-named", {{"game", gameName}});
         wxDirDialog dlg(this, prompt, gameDirCtrl_->GetValue(),
                         wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (dlg.ShowModal() == wxID_OK) gameDirCtrl_->SetValue(dlg.GetPath());
@@ -737,7 +740,7 @@ void LoadstoneFrame::BuildDetail() {
 
     wxString description = FromRust(page.description);
     if (!description.empty()) {
-        auto* descLabel = new wxStaticText(detailPanel_, wxID_ANY, "Description:");
+        auto* descLabel = new wxStaticText(detailPanel_, wxID_ANY, T("gui-description-label"));
         sizer->Add(descLabel, 0, wxLEFT | wxRIGHT, 8);
         auto* desc = new wxTextCtrl(detailPanel_, wxID_ANY, description,
                                     wxDefaultPosition, wxSize(-1, 70),
@@ -753,7 +756,7 @@ void LoadstoneFrame::BuildDetail() {
 
     // Activity log, always present so operations narrate into a familiar
     // place (and screen-reader users can review it afterwards).
-    sizer->Add(new wxStaticText(detailPanel_, wxID_ANY, "Activity:"), 0,
+    sizer->Add(new wxStaticText(detailPanel_, wxID_ANY, T("gui-activity-label")), 0,
                wxLEFT | wxRIGHT, 8);
     opLog_ = new wxTextCtrl(detailPanel_, wxID_ANY, "", wxDefaultPosition,
                             wxSize(-1, 130), wxTE_MULTILINE | wxTE_READONLY);
@@ -763,7 +766,7 @@ void LoadstoneFrame::BuildDetail() {
     // Install or Update per state, Uninstall, then the mod's actions.
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
     auto* primary = new wxButton(detailPanel_, wxID_ANY,
-                                 copy.can_update ? "&Update" : "&Install");
+                                 copy.can_update ? T("gui-button-update") : T("gui-button-install"));
     primary->Enable(copy.can_install || copy.can_update);
     OpKind primaryKind = copy.can_update ? OpKind::Update : OpKind::Install;
     // "Another folder...": an empty folder would fall back to detection
@@ -771,7 +774,7 @@ void LoadstoneFrame::BuildDetail() {
     bool folderSlot = copy.game_dir.empty() && page.copies.size() > 1;
     auto folderMissing = [this, folderSlot] {
         if (!folderSlot || !gameDirCtrl_->GetValue().Trim().Trim(false).empty()) return false;
-        wxMessageBox("Use Browse to select the game folder first.", "Loadstone",
+        wxMessageBox(T("gui-select-folder-first"), "Loadstone",
                      wxOK | wxICON_INFORMATION, this);
         gameDirCtrl_->SetFocus();
         return true;
@@ -785,14 +788,13 @@ void LoadstoneFrame::BuildDetail() {
 
     // Offline path: install from a loadstone-release.json on disk (its
     // artifact paths resolve relative to that file).
-    auto* fromFile = new wxButton(detailPanel_, wxID_ANY, "Install from &file...");
+    auto* fromFile = new wxButton(detailPanel_, wxID_ANY, T("gui-button-install-from-file"));
     fromFile->Enable(copy.can_install || copy.can_update);
     fromFile->Bind(wxEVT_BUTTON, [this, folderMissing](wxCommandEvent&) {
         if (opInFlight_ || fetchInFlight_) return;
         if (folderMissing()) return;
-        wxFileDialog dlg(this, "Select the mod's loadstone-release.json", "", "",
-                         "loadstone-release.json|loadstone-release.json|"
-                         "JSON files (*.json)|*.json|All files (*.*)|*.*",
+        wxFileDialog dlg(this, T("gui-release-file-prompt"), "", "",
+                         T("gui-release-file-wildcard"),
                          wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dlg.ShowModal() != wxID_OK) return;
         RunOperation(OpKind::Install, wxString(), wxString(), dlg.GetPath());
@@ -800,7 +802,7 @@ void LoadstoneFrame::BuildDetail() {
     if (fromFile->IsEnabled()) pageControls_.push_back(fromFile);
     buttons->Add(fromFile, 0, wxRIGHT, 8);
 
-    auto* uninstall = new wxButton(detailPanel_, wxID_ANY, "U&ninstall");
+    auto* uninstall = new wxButton(detailPanel_, wxID_ANY, T("gui-button-uninstall"));
     uninstall->Enable(copy.can_uninstall);
     uninstall->Bind(wxEVT_BUTTON,
                     [this](wxCommandEvent&) { RunOperation(OpKind::Uninstall); });
@@ -809,21 +811,19 @@ void LoadstoneFrame::BuildDetail() {
 
     // Launch: the point of the whole exercise. Install or update, then
     // start the game with the mod loaded, from one window.
-    auto* launch = new wxButton(detailPanel_, wxID_ANY, "&Launch game");
+    auto* launch = new wxButton(detailPanel_, wxID_ANY, T("gui-button-launch"));
     launch->Enable(copy.can_launch);
     AttachDescription(launch, copy.can_launch
-                                  ? "Starts the game with the mod loaded."
-                                  : "Available once the mod is installed here.");
+                                  ? T("gui-launch-description")
+                                  : T("gui-launch-unavailable-description"));
     launch->Bind(wxEVT_BUTTON,
                  [this](wxCommandEvent&) { RunOperation(OpKind::Launch); });
     if (copy.can_launch) pageControls_.push_back(launch);
     buttons->Add(launch, 0, wxRIGHT, 8);
 
     if (copy.can_change_options) {
-        auto* change = new wxButton(detailPanel_, wxID_ANY, "Change install &options...");
-        AttachDescription(change,
-                          "Asks the mod's install questions again and reinstalls "
-                          "the latest version with your answers.");
+        auto* change = new wxButton(detailPanel_, wxID_ANY, T("gui-button-change-options"));
+        AttachDescription(change, T("gui-change-options-description"));
         change->Bind(wxEVT_BUTTON,
                      [this](wxCommandEvent&) { RunOperation(OpKind::ChangeOptions); });
         pageControls_.push_back(change);
@@ -846,7 +846,7 @@ void LoadstoneFrame::BuildDetail() {
     // controls, keeping the page itself short. Always present: besides
     // the mod's own options it holds Loadstone's settings for this mod
     // (its download account), which apply before install too.
-    auto* settingsBtn = new wxButton(detailPanel_, wxID_ANY, "&Settings...");
+    auto* settingsBtn = new wxButton(detailPanel_, wxID_ANY, T("gui-button-settings"));
     settingsBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowSettingsDialog(); });
     pageControls_.push_back(settingsBtn);
     buttons->Add(settingsBtn, 0, wxRIGHT, 8);
@@ -854,7 +854,7 @@ void LoadstoneFrame::BuildDetail() {
     // A standalone installer has no mod list to host this; the Tools menu
     // has it too.
     if (singleMod_) {
-        auto* loadstoneBtn = new wxButton(detailPanel_, wxID_ANY, "Loadstone settin&gs...");
+        auto* loadstoneBtn = new wxButton(detailPanel_, wxID_ANY, T("gui-button-loadstone-settings"));
         loadstoneBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowLoadstoneSettings(); });
         pageControls_.push_back(loadstoneBtn);
         buttons->Add(loadstoneBtn, 0, wxRIGHT, 8);
@@ -875,7 +875,7 @@ void LoadstoneFrame::AppendOpLog(const wxString& line) {
 }
 
 void LoadstoneFrame::SetOpProgress(unsigned percent) {
-    SetStatusText(wxString::Format("Working... %u%%", percent));
+    SetStatusText(T("gui-status-working-percent", {{"percent", percent}}));
 }
 
 // Before installing or updating, offer the list of the repo's releases so
@@ -887,7 +887,7 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
     if (opInFlight_ || fetchInFlight_) return;
     fetchInFlight_ = true;
     DisablePageControlsKeepFocus();
-    SetStatusText("Fetching the release list...");
+    SetStatusText(T("gui-status-fetching-releases"));
 
     auto alive = alive_;
     std::string modId = ToStd(pageModId_);
@@ -912,11 +912,10 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
                 return;
             }
             if (!error.empty()) {
-                wxString msg = wxString::Format(
-                    "Could not fetch the release list: %s\n\n"
-                    "Install the latest release instead?",
-                    wxString::FromUTF8(error.c_str()));
-                if (wxMessageBox(msg, "Release list unavailable",
+                wxString msg =
+                    T("gui-release-list-error", {{"error", wxString::FromUTF8(error.c_str())}}) +
+                    "\n\n" + T("gui-release-list-install-latest");
+                if (wxMessageBox(msg, T("gui-release-list-error-title"),
                                  wxYES_NO | wxICON_QUESTION, this) == wxYES)
                     RunOperation(kind);
                 return;
@@ -931,8 +930,8 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
                     labels.Add(FromRust(c.label));
             }
             if (labels.IsEmpty()) {
-                wxMessageBox("This mod's repository has no releases yet.",
-                             "No releases", wxOK | wxICON_INFORMATION, this);
+                wxMessageBox(T("gui-no-releases"),
+                             T("gui-no-releases-title"), wxOK | wxICON_INFORMATION, this);
                 return;
             }
             // Default to the newest stable release, like "latest" would.
@@ -944,7 +943,7 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
                 }
             }
             wxSingleChoiceDialog dlg(
-                this, "Select the version to install:", "Choose version", labels);
+                this, T("gui-choose-version"), T("gui-choose-version-title"), labels);
             dlg.SetSelection(defaultIdx);
             if (dlg.ShowModal() != wxID_OK) return;
             int sel = dlg.GetSelection();
@@ -970,8 +969,8 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
         wxString name = pageModel_ && !std::string(pageModel_->name).empty()
                             ? FromRust(pageModel_->name)
                             : pageModId_;
-        if (wxMessageBox(wxString::Format("Uninstall %s?", name),
-                         "Confirm uninstall", wxYES_NO | wxICON_QUESTION,
+        if (wxMessageBox(T("gui-confirm-uninstall", {{"name", name}}),
+                         T("gui-confirm-uninstall-title"), wxYES_NO | wxICON_QUESTION,
                          this) != wxYES)
             return;
     }
@@ -979,7 +978,7 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
     lastOpKind_ = kind;
     DisablePageControlsKeepFocus();
     if (opLog_) opLog_->Clear();
-    SetStatusText("Working...");
+    SetStatusText(T("gui-status-working"));
 
     auto alive = alive_;
     auto cb = std::make_shared<GuiUiCallbacks>(alive_, this);
@@ -1076,14 +1075,15 @@ void LoadstoneFrame::StartSelfUpdateCheck() {
 void LoadstoneFrame::OfferSelfUpdate(const loadstone::SelfUpdate& update) {
     // Never interrupt running work; the next launch will offer again.
     if (opInFlight_ || fetchInFlight_) return;
-    wxString msg = wxString::Format(
-        "Version %s of %s is available (you have %s). Update and restart now?",
-        FromRust(update.version), FromRust(profile_.title), coreVersion_);
-    if (wxMessageBox(msg, "Update available", wxYES_NO | wxICON_QUESTION, this) != wxYES)
+    wxString msg = T("gui-self-update-offer", {{"version", update.version},
+                                               {"app", profile_.title},
+                                               {"current", coreVersion_}});
+    if (wxMessageBox(msg, T("gui-self-update-title"), wxYES_NO | wxICON_QUESTION, this) !=
+        wxYES)
         return;
 
     opInFlight_ = true;
-    SetStatusText("Downloading the update...");
+    SetStatusText(T("gui-status-downloading-update"));
     auto alive = alive_;
     auto cb = std::make_shared<GuiUiCallbacks>(alive_, this);
     loadstone::SelfUpdate chosen = update;
@@ -1098,14 +1098,14 @@ void LoadstoneFrame::OfferSelfUpdate(const loadstone::SelfUpdate& update) {
             if (!alive->load()) return;
             opInFlight_ = false;
             if (!error.empty()) {
-                SetStatusText("The update failed.");
-                wxMessageBox(wxString::FromUTF8(error.c_str()), "Update failed",
+                SetStatusText(T("gui-status-update-failed"));
+                wxMessageBox(wxString::FromUTF8(error.c_str()), T("gui-update-failed-title"),
                              wxOK | wxICON_ERROR, this);
                 return;
             }
-            SetStatusText("Update installed.");
-            wxMessageBox("The update is installed. The app will now restart.",
-                         "Update installed", wxOK | wxICON_INFORMATION, this);
+            SetStatusText(T("gui-status-update-installed"));
+            wxMessageBox(T("gui-update-installed"),
+                         T("gui-update-installed-title"), wxOK | wxICON_INFORMATION, this);
 #ifdef __WXOSX__
             // The update replaced the whole .app bundle; LaunchServices
             // starts a new instance of it (-n) while this one quits.
@@ -1123,7 +1123,7 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
                               bool needsSignIn) {
     opInFlight_ = false;
     if (!error.empty()) {
-        SetStatusText("The operation failed.");
+        SetStatusText(T("gui-status-op-failed"));
         AppendOpLog(wxString::FromUTF8(error.c_str()));
         // A private-repository failure offers sign-in instead of a bare
         // error; either way the page reloads below and the user starts the
@@ -1133,10 +1133,10 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
         else if (lastOpKind_ == OpKind::Launch)
             // Usually a launch precondition (say, the store client isn't
             // running): something for the user to do, not a fault.
-            wxMessageBox(wxString::FromUTF8(error.c_str()), "Can't launch",
+            wxMessageBox(wxString::FromUTF8(error.c_str()), T("gui-launch-failed-title"),
                          wxOK | wxICON_WARNING, this);
         else
-            wxMessageBox(wxString::FromUTF8(error.c_str()), "Operation failed",
+            wxMessageBox(wxString::FromUTF8(error.c_str()), T("gui-op-failed-title"),
                          wxOK | wxICON_ERROR, this);
     } else if (lastOpKind_ == OpKind::Launch) {
         // The game is starting and about to take focus; a modal "Done" box
@@ -1145,7 +1145,7 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
         AppendOpLog(wxString::FromUTF8(result.c_str()));
     } else {
         SetStatusText(wxString::FromUTF8(result.c_str()));
-        wxMessageBox(wxString::FromUTF8(result.c_str()), "Done",
+        wxMessageBox(wxString::FromUTF8(result.c_str()), T("gui-op-done-title"),
                      wxOK | wxICON_INFORMATION, this);
     }
     // Reload the page so status, buttons, and settings reflect reality.
@@ -1169,12 +1169,12 @@ void LoadstoneFrame::ShowSettingsDialog() {
         auto items = loadstone::mod_prefs(kEmbeddedProfile, ToStd(pageModId_));
         loadstoneItems.assign(items.begin(), items.end());
     } catch (const std::exception& e) {
-        SetStatusText(wxString::Format("Loadstone settings unavailable: %s",
-                                       wxString::FromUTF8(e.what())));
+        SetStatusText(T("gui-status-loadstone-settings-unavailable",
+                        {{"error", wxString::FromUTF8(e.what())}}));
     }
 
     wxDialog dlg(this, wxID_ANY,
-                 wxString::Format("%s Settings", FromRust(pageModel_->name)),
+                 T("gui-mod-settings-title", {{"name", pageModel_->name}}),
                  wxDefaultPosition, wxDefaultSize,
                  wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
     auto* sizer = new wxBoxSizer(wxVERTICAL);
@@ -1208,7 +1208,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
             into->Add(row.check, 0, wxALL, 6);
         } else if (kind == "choice") {
             auto* rowSizer = new wxBoxSizer(wxHORIZONTAL);
-            rowSizer->Add(new wxStaticText(parent, wxID_ANY, label + ":"), 0,
+            rowSizer->Add(new wxStaticText(parent, wxID_ANY, T("gui-setting-label", {{"label", label}})), 0,
                           wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
             row.choice = new wxChoice(parent, wxID_ANY);
             int selected = 0;
@@ -1224,7 +1224,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
             into->Add(rowSizer, 0, wxALL, 6);
         } else { // string / number
             auto* rowSizer = new wxBoxSizer(wxHORIZONTAL);
-            rowSizer->Add(new wxStaticText(parent, wxID_ANY, label + ":"), 0,
+            rowSizer->Add(new wxStaticText(parent, wxID_ANY, T("gui-setting-label", {{"label", label}})), 0,
                           wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
             row.text = new wxTextCtrl(parent, wxID_ANY, row.original,
                                       wxDefaultPosition, wxSize(220, -1));
@@ -1237,7 +1237,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
 
     // Section 1: the mod's own declared options.
     if (!copy.settings.empty()) {
-        auto* box = new wxStaticBoxSizer(wxVERTICAL, &dlg, "Mod options");
+        auto* box = new wxStaticBoxSizer(wxVERTICAL, &dlg, T("gui-mod-options-group"));
         wxWindow* parent = box->GetStaticBox();
         if (copy.settings_editable) {
             for (const auto& s : copy.settings) addRow(parent, box, s, false);
@@ -1249,7 +1249,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
             }
         } else {
             box->Add(new wxStaticText(parent, wxID_ANY,
-                                      "The mod's options become available after it is installed."),
+                                      T("gui-mod-options-after-install")),
                      0, wxALL, 6);
         }
         sizer->Add(box, 0, wxEXPAND | wxALL, 8);
@@ -1288,9 +1288,9 @@ void LoadstoneFrame::ShowSettingsDialog() {
                 loadstone::set_mod_pref(kEmbeddedProfile, ToStd(pageModId_), ToStd(row.id),
                                         ToStd(value));
                 ++applied;
-                SetStatusText("Setting saved.");
+                SetStatusText(T("gui-status-setting-saved"));
             } catch (const std::exception& e) {
-                wxMessageBox(wxString::FromUTF8(e.what()), "Setting not changed",
+                wxMessageBox(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
                              wxOK | wxICON_ERROR, this);
             }
             continue;
@@ -1303,7 +1303,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
                 if (FromRust(s.id) == row.id) s.value = rust::String(ToStd(value));
         }
     }
-    if (applied == 0) SetStatusText("No settings changed.");
+    if (applied == 0) SetStatusText(T("gui-status-no-settings-changed"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1314,35 +1314,32 @@ void LoadstoneFrame::ShowSettingsDialog() {
 void LoadstoneFrame::ShowLoadstoneSettings() {
     if (opInFlight_) return;
 
-    wxDialog dlg(this, wxID_ANY, "Loadstone settings", wxDefaultPosition, wxDefaultSize,
+    wxDialog dlg(this, wxID_ANY, T("gui-loadstone-settings-title"), wxDefaultPosition, wxDefaultSize,
                  wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
     auto* sizer = new wxBoxSizer(wxVERTICAL);
 
     // Accounts.
-    sizer->Add(new wxStaticText(&dlg, wxID_ANY, "&Accounts:"), 0, wxLEFT | wxRIGHT | wxTOP, 8);
+    sizer->Add(new wxStaticText(&dlg, wxID_ANY, T("gui-accounts-label")), 0, wxLEFT | wxRIGHT | wxTOP, 8);
     auto* accountList = new wxListBox(&dlg, wxID_ANY, wxDefaultPosition, wxSize(480, 100));
-    AttachDescription(accountList,
-                      "Sign-ins used to download mods from private repositories.");
+    AttachDescription(accountList, T("gui-accounts-description"));
     sizer->Add(accountList, 0, wxEXPAND | wxALL, 8);
     auto* accountButtons = new wxBoxSizer(wxHORIZONTAL);
-    auto* signInBtn = new wxButton(&dlg, wxID_ANY, "Sign &in...");
-    auto* tokenBtn = new wxButton(&dlg, wxID_ANY, "Add &token...");
-    auto* removeBtn = new wxButton(&dlg, wxID_ANY, "&Remove account");
-    auto* defaultBtn = new wxButton(&dlg, wxID_ANY, "Set as &default");
-    AttachDescription(tokenBtn, "Add an account from a token you already have, for example "
-                                "from the GitHub CLI's gh auth token command.");
+    auto* signInBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-sign-in"));
+    auto* tokenBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-add-token"));
+    auto* removeBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-remove-account"));
+    auto* defaultBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-set-default"));
+    AttachDescription(tokenBtn, T("gui-add-token-description"));
     for (auto* b : {signInBtn, tokenBtn, removeBtn, defaultBtn}) accountButtons->Add(b, 0, wxRIGHT, 8);
     sizer->Add(accountButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
 
     // Account rules.
-    sizer->Add(new wxStaticText(&dlg, wxID_ANY, "Account r&ules:"), 0, wxLEFT | wxRIGHT, 8);
+    sizer->Add(new wxStaticText(&dlg, wxID_ANY, T("gui-rules-label")), 0, wxLEFT | wxRIGHT, 8);
     auto* ruleList = new wxListBox(&dlg, wxID_ANY, wxDefaultPosition, wxSize(480, 80));
-    AttachDescription(ruleList, "Which account to use for a repository or for all of an "
-                                "owner's repositories. Without a rule, the default account is used.");
+    AttachDescription(ruleList, T("gui-rules-description"));
     sizer->Add(ruleList, 0, wxEXPAND | wxALL, 8);
     auto* ruleButtons = new wxBoxSizer(wxHORIZONTAL);
-    auto* addRuleBtn = new wxButton(&dlg, wxID_ANY, "Add rul&e...");
-    auto* removeRuleBtn = new wxButton(&dlg, wxID_ANY, "Remo&ve rule");
+    auto* addRuleBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-add-rule"));
+    auto* removeRuleBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-remove-rule"));
     ruleButtons->Add(addRuleBtn, 0, wxRIGHT, 8);
     ruleButtons->Add(removeRuleBtn, 0);
     sizer->Add(ruleButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
@@ -1359,7 +1356,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
             loadstone::set_global_pref(kEmbeddedProfile, ToStd(key), ToStd(value));
             return true;
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), "Setting not changed",
+            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
                          wxOK | wxICON_ERROR, this);
             return false;
         }
@@ -1369,7 +1366,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         wxString key = FromRust(g.id);
         if (FromRust(g.kind) == "choice") {
             auto* row = new wxBoxSizer(wxHORIZONTAL);
-            row->Add(new wxStaticText(&dlg, wxID_ANY, FromRust(g.label) + ":"), 0,
+            row->Add(new wxStaticText(&dlg, wxID_ANY, T("gui-setting-label", {{"label", g.label}})), 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
             auto* choice = new wxChoice(&dlg, wxID_ANY);
             std::vector<wxString> values;
@@ -1410,29 +1407,24 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
 
     // Tester access: passwords for tester-only mods and beta versions, for
     // a whole registry or for single mods. Each one entered is kept.
-    auto* testerBtn = new wxButton(&dlg, wxID_ANY, "Tester &password...");
-    AttachDescription(testerBtn,
-                      "For private testers: enter a password you were given to see "
-                      "tester-only mods and get beta versions. You can add more than "
-                      "one. Leave it empty to stop testing.");
+    auto* testerBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-tester-password"));
+    AttachDescription(testerBtn, T("gui-tester-password-description"));
     bool testerChanged = false;
     testerBtn->Bind(wxEVT_BUTTON, [this, &dlg, &testerChanged](wxCommandEvent&) {
         bool saved = loadstone::tester_password_saved(kEmbeddedProfile);
         wxPasswordEntryDialog ask(&dlg,
-                                  saved ? "You have saved tester passwords. Enter another one to "
-                                          "add it, or leave this empty to forget them all and "
-                                          "stop testing."
-                                        : "Enter the tester password you were given.",
-                                  "Tester password");
+                                  saved ? T("gui-tester-password-prompt-saved")
+                                        : T("gui-tester-password-prompt"),
+                                  T("gui-tester-password-title"));
         if (ask.ShowModal() != wxID_OK) return;
         if (!saved && ask.GetValue().empty()) return;
         try {
             wxBusyCursor busy;
             auto message = loadstone::set_tester_password(kEmbeddedProfile, ToStd(ask.GetValue()));
             testerChanged = true;
-            wxMessageBox(FromRust(message), "Tester password", wxOK | wxICON_INFORMATION, &dlg);
+            wxMessageBox(FromRust(message), T("gui-tester-password-title"), wxOK | wxICON_INFORMATION, &dlg);
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), "Tester password not saved",
+            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-tester-password-not-saved-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
     });
@@ -1440,7 +1432,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
 
     auto* closeRow = new wxBoxSizer(wxHORIZONTAL);
     closeRow->AddStretchSpacer();
-    auto* closeBtn = new wxButton(&dlg, wxID_CLOSE, "&Close");
+    auto* closeBtn = new wxButton(&dlg, wxID_CLOSE, T("gui-button-close"));
     closeRow->Add(closeBtn, 0);
     sizer->Add(closeRow, 0, wxEXPAND | wxALL, 8);
     dlg.SetEscapeId(wxID_CLOSE);
@@ -1459,26 +1451,27 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
             auto r = loadstone::account_rules(kEmbeddedProfile);
             rules.assign(r.begin(), r.end());
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), "Accounts unavailable",
+            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-accounts-unavailable-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         accountList->Clear();
         for (const auto& a : accounts) {
-            wxString line = wxString::Format("%s, %s on %s", FromRust(a.label),
-                                             FromRust(a.username), FromRust(a.provider_name));
-            if (a.is_default) line += ", default";
-            if (!a.has_token) line += ", token missing (sign in again)";
-            accountList->Append(line);
+            const char* flags = a.is_default ? (a.has_token ? "default" : "default-missing")
+                                             : (a.has_token ? "none" : "missing");
+            accountList->Append(T("gui-account-line", {{"account", a.label},
+                                                       {"username", a.username},
+                                                       {"site", a.provider_name},
+                                                       {"flags", flags}}));
         }
-        if (accounts.empty()) accountList->Append("No accounts. Use Sign in to add one.");
+        if (accounts.empty()) accountList->Append(T("gui-accounts-empty"));
         accountList->SetSelection(0);
         ruleList->Clear();
         for (const auto& r : rules) {
             wxString who = FromRust(r.account_label);
             if (who.empty()) who = FromRust(r.account);
-            ruleList->Append(wxString::Format("%s uses %s", FromRust(r.pattern), who));
+            ruleList->Append(T("gui-rule-line", {{"pattern", r.pattern}, {"account", who}}));
         }
-        if (rules.empty()) ruleList->Append("No rules.");
+        if (rules.empty()) ruleList->Append(T("gui-rules-empty"));
         ruleList->SetSelection(0);
         removeBtn->Enable(!accounts.empty());
         defaultBtn->Enable(accounts.size() > 1);
@@ -1499,19 +1492,16 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         auto providers = loadstone::sign_in_providers();
         if (providers.empty()) return;
         wxPasswordEntryDialog ask(&dlg,
-                                  wxString::Format("Paste a %s token. It is checked with %s, "
-                                                   "then stored in the Windows Credential Manager.",
-                                                   FromRust(providers[0].label),
-                                                   FromRust(providers[0].label)),
-                                  "Add token");
+                                  T("gui-add-token-prompt", {{"site", providers[0].label}}),
+                                  T("gui-add-token-title"));
         if (ask.ShowModal() != wxID_OK || ask.GetValue().Trim().empty()) return;
         try {
             wxBusyCursor busy;
             rust::String label = loadstone::add_token_account(
                 kEmbeddedProfile, std::string(providers[0].value), "", ToStd(ask.GetValue()));
-            SetStatusText(wxString::Format("Added account %s.", FromRust(label)));
+            SetStatusText(T("gui-status-account-added", {{"account", label}}));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), "Token not added",
+            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-token-not-added-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1520,16 +1510,15 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
     removeBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
         const auto* a = selectedAccount();
         if (!a) return;
-        wxString msg = wxString::Format(
-            "Remove the account %s? Loadstone forgets its token and any rules that use it. "
-            "To also revoke Loadstone's access, use Applications in your %s settings.",
-            FromRust(a->label), FromRust(a->provider_name));
-        if (wxMessageBox(msg, "Remove account", wxYES_NO | wxICON_QUESTION, &dlg) != wxYES)
+        wxString msg = T("gui-remove-account-prompt",
+                         {{"account", a->label}, {"site", a->provider_name}});
+        if (wxMessageBox(msg, T("gui-remove-account-title"), wxYES_NO | wxICON_QUESTION, &dlg) !=
+            wxYES)
             return;
         try {
             loadstone::remove_account(kEmbeddedProfile, std::string(a->id));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), "Account not removed",
+            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-account-not-removed-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1542,7 +1531,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         try {
             loadstone::set_default_account(kEmbeddedProfile, std::string(a->id));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), "Default not changed",
+            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-default-not-changed-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1553,19 +1542,20 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         if (accounts.empty()) return;
         wxTextEntryDialog askPattern(
             &dlg,
-            "Repository (github:owner/repo) or every repository of an owner (github:owner/*):",
-            "Add account rule", "github:");
+            T("gui-add-rule-pattern-prompt"),
+            T("gui-add-rule-title"), "github:");
         if (askPattern.ShowModal() != wxID_OK) return;
         wxArrayString labels;
         for (const auto& a : accounts)
-            labels.Add(wxString::Format("%s (%s)", FromRust(a.label), FromRust(a.username)));
-        wxSingleChoiceDialog askAccount(&dlg, "Use which account?", "Add account rule", labels);
+            labels.Add(T("gui-account-choice", {{"account", a.label}, {"username", a.username}}));
+        wxSingleChoiceDialog askAccount(&dlg, T("gui-add-rule-account-prompt"),
+                                        T("gui-add-rule-title"), labels);
         if (askAccount.ShowModal() != wxID_OK || askAccount.GetSelection() < 0) return;
         try {
             loadstone::set_account_rule(kEmbeddedProfile, ToStd(askPattern.GetValue()),
                                         std::string(accounts[askAccount.GetSelection()].id));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), "Rule not added",
+            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-rule-not-added-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1577,7 +1567,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         try {
             loadstone::remove_account_rule(kEmbeddedProfile, std::string(rules[i].pattern));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), "Rule not removed",
+            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-rule-not-removed-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1624,14 +1614,14 @@ void LoadstoneFrame::Rebuild() {
 bool LoadstoneFrame::RunSignIn() {
     auto providers = loadstone::sign_in_providers();
     if (providers.empty()) {
-        wxMessageBox("No site supports signing in.", "Sign in", wxOK | wxICON_ERROR, this);
+        wxMessageBox(T("gui-sign-in-no-sites"), T("gui-sign-in-title"), wxOK | wxICON_ERROR, this);
         return false;
     }
     size_t which = 0;
     if (providers.size() > 1) {
         wxArrayString names;
         for (const auto& p : providers) names.Add(FromRust(p.label));
-        wxSingleChoiceDialog ask(this, "Sign in to which site?", "Sign in", names);
+        wxSingleChoiceDialog ask(this, T("gui-sign-in-which-site"), T("gui-sign-in-title"), names);
         if (ask.ShowModal() != wxID_OK || ask.GetSelection() < 0) return false;
         which = static_cast<size_t>(ask.GetSelection());
     }
@@ -1646,23 +1636,23 @@ bool LoadstoneFrame::RunSignIn() {
     };
     auto state = std::make_shared<State>();
 
-    wxDialog dlg(this, wxID_ANY, wxString::Format("Sign in to %s", site));
+    wxDialog dlg(this, wxID_ANY, T("gui-sign-in-dialog-title", {{"site", site}}));
     auto* sizer = new wxBoxSizer(wxVERTICAL);
     auto* status = new wxStaticText(&dlg, wxID_ANY,
-                                    wxString::Format("Requesting a sign-in code from %s...", site));
+                                    T("gui-sign-in-requesting", {{"site", site}}));
     status->Wrap(440);
     sizer->Add(status, 0, wxALL, 8);
     auto* codeRow = new wxBoxSizer(wxHORIZONTAL);
-    codeRow->Add(new wxStaticText(&dlg, wxID_ANY, "Sign-in &code:"), 0,
+    codeRow->Add(new wxStaticText(&dlg, wxID_ANY, T("gui-sign-in-code-label")), 0,
                  wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
     auto* code = new wxTextCtrl(&dlg, wxID_ANY, "", wxDefaultPosition, wxSize(160, -1),
                                 wxTE_READONLY);
     codeRow->Add(code, 0);
     sizer->Add(codeRow, 0, wxLEFT | wxRIGHT, 8);
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
-    auto* copyBtn = new wxButton(&dlg, wxID_ANY, "Co&py code");
-    auto* openBtn = new wxButton(&dlg, wxID_ANY, wxString::Format("&Open %s sign-in page", site));
-    auto* cancelBtn = new wxButton(&dlg, wxID_CANCEL, "Cancel");
+    auto* copyBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-copy-code"));
+    auto* openBtn = new wxButton(&dlg, wxID_ANY, T("gui-button-open-sign-in-page", {{"site", site}}));
+    auto* cancelBtn = new wxButton(&dlg, wxID_CANCEL, T("gui-button-cancel"));
     copyBtn->Enable(false);
     openBtn->Enable(false);
     buttons->Add(copyBtn, 0, wxRIGHT, 8);
@@ -1675,7 +1665,7 @@ bool LoadstoneFrame::RunSignIn() {
     auto uri = std::make_shared<wxString>();
     copyBtn->Bind(wxEVT_BUTTON, [code, status](wxCommandEvent&) {
         if (CopyText(code->GetValue()))
-            status->SetLabel("Code copied. Open the sign-in page and paste it there.");
+            status->SetLabel(T("gui-sign-in-code-copied"));
     });
     openBtn->Bind(wxEVT_BUTTON, [uri](wxCommandEvent&) {
         if (!uri->empty()) wxLaunchDefaultBrowser(*uri);
@@ -1698,10 +1688,7 @@ bool LoadstoneFrame::RunSignIn() {
                 code->SetValue(userCode);
                 copyBtn->Enable(true);
                 openBtn->Enable(true);
-                status->SetLabel(wxString::Format(
-                    "Open %s, enter the code below, and approve Loadstone. This window "
-                    "closes by itself when you're done.",
-                    page));
+                status->SetLabel(T("gui-sign-in-instructions", {{"url", page}}));
                 status->Wrap(440);
                 code->SetFocus();
             });
@@ -1714,8 +1701,7 @@ bool LoadstoneFrame::RunSignIn() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 if (state->stop.load()) return;
                 if (std::chrono::steady_clock::now() > deadline)
-                    throw std::runtime_error(
-                        "The sign-in code expired before it was entered. Please start again.");
+                    throw std::runtime_error(ToStd(T("gui-sign-in-code-expired")));
                 auto poll = loadstone::poll_sign_in(kEmbeddedProfile, provider, "", deviceCode,
                                                     interval);
                 std::string s = std::string(poll.state);
@@ -1745,19 +1731,20 @@ bool LoadstoneFrame::RunSignIn() {
     state->stop.store(true);
 
     if (state->success) {
-        SetStatusText(wxString::Format("Signed in as %s.", state->result));
-        wxMessageBox(wxString::Format("Signed in to %s as %s.", site, state->result),
-                     "Signed in", wxOK | wxICON_INFORMATION, this);
+        SetStatusText(T("gui-status-signed-in", {{"account", state->result}}));
+        wxMessageBox(T("gui-signed-in", {{"site", site}, {"account", state->result}}),
+                     T("gui-signed-in-title"), wxOK | wxICON_INFORMATION, this);
         return true;
     }
     if (!state->result.empty())
-        wxMessageBox(state->result, "Sign-in failed", wxOK | wxICON_ERROR, this);
+        wxMessageBox(state->result, T("gui-sign-in-failed-title"), wxOK | wxICON_ERROR, this);
     return false;
 }
 
 bool LoadstoneFrame::OfferSignIn(const wxString& error) {
-    wxString msg = error + "\n\nSign in now with an account that can see it?";
-    if (wxMessageBox(msg, "Sign in to continue", wxYES_NO | wxICON_QUESTION, this) != wxYES)
+    wxString msg = error + "\n\n" + T("gui-offer-sign-in");
+    if (wxMessageBox(msg, T("gui-offer-sign-in-title"), wxYES_NO | wxICON_QUESTION, this) !=
+        wxYES)
         return false;
     return RunSignIn();
 }
@@ -1768,13 +1755,13 @@ bool LoadstoneFrame::ApplySetting(const wxString& settingId, const wxString& raw
         rust::String note = loadstone::apply_setting(
             "", ToStd(pageGame_), copyDir, ToStd(pageModId_), ToStd(settingId),
             ToStd(rawValue));
-        wxString msg = "Setting saved.";
         wxString noteText = FromRust(note);
-        if (!noteText.empty()) msg += " " + noteText;
-        SetStatusText(msg);
+        SetStatusText(noteText.empty()
+                          ? T("gui-status-setting-saved")
+                          : T("gui-status-setting-saved-note", {{"note", noteText}}));
         return true;
     } catch (const std::exception& e) {
-        wxMessageBox(wxString::FromUTF8(e.what()), "Setting not changed",
+        wxMessageBox(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
                      wxOK | wxICON_ERROR, this);
         return false;
     }
@@ -1958,7 +1945,7 @@ bool LoadstoneApp::OnInit() {
     }
 
     if (!error.empty()) {
-        wxMessageBox(wxString::FromUTF8(error.c_str()), "Loadstone startup error",
+        wxMessageBox(wxString::FromUTF8(error.c_str()), T("gui-startup-error-title"),
                      wxOK | wxICON_ERROR);
         return false;
     }

@@ -116,14 +116,12 @@ impl Unlocks {
 
     /// One sentence for the user saying what the password gave them.
     pub fn describe(&self) -> String {
-        let scope = match (self.registry_wide, self.packages.is_empty()) {
-            (true, true) => "a registry's mods".to_string(),
-            (true, false) => format!("a registry's mods and {}", self.packages.join(", ")),
-            (false, _) => self.packages.join(", "),
-        };
-        format!(
-            "Tester access unlocked for {scope}: tester-only mods are listed, and installs and updates get beta versions."
-        )
+        let mods = self.packages.join(", ");
+        match (self.registry_wide, self.packages.is_empty()) {
+            (true, true) => crate::t!("core-tester-unlocked-registry"),
+            (true, false) => crate::t!("core-tester-unlocked-registry-and-mods", mods = mods),
+            (false, _) => crate::t!("core-tester-unlocked-mods", mods = mods),
+        }
     }
 }
 
@@ -189,7 +187,7 @@ pub fn add_password(prefs: &PrefStore, password: &str) -> Result<()> {
     all.push(password.to_string());
     prefs
         .set(&Scope::Global, PREF_TESTER_PASSWORD, serde_json::json!(all))
-        .context("failed to save the tester password")
+        .with_context(|| crate::t!("core-tester-save-failed"))
 }
 
 /// Forget every saved tester password.
@@ -265,14 +263,14 @@ pub fn latest_release(
         match newest_release_tag(source, mod_id, lookup) {
             Ok(Some(tag)) => match crate::source::release_manifest(source, mod_id, Some(&tag)) {
                 Ok(release) => return Ok((Some(tag), release)),
-                Err(e) => note(&format!(
-                    "Release {tag} has no usable Loadstone metadata ({e:#}); using the latest stable release."
+                Err(e) => note(&crate::t!(
+                    "core-tester-beta-unusable",
+                    tag = &tag,
+                    error = format!("{e:#}")
                 )),
             },
             Ok(None) => {}
-            Err(e) => note(&format!(
-                "Could not look up beta versions ({e:#}); using the latest stable release."
-            )),
+            Err(e) => note(&crate::t!("core-tester-beta-lookup-failed", error = format!("{e:#}"))),
         }
     }
     Ok((None, crate::source::release_manifest(source, mod_id, None)?))

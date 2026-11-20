@@ -73,7 +73,11 @@ artifacts (with no `--manifest`, the single mod/tool/library file in
 ```
 loadstone package --version v0.5.0 --artifact dist/MyMod.zip
 loadstone package --version v0.5.0 --notes-file changes-latest.md
+loadstone package --version v0.5.0 --notes-file changes.md --notes-file fr=changes.fr.md
 ```
+
+Repeat `--notes-file LANG=FILE` to translate the release notes (SPEC 18);
+the file without a language is the English text.
 
 Artifacts can come from the command line (`--artifact`, repeatable) or from a
 dev-only `packaging` block in the project manifest, which also lets artifacts

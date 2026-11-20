@@ -280,7 +280,13 @@ fn set_pref(ctx: &auth::AuthContext, scope: &Scope, key: &str, raw: &str) -> Res
 
 /// Apply the saved language (or the system's). Call once at startup,
 /// before building any window.
+/// `LOADSTONE_LANGUAGE` overrides the setting, so a translation can be
+/// previewed without changing it.
 pub fn init_language(embedded: &str) {
+    if let Some(tag) = std::env::var("LOADSTONE_LANGUAGE").ok().filter(|t| !t.trim().is_empty()) {
+        i18n::set_language(&tag);
+        return;
+    }
     let saved = with_ctx(embedded, |ctx| ctx.prefs.get(loadstone_core::prefs::PREF_LANGUAGE, None));
     let choice = match saved {
         Ok(Value::String(tag)) => tag,

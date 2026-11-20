@@ -768,3 +768,18 @@ core-update-move-aside-app = současnou aplikaci se nepodařilo odsunout stranou
 core-update-move-in-app = novou aplikaci se nepodařilo přesunout na místo
 core-update-move-aside-exe = současný spustitelný soubor se nepodařilo odsunout stranou
 core-update-move-in-exe = nový spustitelný soubor se nepodařilo přesunout na místo
+
+## Standard buttons
+
+# Buttons wxWidgets draws itself (dialog OK and Cancel, message box
+# Yes and No). The plain forms are the same words without the shortcut.
+gui-stock-ok = &OK
+gui-stock-ok-plain = OK
+gui-stock-cancel = &Zrušit
+gui-stock-cancel-plain = Zrušit
+gui-stock-yes = &Ano
+gui-stock-yes-plain = Ano
+gui-stock-no = &Ne
+gui-stock-no-plain = Ne
+gui-stock-close = &Zavřít
+gui-stock-close-plain = Zavřít

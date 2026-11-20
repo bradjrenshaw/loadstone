@@ -713,3 +713,18 @@ core-update-move-aside-app = 無法移開目前的應用程式
 core-update-move-in-app = 無法將新的應用程式移到定位
 core-update-move-aside-exe = 無法移開目前的執行檔
 core-update-move-in-exe = 無法將新的執行檔移到定位
+
+## Standard buttons
+
+# Buttons wxWidgets draws itself (dialog OK and Cancel, message box
+# Yes and No). The plain forms are the same words without the shortcut.
+gui-stock-ok = 確定(&O)
+gui-stock-ok-plain = 確定
+gui-stock-cancel = 取消(&C)
+gui-stock-cancel-plain = 取消
+gui-stock-yes = 是(&Y)
+gui-stock-yes-plain = 是
+gui-stock-no = 否(&N)
+gui-stock-no-plain = 否
+gui-stock-close = 關閉(&C)
+gui-stock-close-plain = 關閉

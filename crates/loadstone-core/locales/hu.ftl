@@ -746,3 +746,18 @@ core-update-move-aside-app = nem sikerült félretenni a jelenlegi alkalmazást
 core-update-move-in-app = nem sikerült a helyére tenni az új alkalmazást
 core-update-move-aside-exe = nem sikerült félretenni a jelenlegi futtatható fájlt
 core-update-move-in-exe = nem sikerült a helyére tenni az új futtatható fájlt
+
+## Standard buttons
+
+# Buttons wxWidgets draws itself (dialog OK and Cancel, message box
+# Yes and No). The plain forms are the same words without the shortcut.
+gui-stock-ok = &OK
+gui-stock-ok-plain = OK
+gui-stock-cancel = &Mégse
+gui-stock-cancel-plain = Mégse
+gui-stock-yes = &Igen
+gui-stock-yes-plain = Igen
+gui-stock-no = &Nem
+gui-stock-no-plain = Nem
+gui-stock-close = &Bezárás
+gui-stock-close-plain = Bezárás

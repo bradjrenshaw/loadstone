@@ -35,6 +35,7 @@
 #include <wx/listbox.h>
 #include <wx/scrolwin.h>
 #include <wx/textdlg.h>
+#include <wx/translation.h>
 
 #include <atomic>
 #include <chrono>
@@ -45,6 +46,9 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <utility>
+#include <algorithm>
+#include <cstring>
 #include <vector>
 
 #include "rust/cxx.h"
@@ -103,6 +107,107 @@ wxString T(const char* id, std::initializer_list<TArg> args = {}) {
         rustArgs.push_back(loadstone::TrArg{a.name, ToStd(a.value), a.number});
     return FromRust(loadstone::tr(
         id, rust::Slice<const loadstone::TrArg>(rustArgs.data(), rustArgs.size())));
+}
+
+// wxWidgets draws some labels itself: the OK and Cancel buttons of its
+// stock dialogs, and message box buttons on macOS. It looks them up with
+// wxGetTranslation in a "wxstd" catalog, which Loadstone doesn't ship. This
+// loader answers with a catalog built from Loadstone's own messages, so
+// those labels follow Loadstone's language setting like everything else.
+class StockLabelLoader final : public wxTranslationsLoader {
+public:
+    explicit StockLabelLoader(wxString lang) : lang_(std::move(lang)) {}
+
+    wxMsgCatalog* LoadCatalog(const wxString& domain, const wxString&) override {
+        // wx's msgids, with and without the shortcut marker.
+        const std::pair<const char*, const char*> labels[] = {
+            {"&OK", "gui-stock-ok"},         {"OK", "gui-stock-ok-plain"},
+            {"&Cancel", "gui-stock-cancel"}, {"Cancel", "gui-stock-cancel-plain"},
+            {"&Yes", "gui-stock-yes"},       {"Yes", "gui-stock-yes-plain"},
+            {"&No", "gui-stock-no"},         {"No", "gui-stock-no-plain"},
+            {"&Close", "gui-stock-close"},   {"Close", "gui-stock-close-plain"},
+        };
+        std::vector<std::pair<std::string, std::string>> entries;
+        entries.emplace_back("", "Content-Type: text/plain; charset=UTF-8\n");
+        for (const auto& [msgid, id] : labels) entries.emplace_back(msgid, ToStd(T(id)));
+        std::string mo = BuildMo(entries);
+        char* data = static_cast<char*>(malloc(mo.size()));
+        if (!data) return nullptr;
+        memcpy(data, mo.data(), mo.size());
+        return wxMsgCatalog::CreateFromData(wxScopedCharBuffer::CreateOwned(data, mo.size()),
+                                            domain);
+    }
+
+    wxArrayString GetAvailableTranslations(const wxString&) const override {
+        wxArrayString langs;
+        langs.Add(lang_);
+        return langs;
+    }
+
+private:
+    // A GNU .mo file: header, two tables of (length, offset), then the
+    // NUL-terminated strings. Entries are sorted by msgid, as the format
+    // expects.
+    static std::string BuildMo(std::vector<std::pair<std::string, std::string>> entries) {
+        std::sort(entries.begin(), entries.end());
+        const std::uint32_t n = static_cast<std::uint32_t>(entries.size());
+        const std::uint32_t originals = 28, translations = originals + 8 * n;
+        std::uint32_t offset = translations + 8 * n;
+        std::string out;
+        auto put = [&out](std::uint32_t v) {
+            for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+        };
+        for (std::uint32_t v : {0x950412deu, 0u, n, originals, translations, 0u, offset}) put(v);
+        std::string strings;
+        auto table = [&](bool translated) {
+            for (const auto& e : entries) {
+                const std::string& text = translated ? e.second : e.first;
+                put(static_cast<std::uint32_t>(text.size()));
+                put(offset + static_cast<std::uint32_t>(strings.size()));
+                strings += text;
+                strings.push_back('\0');
+            }
+        };
+        table(false);
+        table(true);
+        return out + strings;
+    }
+
+    wxString lang_;
+};
+
+// Point wxWidgets' own labels at the interface language. Call at startup
+// and again after the language changes.
+void InstallStockLabels() {
+    wxString lang = FromRust(loadstone::ui_language());
+    lang.Replace("-", "_");
+    auto* translations = new wxTranslations;
+    translations->SetLoader(new StockLabelLoader(lang));
+    translations->SetLanguage(lang);
+    translations->AddCatalog("wxstd");
+    wxTranslations::Set(translations); // takes ownership, frees the old one
+}
+
+// wxMessageBox, with its buttons labelled in the interface language. A
+// plain native message box on Windows labels them in the system's language
+// instead, which differs when the user picked another one.
+int ShowMessage(const wxString& message, const wxString& caption, long style = wxOK,
+               wxWindow* parent = nullptr) {
+    wxMessageDialog dlg(parent, message, caption, style);
+    if ((style & wxYES_NO) && (style & wxCANCEL))
+        dlg.SetYesNoCancelLabels(T("gui-stock-yes"), T("gui-stock-no"), T("gui-stock-cancel"));
+    else if (style & wxYES_NO)
+        dlg.SetYesNoLabels(T("gui-stock-yes"), T("gui-stock-no"));
+    else if (style & wxCANCEL)
+        dlg.SetOKCancelLabels(T("gui-stock-ok"), T("gui-stock-cancel"));
+    else
+        dlg.SetOKLabel(T("gui-stock-ok"));
+    switch (dlg.ShowModal()) {
+        case wxID_YES: return wxYES;
+        case wxID_NO: return wxNO;
+        case wxID_CANCEL: return wxCANCEL;
+        default: return wxOK;
+    }
 }
 
 // Put text on the clipboard so it outlives Loadstone: without Flush,
@@ -278,7 +383,7 @@ public:
     bool confirm(rust::Str message) override {
         wxString text = FromRust(message);
         return Ask<bool>(false, [text](LoadstoneFrame* f) {
-            return wxMessageBox(text, "Loadstone", wxYES_NO | wxICON_QUESTION, f) == wxYES;
+            return ShowMessage(text, "Loadstone", wxYES_NO | wxICON_QUESTION, f) == wxYES;
         });
     }
 
@@ -386,7 +491,7 @@ LoadstoneFrame::LoadstoneFrame(loadstone::UiProfile profile, wxString coreVersio
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, wxID_EXIT);
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& ev) {
         if (opInFlight_ && ev.CanVeto()) {
-            if (wxMessageBox(T("gui-close-while-running"),
+            if (ShowMessage(T("gui-close-while-running"),
                              T("gui-close-while-running-title"), wxYES_NO | wxICON_WARNING,
                              this) != wxYES) {
                 ev.Veto();
@@ -489,7 +594,7 @@ void LoadstoneFrame::StartCatalogFetch() {
                     if (OfferSignIn(text)) StartCatalogFetch();
                     return;
                 }
-                wxMessageBox(text, T("gui-catalog-error-title"), wxOK | wxICON_ERROR, this);
+                ShowMessage(text, T("gui-catalog-error-title"), wxOK | wxICON_ERROR, this);
             });
         }
     }).detach();
@@ -568,7 +673,7 @@ void LoadstoneFrame::OpenMod(const wxString& id) {
                     if (OfferSignIn(text)) OpenMod(retryId);
                     return;
                 }
-                wxMessageBox(text, T("gui-mod-error-title"), wxOK | wxICON_ERROR, this);
+                ShowMessage(text, T("gui-mod-error-title"), wxOK | wxICON_ERROR, this);
             });
         }
     }).detach();
@@ -774,7 +879,7 @@ void LoadstoneFrame::BuildDetail() {
     bool folderSlot = copy.game_dir.empty() && page.copies.size() > 1;
     auto folderMissing = [this, folderSlot] {
         if (!folderSlot || !gameDirCtrl_->GetValue().Trim().Trim(false).empty()) return false;
-        wxMessageBox(T("gui-select-folder-first"), "Loadstone",
+        ShowMessage(T("gui-select-folder-first"), "Loadstone",
                      wxOK | wxICON_INFORMATION, this);
         gameDirCtrl_->SetFocus();
         return true;
@@ -915,7 +1020,7 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
                 wxString msg =
                     T("gui-release-list-error", {{"error", wxString::FromUTF8(error.c_str())}}) +
                     "\n\n" + T("gui-release-list-install-latest");
-                if (wxMessageBox(msg, T("gui-release-list-error-title"),
+                if (ShowMessage(msg, T("gui-release-list-error-title"),
                                  wxYES_NO | wxICON_QUESTION, this) == wxYES)
                     RunOperation(kind);
                 return;
@@ -930,7 +1035,7 @@ void LoadstoneFrame::StartVersionPick(OpKind kind) {
                     labels.Add(FromRust(c.label));
             }
             if (labels.IsEmpty()) {
-                wxMessageBox(T("gui-no-releases"),
+                ShowMessage(T("gui-no-releases"),
                              T("gui-no-releases-title"), wxOK | wxICON_INFORMATION, this);
                 return;
             }
@@ -969,7 +1074,7 @@ void LoadstoneFrame::RunOperation(OpKind kind, const wxString& actionId,
         wxString name = pageModel_ && !std::string(pageModel_->name).empty()
                             ? FromRust(pageModel_->name)
                             : pageModId_;
-        if (wxMessageBox(T("gui-confirm-uninstall", {{"name", name}}),
+        if (ShowMessage(T("gui-confirm-uninstall", {{"name", name}}),
                          T("gui-confirm-uninstall-title"), wxYES_NO | wxICON_QUESTION,
                          this) != wxYES)
             return;
@@ -1078,7 +1183,7 @@ void LoadstoneFrame::OfferSelfUpdate(const loadstone::SelfUpdate& update) {
     wxString msg = T("gui-self-update-offer", {{"version", update.version},
                                                {"app", profile_.title},
                                                {"current", coreVersion_}});
-    if (wxMessageBox(msg, T("gui-self-update-title"), wxYES_NO | wxICON_QUESTION, this) !=
+    if (ShowMessage(msg, T("gui-self-update-title"), wxYES_NO | wxICON_QUESTION, this) !=
         wxYES)
         return;
 
@@ -1099,12 +1204,12 @@ void LoadstoneFrame::OfferSelfUpdate(const loadstone::SelfUpdate& update) {
             opInFlight_ = false;
             if (!error.empty()) {
                 SetStatusText(T("gui-status-update-failed"));
-                wxMessageBox(wxString::FromUTF8(error.c_str()), T("gui-update-failed-title"),
+                ShowMessage(wxString::FromUTF8(error.c_str()), T("gui-update-failed-title"),
                              wxOK | wxICON_ERROR, this);
                 return;
             }
             SetStatusText(T("gui-status-update-installed"));
-            wxMessageBox(T("gui-update-installed"),
+            ShowMessage(T("gui-update-installed"),
                          T("gui-update-installed-title"), wxOK | wxICON_INFORMATION, this);
 #ifdef __WXOSX__
             // The update replaced the whole .app bundle; LaunchServices
@@ -1133,10 +1238,10 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
         else if (lastOpKind_ == OpKind::Launch)
             // Usually a launch precondition (say, the store client isn't
             // running): something for the user to do, not a fault.
-            wxMessageBox(wxString::FromUTF8(error.c_str()), T("gui-launch-failed-title"),
+            ShowMessage(wxString::FromUTF8(error.c_str()), T("gui-launch-failed-title"),
                          wxOK | wxICON_WARNING, this);
         else
-            wxMessageBox(wxString::FromUTF8(error.c_str()), T("gui-op-failed-title"),
+            ShowMessage(wxString::FromUTF8(error.c_str()), T("gui-op-failed-title"),
                          wxOK | wxICON_ERROR, this);
     } else if (lastOpKind_ == OpKind::Launch) {
         // The game is starting and about to take focus; a modal "Done" box
@@ -1145,7 +1250,7 @@ void LoadstoneFrame::OnOpDone(const std::string& result, const std::string& erro
         AppendOpLog(wxString::FromUTF8(result.c_str()));
     } else {
         SetStatusText(wxString::FromUTF8(result.c_str()));
-        wxMessageBox(wxString::FromUTF8(result.c_str()), T("gui-op-done-title"),
+        ShowMessage(wxString::FromUTF8(result.c_str()), T("gui-op-done-title"),
                      wxOK | wxICON_INFORMATION, this);
     }
     // Reload the page so status, buttons, and settings reflect reality.
@@ -1290,7 +1395,7 @@ void LoadstoneFrame::ShowSettingsDialog() {
                 ++applied;
                 SetStatusText(T("gui-status-setting-saved"));
             } catch (const std::exception& e) {
-                wxMessageBox(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
+                ShowMessage(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
                              wxOK | wxICON_ERROR, this);
             }
             continue;
@@ -1356,7 +1461,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
             loadstone::set_global_pref(kEmbeddedProfile, ToStd(key), ToStd(value));
             return true;
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
+            ShowMessage(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
                          wxOK | wxICON_ERROR, this);
             return false;
         }
@@ -1422,9 +1527,9 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
             wxBusyCursor busy;
             auto message = loadstone::set_tester_password(kEmbeddedProfile, ToStd(ask.GetValue()));
             testerChanged = true;
-            wxMessageBox(FromRust(message), T("gui-tester-password-title"), wxOK | wxICON_INFORMATION, &dlg);
+            ShowMessage(FromRust(message), T("gui-tester-password-title"), wxOK | wxICON_INFORMATION, &dlg);
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-tester-password-not-saved-title"),
+            ShowMessage(wxString::FromUTF8(e.what()), T("gui-tester-password-not-saved-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
     });
@@ -1451,7 +1556,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
             auto r = loadstone::account_rules(kEmbeddedProfile);
             rules.assign(r.begin(), r.end());
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-accounts-unavailable-title"),
+            ShowMessage(wxString::FromUTF8(e.what()), T("gui-accounts-unavailable-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         accountList->Clear();
@@ -1501,7 +1606,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
                 kEmbeddedProfile, std::string(providers[0].value), "", ToStd(ask.GetValue()));
             SetStatusText(T("gui-status-account-added", {{"account", label}}));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-token-not-added-title"),
+            ShowMessage(wxString::FromUTF8(e.what()), T("gui-token-not-added-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1512,13 +1617,13 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         if (!a) return;
         wxString msg = T("gui-remove-account-prompt",
                          {{"account", a->label}, {"site", a->provider_name}});
-        if (wxMessageBox(msg, T("gui-remove-account-title"), wxYES_NO | wxICON_QUESTION, &dlg) !=
+        if (ShowMessage(msg, T("gui-remove-account-title"), wxYES_NO | wxICON_QUESTION, &dlg) !=
             wxYES)
             return;
         try {
             loadstone::remove_account(kEmbeddedProfile, std::string(a->id));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-account-not-removed-title"),
+            ShowMessage(wxString::FromUTF8(e.what()), T("gui-account-not-removed-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1531,7 +1636,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         try {
             loadstone::set_default_account(kEmbeddedProfile, std::string(a->id));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-default-not-changed-title"),
+            ShowMessage(wxString::FromUTF8(e.what()), T("gui-default-not-changed-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1555,7 +1660,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
             loadstone::set_account_rule(kEmbeddedProfile, ToStd(askPattern.GetValue()),
                                         std::string(accounts[askAccount.GetSelection()].id));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-rule-not-added-title"),
+            ShowMessage(wxString::FromUTF8(e.what()), T("gui-rule-not-added-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1567,7 +1672,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
         try {
             loadstone::remove_account_rule(kEmbeddedProfile, std::string(rules[i].pattern));
         } catch (const std::exception& e) {
-            wxMessageBox(wxString::FromUTF8(e.what()), T("gui-rule-not-removed-title"),
+            ShowMessage(wxString::FromUTF8(e.what()), T("gui-rule-not-removed-title"),
                          wxOK | wxICON_ERROR, &dlg);
         }
         reload();
@@ -1590,6 +1695,7 @@ void LoadstoneFrame::ShowLoadstoneSettings() {
 }
 
 void LoadstoneFrame::Rebuild() {
+    InstallStockLabels();
     loadstone::UiProfile profile = profile_;
     try {
         profile = loadstone::ui_profile(kEmbeddedProfile);
@@ -1614,7 +1720,7 @@ void LoadstoneFrame::Rebuild() {
 bool LoadstoneFrame::RunSignIn() {
     auto providers = loadstone::sign_in_providers();
     if (providers.empty()) {
-        wxMessageBox(T("gui-sign-in-no-sites"), T("gui-sign-in-title"), wxOK | wxICON_ERROR, this);
+        ShowMessage(T("gui-sign-in-no-sites"), T("gui-sign-in-title"), wxOK | wxICON_ERROR, this);
         return false;
     }
     size_t which = 0;
@@ -1732,18 +1838,18 @@ bool LoadstoneFrame::RunSignIn() {
 
     if (state->success) {
         SetStatusText(T("gui-status-signed-in", {{"account", state->result}}));
-        wxMessageBox(T("gui-signed-in", {{"site", site}, {"account", state->result}}),
+        ShowMessage(T("gui-signed-in", {{"site", site}, {"account", state->result}}),
                      T("gui-signed-in-title"), wxOK | wxICON_INFORMATION, this);
         return true;
     }
     if (!state->result.empty())
-        wxMessageBox(state->result, T("gui-sign-in-failed-title"), wxOK | wxICON_ERROR, this);
+        ShowMessage(state->result, T("gui-sign-in-failed-title"), wxOK | wxICON_ERROR, this);
     return false;
 }
 
 bool LoadstoneFrame::OfferSignIn(const wxString& error) {
     wxString msg = error + "\n\n" + T("gui-offer-sign-in");
-    if (wxMessageBox(msg, T("gui-offer-sign-in-title"), wxYES_NO | wxICON_QUESTION, this) !=
+    if (ShowMessage(msg, T("gui-offer-sign-in-title"), wxYES_NO | wxICON_QUESTION, this) !=
         wxYES)
         return false;
     return RunSignIn();
@@ -1761,7 +1867,7 @@ bool LoadstoneFrame::ApplySetting(const wxString& settingId, const wxString& raw
                           : T("gui-status-setting-saved-note", {{"note", noteText}}));
         return true;
     } catch (const std::exception& e) {
-        wxMessageBox(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
+        ShowMessage(wxString::FromUTF8(e.what()), T("gui-setting-not-changed-title"),
                      wxOK | wxICON_ERROR, this);
         return false;
     }
@@ -1828,6 +1934,7 @@ bool LoadstoneApp::OnInit() {
     // Before any window or message exists: the saved language, else the
     // system's.
     loadstone::init_language(kEmbeddedProfile);
+    InstallStockLabels();
     rust::String version;
     loadstone::UiProfile profile;
     std::string error;
@@ -1945,7 +2052,7 @@ bool LoadstoneApp::OnInit() {
     }
 
     if (!error.empty()) {
-        wxMessageBox(wxString::FromUTF8(error.c_str()), T("gui-startup-error-title"),
+        ShowMessage(wxString::FromUTF8(error.c_str()), T("gui-startup-error-title"),
                      wxOK | wxICON_ERROR);
         return false;
     }

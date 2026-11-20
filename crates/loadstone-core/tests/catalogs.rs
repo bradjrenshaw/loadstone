@@ -102,11 +102,12 @@ fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every message id the code uses: `t!("id"`, `T("id"`,
-/// `i18n::message("id"`, and the preference labels (`label: "pref-...`).
+/// Every message id the code uses.
 fn used_ids() -> BTreeSet<String> {
+    // A lookup (`t!("id"`, `T("id"`, `i18n::message("id"`), a preference
+    // label, or an id kept in a table: any literal with a catalog prefix.
     let pattern = regex::Regex::new(
-        r#"(?:\bt!\(\s*|\bT\(\s*|i18n::message\(\s*|\blabel: |\bdescription: )"([a-z][a-z0-9-]*)""#,
+        r#"(?:\bt!\(\s*|\bT\(\s*|i18n::message\(\s*|\blabel: |\bdescription: )"([a-z][a-z0-9-]*)"|"((?:gui|page|engine|core|pref|error|language)-[a-z0-9-]+)""#,
     )
     .unwrap();
     let mut files = Vec::new();
@@ -123,7 +124,7 @@ fn used_ids() -> BTreeSet<String> {
             .collect::<Vec<_>>()
             .join("\n");
         for cap in pattern.captures_iter(&code) {
-            let id = &cap[1];
+            let id = cap.get(1).or_else(|| cap.get(2)).unwrap().as_str();
             // `label:` and `description:` match other code too; only
             // catalog-shaped ids (with a dash) count.
             if id.contains('-') {

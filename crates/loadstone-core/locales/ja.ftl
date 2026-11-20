@@ -713,3 +713,18 @@ core-update-move-aside-app = 現在のアプリを移動できませんでした
 core-update-move-in-app = 新しいアプリを所定の場所に移動できませんでした
 core-update-move-aside-exe = 現在の実行ファイルを移動できませんでした
 core-update-move-in-exe = 新しい実行ファイルを所定の場所に移動できませんでした
+
+## Standard buttons
+
+# Buttons wxWidgets draws itself (dialog OK and Cancel, message box
+# Yes and No). The plain forms are the same words without the shortcut.
+gui-stock-ok = OK(&O)
+gui-stock-ok-plain = OK
+gui-stock-cancel = キャンセル(&C)
+gui-stock-cancel-plain = キャンセル
+gui-stock-yes = はい(&Y)
+gui-stock-yes-plain = はい
+gui-stock-no = いいえ(&N)
+gui-stock-no-plain = いいえ
+gui-stock-close = 閉じる(&C)
+gui-stock-close-plain = 閉じる

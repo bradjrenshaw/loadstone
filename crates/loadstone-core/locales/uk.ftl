@@ -768,3 +768,18 @@ core-update-move-aside-app = не вдалося перемістити пото
 core-update-move-in-app = не вдалося перемістити нову програму на її місце
 core-update-move-aside-exe = не вдалося перемістити поточний виконуваний файл
 core-update-move-in-exe = не вдалося перемістити новий виконуваний файл на його місце
+
+## Standard buttons
+
+# Buttons wxWidgets draws itself (dialog OK and Cancel, message box
+# Yes and No). The plain forms are the same words without the shortcut.
+gui-stock-ok = &OK
+gui-stock-ok-plain = OK
+gui-stock-cancel = &Скасувати
+gui-stock-cancel-plain = Скасувати
+gui-stock-yes = &Так
+gui-stock-yes-plain = Так
+gui-stock-no = &Ні
+gui-stock-no-plain = Ні
+gui-stock-close = &Закрити
+gui-stock-close-plain = Закрити

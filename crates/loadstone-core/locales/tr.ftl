@@ -746,3 +746,18 @@ core-update-move-aside-app = mevcut uygulama kenara taşınamadı
 core-update-move-in-app = yeni uygulama yerine taşınamadı
 core-update-move-aside-exe = mevcut yürütülebilir dosya kenara taşınamadı
 core-update-move-in-exe = yeni yürütülebilir dosya yerine taşınamadı
+
+## Standard buttons
+
+# Buttons wxWidgets draws itself (dialog OK and Cancel, message box
+# Yes and No). The plain forms are the same words without the shortcut.
+gui-stock-ok = &Tamam
+gui-stock-ok-plain = Tamam
+gui-stock-cancel = İ&ptal
+gui-stock-cancel-plain = İptal
+gui-stock-yes = &Evet
+gui-stock-yes-plain = Evet
+gui-stock-no = &Hayır
+gui-stock-no-plain = Hayır
+gui-stock-close = &Kapat
+gui-stock-close-plain = Kapat

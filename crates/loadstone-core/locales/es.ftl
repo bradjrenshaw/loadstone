@@ -746,3 +746,18 @@ core-update-move-aside-app = no se pudo apartar la aplicación actual
 core-update-move-in-app = no se pudo colocar la nueva aplicación en su lugar
 core-update-move-aside-exe = no se pudo apartar el ejecutable actual
 core-update-move-in-exe = no se pudo colocar el nuevo ejecutable en su lugar
+
+## Standard buttons
+
+# Buttons wxWidgets draws itself (dialog OK and Cancel, message box
+# Yes and No). The plain forms are the same words without the shortcut.
+gui-stock-ok = &Aceptar
+gui-stock-ok-plain = Aceptar
+gui-stock-cancel = &Cancelar
+gui-stock-cancel-plain = Cancelar
+gui-stock-yes = &Sí
+gui-stock-yes-plain = Sí
+gui-stock-no = &No
+gui-stock-no-plain = No
+gui-stock-close = &Cerrar
+gui-stock-close-plain = Cerrar

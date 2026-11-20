@@ -713,3 +713,18 @@ core-update-move-aside-app = 현재 앱을 옮길 수 없습니다
 core-update-move-in-app = 새 앱을 제자리로 옮길 수 없습니다
 core-update-move-aside-exe = 현재 실행 파일을 옮길 수 없습니다
 core-update-move-in-exe = 새 실행 파일을 제자리로 옮길 수 없습니다
+
+## Standard buttons
+
+# Buttons wxWidgets draws itself (dialog OK and Cancel, message box
+# Yes and No). The plain forms are the same words without the shortcut.
+gui-stock-ok = 확인(&O)
+gui-stock-ok-plain = 확인
+gui-stock-cancel = 취소(&C)
+gui-stock-cancel-plain = 취소
+gui-stock-yes = 예(&Y)
+gui-stock-yes-plain = 예
+gui-stock-no = 아니요(&N)
+gui-stock-no-plain = 아니요
+gui-stock-close = 닫기(&C)
+gui-stock-close-plain = 닫기
